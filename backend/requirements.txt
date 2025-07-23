@@ -50,3 +50,4 @@ python-multipart
 aiosqlite
 aiofiles
 redis
+openai==1.*

@@ -50,6 +50,13 @@ PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "your_phone_number_id")
 CATALOG_ID = os.getenv("CATALOG_ID", "CATALOGID")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", ACCESS_TOKEN)
 
+if ACCESS_TOKEN == "your_access_token_here":
+    print("\u26a0\ufe0f WHATSAPP_ACCESS_TOKEN not configured - API calls will fail")
+if PHONE_NUMBER_ID == "your_phone_number_id":
+    print(
+        "\u26a0\ufe0f WHATSAPP_PHONE_NUMBER_ID not configured - API calls will fail"
+    )
+
 print(f"🔧 Configuration loaded:")
 print(f"   VERIFY_TOKEN: {VERIFY_TOKEN}")
 print(f"   ACCESS_TOKEN: {ACCESS_TOKEN[:20]}..." if len(ACCESS_TOKEN) > 20 else f"   ACCESS_TOKEN: {ACCESS_TOKEN}")

@@ -87,3 +87,22 @@ npm run build
 
 The Dockerfile includes a dedicated Node build stage. When you run `docker build` the frontend dependencies are installed and `npm run build` is executed automatically. The resulting `frontend/build` directory is copied into the final Python image, so no manual build step is required.
 
+## WhatsApp API Credentials
+
+The backend relies on several environment variables for the WhatsApp Cloud API:
+
+* `WHATSAPP_ACCESS_TOKEN` – your Meta access token
+* `WHATSAPP_PHONE_NUMBER_ID` – the phone number ID from your Business account
+* `WHATSAPP_VERIFY_TOKEN` – token used when validating the webhook
+* `CATALOG_ID` – optional catalog ID for product messages
+
+If these variables are not set the application falls back to placeholder values
+(e.g. `your_phone_number_id`) which will cause message sending to fail. Configure
+them before starting the backend, for example:
+
+```bash
+export WHATSAPP_ACCESS_TOKEN=EAAG...
+export WHATSAPP_PHONE_NUMBER_ID=1234567890
+export WHATSAPP_VERIFY_TOKEN=my-secret-token
+```
+

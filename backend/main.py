@@ -28,6 +28,8 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 DB_PATH = os.getenv("DB_PATH", "data/whatsapp_messages.db")
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional PostgreSQL URL
 MEDIA_BUCKET = os.getenv("MEDIA_BUCKET")  # optional S3 bucket for media
+MEDIA_ENDPOINT = os.getenv("MEDIA_ENDPOINT")  # optional S3 endpoint URL
+MEDIA_URL_BASE = os.getenv("MEDIA_URL_BASE")  # optional base for public media URLs
 # Anything that **must not** be baked in the image (tokens, IDs …) is
 # already picked up with os.getenv() further below. Keep it that way.
 
@@ -740,7 +742,8 @@ class MessageProcessor:
                 optimistic_message["url"] = message_data["url"]
             elif message_text and not message_text.startswith("http"):
                 filename = Path(message_text).name
-                optimistic_message["url"] = f"{BASE_URL}/media/{filename}"
+                base = MEDIA_URL_BASE.rstrip("/") if MEDIA_URL_BASE else f"{BASE_URL}/media"
+                optimistic_message["url"] = f"{base}/{filename}"
             else:
                 optimistic_message["url"] = message_text
         
@@ -964,17 +967,20 @@ class MessageProcessor:
         elif msg_type == "image":
             image_path = await self._download_media(message["image"]["id"], "image")
             message_obj["message"] = image_path
-            message_obj["url"] = f"{BASE_URL}/media/{Path(image_path).name}"
+            base = MEDIA_URL_BASE.rstrip("/") if MEDIA_URL_BASE else f"{BASE_URL}/media"
+            message_obj["url"] = f"{base}/{Path(image_path).name}"
             message_obj["caption"] = message["image"].get("caption", "")
         elif msg_type == "audio":
             audio_path = await self._download_media(message["audio"]["id"], "audio")
             message_obj["message"] = audio_path
-            message_obj["url"] = f"{BASE_URL}/media/{Path(audio_path).name}"
+            base = MEDIA_URL_BASE.rstrip("/") if MEDIA_URL_BASE else f"{BASE_URL}/media"
+            message_obj["url"] = f"{base}/{Path(audio_path).name}"
             message_obj["transcription"] = ""
         elif msg_type == "video":
             video_path = await self._download_media(message["video"]["id"], "video")
             message_obj["message"] = video_path
-            message_obj["url"] = f"{BASE_URL}/media/{Path(video_path).name}"
+            base = MEDIA_URL_BASE.rstrip("/") if MEDIA_URL_BASE else f"{BASE_URL}/media"
+            message_obj["url"] = f"{base}/{Path(video_path).name}"
             message_obj["caption"] = message["video"].get("caption", "")
         elif msg_type == "order":
             message_obj["message"] = json.dumps(message.get("order", {}))
@@ -1011,7 +1017,10 @@ class MessageProcessor:
                 await f.write(media_content)
 
             if MEDIA_BUCKET:
-                s3 = boto3.client('s3')
+                s3_kwargs = {}
+                if MEDIA_ENDPOINT:
+                    s3_kwargs["endpoint_url"] = MEDIA_ENDPOINT
+                s3 = boto3.client('s3', **s3_kwargs)
                 await asyncio.get_event_loop().run_in_executor(
                     None, lambda: s3.upload_file(str(file_path), MEDIA_BUCKET, filename)
                 )
@@ -1425,13 +1434,23 @@ async def send_media(
 
             # ---------- build metadata ----------
             if MEDIA_BUCKET:
-                s3 = boto3.client('s3')
+                s3_kwargs = {}
+                if MEDIA_ENDPOINT:
+                    s3_kwargs["endpoint_url"] = MEDIA_ENDPOINT
+                s3 = boto3.client('s3', **s3_kwargs)
                 await asyncio.get_event_loop().run_in_executor(
                     None, lambda: s3.upload_file(str(file_path), MEDIA_BUCKET, filename)
                 )
-                media_url = f"https://{MEDIA_BUCKET}.s3.amazonaws.com/{filename}"
+                if MEDIA_URL_BASE:
+                    base = MEDIA_URL_BASE.rstrip('/')
+                    media_url = f"{base}/{filename}"
+                else:
+                    media_url = f"https://{MEDIA_BUCKET}.s3.amazonaws.com/{filename}"
             else:
-                media_url = f"{BASE_URL}/media/{filename}"
+                if MEDIA_URL_BASE:
+                    media_url = f"{MEDIA_URL_BASE.rstrip('/')}/{filename}"
+                else:
+                    media_url = f"{BASE_URL}/media/{filename}"
 
             message_data = {
                 "user_id": user_id,

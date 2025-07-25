@@ -50,8 +50,16 @@ to a valid connection string. When this variable is present the backend will use
 `asyncpg` to communicate with PostgreSQL.
 
 Uploaded media files can be stored in an S3 bucket by setting the `MEDIA_BUCKET`
-variable to your bucket name. If configured, uploaded media will be copied to
-the bucket and served from its public URL.
+variable to your bucket name. Optional variables allow customizing the
+connection and public URLs:
+
+* `MEDIA_ENDPOINT` - custom endpoint passed to `boto3.client`
+* `MEDIA_URL_BASE` - base URL used when constructing links to uploaded media
+
+AWS credentials must be available for the upload (for example via
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or an IAM role). If configured,
+uploaded media will be copied to the bucket and served from the URL derived from
+`MEDIA_URL_BASE` or the default S3 domain.
 
 When deploying to providers with ephemeral filesystems, point the `DB_PATH`
 environment variable at a location backed by a persistent volume so that chat

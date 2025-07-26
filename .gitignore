@@ -19,3 +19,7 @@ backend/media/
 backend/catalog_cache.json
 catalog_cache.json
 pristine-lodge-383303-cde3fcdc0a72.json
+
+# Offline packages
+wheelhouse/*
+!wheelhouse/README.md

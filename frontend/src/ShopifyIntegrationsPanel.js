@@ -82,6 +82,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
   const [loading, setLoading] = useState(false);
   const [orders, setOrders] = useState([]);
   const [newOrderTag, setNewOrderTag] = useState("");
+  const [newOrderNote, setNewOrderNote] = useState("");
   const ordersCooldownRef = useRef(0);
   const fetchOrdersWithCooldown = async (customerId) => {
     if (!customerId) return;
@@ -1039,6 +1040,49 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                               } catch {}
                             }}
                           >Add</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Latest Order Notes */}
+                    {orders.length > 0 && (
+                      <div className="mt-3">
+                        <div className="font-semibold mb-1">Latest Order Notes</div>
+                        {orders[0].note ? (
+                          <div className="text-xs bg-gray-900 border border-gray-700 rounded p-2 whitespace-pre-wrap max-h-40 overflow-auto">
+                            {orders[0].note}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-gray-400">No notes yet.</div>
+                        )}
+                        <div className="mt-2 flex gap-2">
+                          <textarea
+                            className="flex-1 p-2 rounded bg-gray-800 text-white text-xs h-16"
+                            placeholder="Add a note"
+                            value={newOrderNote}
+                            onChange={e => setNewOrderNote(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="px-2 py-1 bg-blue-600 rounded text-white text-xs h-8 self-end"
+                            onClick={async () => {
+                              const value = (newOrderNote || "").trim();
+                              if (!value || orders.length === 0) return;
+                              try {
+                                const latest = orders[0];
+                                const res = await api.post(`${API_BASE}/shopify-orders/${latest.id}/note`, { note: value });
+                                const finalNote = res?.data?.note || value;
+                                setOrders(prev => {
+                                  const next = Array.isArray(prev) ? [...prev] : [];
+                                  if (next.length > 0) {
+                                    next[0] = { ...next[0], note: finalNote };
+                                  }
+                                  return next;
+                                });
+                                setNewOrderNote("");
+                              } catch {}
+                            }}
+                          >Add Note</button>
                         </div>
                       </div>
                     )}

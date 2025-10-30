@@ -419,6 +419,7 @@ async def shopify_orders(customer_id: str, limit: int = 50):
                 "currency": o.get("currency"),
                 "admin_url": f"https://{domain}/admin/orders/{o.get('id')}",
                 "tags": tags_arr,
+                "note": o.get("note") or "",
             })
         return simplified
 
@@ -458,6 +459,41 @@ async def add_order_tag(order_id: str, body: dict = Body(...)):
         tags_str = updated_order.get("tags") or ", ".join(current_tags)
         tags_arr = [t.strip() for t in str(tags_str).split(",") if t and t.strip()]
         return {"ok": True, "order_id": updated_order.get("id") or order_id, "tags": tags_arr}
+
+@router.post("/shopify-orders/{order_id}/note")
+async def add_order_note(order_id: str, body: dict = Body(...)):
+    """Append a note to a Shopify order. Requires write_orders scope.
+
+    Body: { "note": "..." }
+    Appends to existing note with a newline.
+    Returns: { ok: true, order_id, note: "..." }
+    """
+    new_note_fragment = (body or {}).get("note")
+    new_note_fragment = (new_note_fragment or "").strip()
+    if not new_note_fragment:
+        raise HTTPException(status_code=400, detail="Missing note")
+
+    base = admin_api_base()
+    async with httpx.AsyncClient() as client:
+        # Fetch current order to read existing note
+        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **_client_args())
+        if get_resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if get_resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks read_orders scope or app not installed.")
+        get_resp.raise_for_status()
+        order_obj = (get_resp.json() or {}).get("order") or {}
+        current_note = (order_obj.get("note") or "").strip()
+        combined_note = new_note_fragment if not current_note else f"{current_note}\n{new_note_fragment}"
+
+        update_payload = {"order": {"id": int(str(order_id)), "note": combined_note}}
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        if put_resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
+        put_resp.raise_for_status()
+        updated_order = (put_resp.json() or {}).get("order") or {}
+        final_note = (updated_order.get("note") or combined_note)
+        return {"ok": True, "order_id": updated_order.get("id") or order_id, "note": final_note}
 
 @router.get("/shopify-shipping-options")
 async def get_shipping_options():

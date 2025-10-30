@@ -195,6 +195,13 @@ META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", ACCESS_TOKEN)
 META_APP_ID = os.getenv("META_APP_ID", "") or os.getenv("FB_APP_ID", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "") or os.getenv("FB_APP_SECRET", "")
 
+# When set, only process webhooks for this phone number id.
+# Defaults to WHATSAPP_PHONE_NUMBER_ID if that env is set and not the placeholder value.
+ALLOWED_PHONE_NUMBER_ID = (
+    os.getenv("ALLOWED_PHONE_NUMBER_ID", "").strip()
+    or (PHONE_NUMBER_ID if PHONE_NUMBER_ID and PHONE_NUMBER_ID != "your_phone_number_id" else "")
+)
+
 # Sync CATALOG_ID into compatibility shim, if present
 try:
     if config is not None:
@@ -3049,15 +3056,14 @@ class MessageProcessor:
             try:
                 meta = value.get("metadata") or {}
                 incoming_phone_id = str(meta.get("phone_number_id") or "")
-                configured_phone_id = str(PHONE_NUMBER_ID or "")
+                allowed_phone_id = str(ALLOWED_PHONE_NUMBER_ID or "")
                 if (
-                    incoming_phone_id
-                    and configured_phone_id
-                    and configured_phone_id != "your_phone_number_id"
-                    and incoming_phone_id != configured_phone_id
+                    allowed_phone_id
+                    and incoming_phone_id
+                    and incoming_phone_id != allowed_phone_id
                 ):
                     _vlog(
-                        f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (configured {configured_phone_id})"
+                        f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (allowed {allowed_phone_id})"
                     )
                     return
             except Exception:
@@ -4289,6 +4295,21 @@ async def webhook(request: Request):
             return PlainTextResponse("Bad Request", status_code=400)
         _vlog("📥 Incoming Webhook Payload:")
         _vlog(json.dumps(data, indent=2))
+
+        # Early drop if the phone_number_id does not match the allowed one
+        try:
+            value = data.get('entry', [{}])[0].get('changes', [{}])[0].get('value', {})
+            meta = value.get("metadata") or {}
+            incoming_phone_id = str(meta.get("phone_number_id") or "")
+            allowed_phone_id = str(ALLOWED_PHONE_NUMBER_ID or "")
+            if allowed_phone_id and incoming_phone_id and incoming_phone_id != allowed_phone_id:
+                _vlog(
+                    f"⏭️ Webhook ignored at ingress for phone_number_id {incoming_phone_id} (allowed {allowed_phone_id})"
+                )
+                return {"ok": True}
+        except Exception:
+            # Non-fatal: fall through to normal processing
+            pass
 
         await message_processor.process_incoming_message(data)
         return {"ok": True}

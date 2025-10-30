@@ -406,6 +406,9 @@ async def shopify_orders(customer_id: str, limit: int = 50):
         domain = admin_api_base().replace("https://", "").replace("http://", "").split("/admin/api", 1)[0]
         simplified = []
         for o in orders:
+            # Shopify REST Admin API returns order.tags as a comma-separated string; expose as an array
+            tags_str = o.get("tags") or ""
+            tags_arr = [t.strip() for t in str(tags_str).split(",") if t and t.strip()]
             simplified.append({
                 "id": o.get("id"),
                 "order_number": o.get("name"),
@@ -415,8 +418,46 @@ async def shopify_orders(customer_id: str, limit: int = 50):
                 "total_price": o.get("total_price"),
                 "currency": o.get("currency"),
                 "admin_url": f"https://{domain}/admin/orders/{o.get('id')}",
+                "tags": tags_arr,
             })
         return simplified
+
+@router.post("/shopify-orders/{order_id}/tags")
+async def add_order_tag(order_id: str, body: dict = Body(...)):
+    """Add a tag to a Shopify order. Requires write_orders scope.
+
+    Body: { "tag": "..." }
+    Returns: { ok: true, order_id, tags: [..] }
+    """
+    tag = (body or {}).get("tag")
+    tag = (tag or "").strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="Missing tag")
+
+    base = admin_api_base()
+    async with httpx.AsyncClient() as client:
+        # Fetch current tags first to avoid overwriting
+        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **_client_args())
+        if get_resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if get_resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks read_orders scope or app not installed.")
+        get_resp.raise_for_status()
+        order_obj = (get_resp.json() or {}).get("order") or {}
+        current_tags_str = order_obj.get("tags") or ""
+        current_tags = [t.strip() for t in str(current_tags_str).split(",") if t and t.strip()]
+        if tag not in current_tags:
+            current_tags.append(tag)
+
+        update_payload = {"order": {"id": int(str(order_id)), "tags": ", ".join(current_tags)}}
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        if put_resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
+        put_resp.raise_for_status()
+        updated_order = (put_resp.json() or {}).get("order") or {}
+        tags_str = updated_order.get("tags") or ", ".join(current_tags)
+        tags_arr = [t.strip() for t in str(tags_str).split(",") if t and t.strip()]
+        return {"ok": True, "order_id": updated_order.get("id") or order_id, "tags": tags_arr}
 
 @router.get("/shopify-shipping-options")
 async def get_shipping_options():

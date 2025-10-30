@@ -81,6 +81,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
   const [selectedAddressIdx, setSelectedAddressIdx] = useState(0);
   const [loading, setLoading] = useState(false);
   const [orders, setOrders] = useState([]);
+  const [newOrderTag, setNewOrderTag] = useState("");
   const ordersCooldownRef = useRef(0);
   const fetchOrdersWithCooldown = async (customerId) => {
     if (!customerId) return;
@@ -973,7 +974,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                 {Array.isArray(orders) && orders.length > 0 && (
                   <div className="mt-2">
                     <div className="font-semibold mb-1">Orders</div>
-                    <ul className="space-y-1 max-h-40 overflow-auto pr-1">
+                    <ul className="space-y-1 max-h-80 overflow-auto pr-1">
                       {orders.map((o) => (
                         <li key={o.id} className="text-sm flex justify-between gap-2 border-b border-gray-600 py-1">
                           <div className="min-w-0">
@@ -996,6 +997,51 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                         </li>
                       ))}
                     </ul>
+                    {/* Latest Order Tags */}
+                    {orders.length > 0 && (
+                      <div className="mt-2">
+                        <div className="font-semibold mb-1">Latest Order Tags</div>
+                        <div className="flex flex-wrap gap-1 mb-2">
+                          {Array.isArray(orders[0].tags) && orders[0].tags.length > 0 ? (
+                            orders[0].tags.map((t, i) => (
+                              <span key={`${t}-${i}`} className="text-xs bg-gray-600 text-white px-2 py-0.5 rounded-full">{t}</span>
+                            ))
+                          ) : (
+                            <span className="text-xs text-gray-400">No tags yet.</span>
+                          )}
+                        </div>
+                        <div className="flex gap-2">
+                          <input
+                            className="flex-1 p-1 rounded bg-gray-800 text-white text-xs"
+                            placeholder="Add a tag"
+                            value={newOrderTag}
+                            onChange={e => setNewOrderTag(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="px-2 py-1 bg-blue-600 rounded text-white text-xs"
+                            onClick={async () => {
+                              const value = (newOrderTag || "").trim();
+                              if (!value || orders.length === 0) return;
+                              try {
+                                const latest = orders[0];
+                                await api.post(`${API_BASE}/shopify-orders/${latest.id}/tags`, { tag: value });
+                                setOrders(prev => {
+                                  const next = Array.isArray(prev) ? [...prev] : [];
+                                  if (next.length > 0) {
+                                    const tags = Array.isArray(next[0].tags) ? [...next[0].tags] : [];
+                                    if (!tags.includes(value)) tags.push(value);
+                                    next[0] = { ...next[0], tags };
+                                  }
+                                  return next;
+                                });
+                                setNewOrderTag("");
+                              } catch {}
+                            }}
+                          >Add</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
                 {/* Copy address to clipboard for quick reply */}

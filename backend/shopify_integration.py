@@ -460,6 +460,41 @@ async def add_order_tag(order_id: str, body: dict = Body(...)):
         tags_arr = [t.strip() for t in str(tags_str).split(",") if t and t.strip()]
         return {"ok": True, "order_id": updated_order.get("id") or order_id, "tags": tags_arr}
 
+@router.delete("/shopify-orders/{order_id}/tags")
+async def remove_order_tag(order_id: str, body: dict = Body(...)):
+    """Remove a tag from a Shopify order. Requires write_orders scope.
+
+    Body: { "tag": "..." }
+    Returns: { ok: true, order_id, tags: [..] }
+    """
+    tag = (body or {}).get("tag")
+    tag = (tag or "").strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="Missing tag")
+
+    base = admin_api_base()
+    async with httpx.AsyncClient() as client:
+        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **_client_args())
+        if get_resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if get_resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks read_orders scope or app not installed.")
+        get_resp.raise_for_status()
+        order_obj = (get_resp.json() or {}).get("order") or {}
+        current_tags_str = order_obj.get("tags") or ""
+        current_tags = [t.strip() for t in str(current_tags_str).split(",") if t and t.strip()]
+        next_tags = [t for t in current_tags if t.lower() != tag.lower()]
+
+        update_payload = {"order": {"id": int(str(order_id)), "tags": ", ".join(next_tags)}}
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        if put_resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
+        put_resp.raise_for_status()
+        updated_order = (put_resp.json() or {}).get("order") or {}
+        tags_str = updated_order.get("tags") or ", ".join(next_tags)
+        tags_arr = [t.strip() for t in str(tags_str).split(",") if t and t.strip()]
+        return {"ok": True, "order_id": updated_order.get("id") or order_id, "tags": tags_arr}
+
 @router.post("/shopify-orders/{order_id}/note")
 async def add_order_note(order_id: str, body: dict = Body(...)):
     """Append a note to a Shopify order. Requires write_orders scope.
@@ -494,6 +529,24 @@ async def add_order_note(order_id: str, body: dict = Body(...)):
         updated_order = (put_resp.json() or {}).get("order") or {}
         final_note = (updated_order.get("note") or combined_note)
         return {"ok": True, "order_id": updated_order.get("id") or order_id, "note": final_note}
+
+@router.delete("/shopify-orders/{order_id}/note")
+async def delete_order_note(order_id: str):
+    """Clear the note on a Shopify order (set to empty). Requires write_orders scope.
+
+    Returns: { ok: true, order_id, note: "" }
+    """
+    base = admin_api_base()
+    async with httpx.AsyncClient() as client:
+        update_payload = {"order": {"id": int(str(order_id)), "note": ""}}
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        if put_resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
+        if put_resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Order not found")
+        put_resp.raise_for_status()
+        updated_order = (put_resp.json() or {}).get("order") or {}
+        return {"ok": True, "order_id": updated_order.get("id") or order_id, "note": ""}
 
 @router.get("/shopify-shipping-options")
 async def get_shipping_options():

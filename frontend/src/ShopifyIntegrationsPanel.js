@@ -1005,7 +1005,28 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                         <div className="flex flex-wrap gap-1 mb-2">
                           {Array.isArray(orders[0].tags) && orders[0].tags.length > 0 ? (
                             orders[0].tags.map((t, i) => (
-                              <span key={`${t}-${i}`} className="text-xs bg-gray-600 text-white px-2 py-0.5 rounded-full">{t}</span>
+                              <span key={`${t}-${i}`} className="text-xs bg-gray-600 text-white rounded-full inline-flex items-center">
+                                <span className="px-2 py-0.5">{t}</span>
+                                <button
+                                  type="button"
+                                  className="px-1 py-0.5 text-white hover:bg-gray-700 rounded-r"
+                                  aria-label={`Remove tag ${t}`}
+                                  onClick={async () => {
+                                    try {
+                                      const latest = orders[0];
+                                      await api.delete(`${API_BASE}/shopify-orders/${latest.id}/tags`, { data: { tag: t } });
+                                      setOrders(prev => {
+                                        const next = Array.isArray(prev) ? [...prev] : [];
+                                        if (next.length > 0) {
+                                          const tags = (Array.isArray(next[0].tags) ? next[0].tags : []).filter(x => x !== t);
+                                          next[0] = { ...next[0], tags };
+                                        }
+                                        return next;
+                                      });
+                                    } catch {}
+                                  }}
+                                >×</button>
+                              </span>
                             ))
                           ) : (
                             <span className="text-xs text-gray-400">No tags yet.</span>
@@ -1055,7 +1076,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                         ) : (
                           <div className="text-xs text-gray-400">No notes yet.</div>
                         )}
-                        <div className="mt-2 flex gap-2">
+                        <div className="mt-2 flex gap-2 items-end">
                           <textarea
                             className="flex-1 p-2 rounded bg-gray-800 text-white text-xs h-16"
                             placeholder="Add a note"
@@ -1083,6 +1104,21 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                               } catch {}
                             }}
                           >Add Note</button>
+                          <button
+                            type="button"
+                            className="px-2 py-1 bg-gray-600 hover:bg-gray-700 rounded text-white text-xs h-8"
+                            onClick={async () => {
+                              try {
+                                const latest = orders[0];
+                                await api.delete(`${API_BASE}/shopify-orders/${latest.id}/note`);
+                                setOrders(prev => {
+                                  const next = Array.isArray(prev) ? [...prev] : [];
+                                  if (next.length > 0) next[0] = { ...next[0], note: "" };
+                                  return next;
+                                });
+                              } catch {}
+                            }}
+                          >Clear Note</button>
                         </div>
                       </div>
                     )}

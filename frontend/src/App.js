@@ -201,9 +201,10 @@ export default function App() {
     }
   };
 
-  // Load conversations/products after auth is ready (or on login page)
+  // Load conversations/products after auth is ready
   useEffect(() => {
-    if (!authReady && !isLoginPath) return;
+    if (!authReady) return;
+    if (isLoginPath) return;
     loadConversations().then(cached => {
       if (cached.length > 0) {
         setConversations(cached);
@@ -264,6 +265,11 @@ export default function App() {
 
   // Validate session with backend and hydrate admin flag
   useEffect(() => {
+    if (isLoginPath) {
+      // Don't hit /auth/me from the login page (prevents 401 loops/flicker)
+      setAuthReady(true);
+      return;
+    }
     (async () => {
       try {
         const res = await api.get('/auth/me');
@@ -290,6 +296,8 @@ export default function App() {
 
   // Open a persistent WebSocket for admin notifications (with reconnection)
   useEffect(() => {
+    if (!authReady) return;
+    if (isLoginPath) return;
     let retry = 0;
     let timer = null;
     const wsBase =
@@ -388,7 +396,7 @@ export default function App() {
       if (adminWsRef.current) try { adminWsRef.current.close(); } catch {}
       setAdminWsConnected(false);
     };
-  }, []);
+  }, [authReady, isLoginPath]);
 
   // --- Setup WebSocket for messages (with reconnection) ---
   useEffect(() => {

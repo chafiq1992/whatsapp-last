@@ -287,6 +287,17 @@ def _is_public_path(path: str) -> bool:
     # Static + media
     if path.startswith("/static/") or path.startswith("/media/"):
         return True
+    # PWA assets served at root by CRA build
+    if path in (
+        "/sw.js",
+        "/manifest.json",
+        "/asset-manifest.json",
+        "/robots.txt",
+        "/logo192.png",
+        "/logo512.png",
+        "/broken-image.png",
+    ):
+        return True
     # Frontend entry points
     if path in ("/", "/login", "/favicon.ico"):
         return True
@@ -5164,6 +5175,82 @@ async def favicon():
         fav = ROOT_DIR / "frontend" / "build" / "favicon.ico"
         if fav.exists():
             return FileResponse(str(fav))
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+# PWA assets at the root (CRA build expects these URLs)
+@app.get("/sw.js")
+async def service_worker():
+    try:
+        p = ROOT_DIR / "frontend" / "build" / "sw.js"
+        if p.exists():
+            return FileResponse(str(p))
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+@app.get("/manifest.json")
+async def manifest():
+    try:
+        p = ROOT_DIR / "frontend" / "build" / "manifest.json"
+        if p.exists():
+            return FileResponse(str(p))
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+@app.get("/asset-manifest.json")
+async def asset_manifest():
+    try:
+        p = ROOT_DIR / "frontend" / "build" / "asset-manifest.json"
+        if p.exists():
+            return FileResponse(str(p))
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+@app.get("/robots.txt")
+async def robots():
+    try:
+        p = ROOT_DIR / "frontend" / "build" / "robots.txt"
+        if p.exists():
+            return FileResponse(str(p))
+        return PlainTextResponse("User-agent: *\nDisallow:", media_type="text/plain")
+    except Exception:
+        return PlainTextResponse("User-agent: *\nDisallow:", media_type="text/plain")
+
+@app.get("/logo192.png")
+async def logo192():
+    try:
+        p = ROOT_DIR / "frontend" / "build" / "logo192.png"
+        if p.exists():
+            return FileResponse(str(p))
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+@app.get("/logo512.png")
+async def logo512():
+    try:
+        p = ROOT_DIR / "frontend" / "build" / "logo512.png"
+        if p.exists():
+            return FileResponse(str(p))
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+@app.get("/broken-image.png")
+async def broken_image():
+    try:
+        # CRA build often includes this helper image in the public root.
+        p = ROOT_DIR / "frontend" / "build" / "broken-image.png"
+        if p.exists():
+            return FileResponse(str(p))
+        # fallback to public/ for dev (if build not present)
+        p2 = ROOT_DIR / "frontend" / "public" / "broken-image.png"
+        if p2.exists():
+            return FileResponse(str(p2))
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     except Exception:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})

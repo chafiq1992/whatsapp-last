@@ -274,7 +274,14 @@ export default function App() {
         try { localStorage.setItem('agent_is_admin', a ? '1' : '0'); } catch {}
         setAuthReady(true);
       } catch (e) {
-        // Auth disabled or not logged in – proceed without redirect
+        // Not logged in → go to login screen
+        try {
+          const status = e?.response?.status;
+          if (status === 401) {
+            window.location.replace('/login');
+            return;
+          }
+        } catch {}
         setAuthReady(true);
       }
     })();

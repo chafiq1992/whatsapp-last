@@ -1,5 +1,13 @@
 import asyncio
+import os
 import pytest
+
+# Tests focus on business logic, not authentication; keep auth disabled here.
+os.environ.setdefault("DISABLE_AUTH", "1")
+# Ensure tests always use SQLite (some environments may export DATABASE_URL).
+os.environ.pop("DATABASE_URL", None)
+os.environ.setdefault("REQUIRE_POSTGRES", "0")
+
 from backend import main
 from .utils import bulk_insert_messages
 

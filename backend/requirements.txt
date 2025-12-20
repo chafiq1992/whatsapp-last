@@ -56,3 +56,7 @@ prometheus-fastapi-instrumentator
 fastapi-limiter
 uvloop; sys_platform != "win32"
 orjson
+python-jose==3.3.0
+passlib==1.7.4
+argon2-cffi==23.1.0
+bcrypt==4.2.1

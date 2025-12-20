@@ -7,7 +7,7 @@ export default function InternalChannelsBar({ channels = [], onSelectChannel, on
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get('/admin/agents');
+        const res = await api.get('/agents');
         setAgents(res.data || []);
       } catch {}
     })();

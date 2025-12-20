@@ -11,7 +11,7 @@ export default function ForwardDialog({ open, onClose, onSelect }) {
   useEffect(() => {
     if (!open) return;
     (async () => {
-      try { const res = await api.get('/admin/agents'); setAgents(res.data || []); } catch {}
+      try { const res = await api.get('/agents'); setAgents(res.data || []); } catch {}
     })();
   }, [open]);
 

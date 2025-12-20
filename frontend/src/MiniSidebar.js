@@ -24,7 +24,7 @@ export default function MiniSidebar({
 	useEffect(() => {
 		(async () => {
 			try {
-				const res = await api.get('/admin/agents');
+				const res = await api.get('/agents');
 				setAgents(res.data || []);
 			} catch {}
 		})();

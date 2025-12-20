@@ -13,7 +13,8 @@ from google.oauth2 import service_account
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 GCS_CREDENTIALS_FILE = os.getenv("GCS_CREDENTIALS_FILE")
 GCS_CREDENTIALS_JSON = os.getenv("GCS_CREDENTIALS_JSON")
-GCS_PUBLIC_UPLOADS = os.getenv("GCS_PUBLIC_UPLOADS", "0") == "1"
+# Backward-compatible default: uploads are public unless explicitly disabled.
+GCS_PUBLIC_UPLOADS = os.getenv("GCS_PUBLIC_UPLOADS", "1") == "1"
 
 
 def _get_client():

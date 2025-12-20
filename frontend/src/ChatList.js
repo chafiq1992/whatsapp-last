@@ -144,7 +144,7 @@ function ChatList({
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get('/admin/agents');
+        const res = await api.get('/agents');
         setAgents(res.data || []);
       } catch (e) {
         // ignore
@@ -160,7 +160,7 @@ function ChatList({
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get('/admin/tag-options');
+        const res = await api.get('/tag-options');
         if (Array.isArray(res.data)) setTagOptions(res.data);
       } catch (e) {
         // ignore

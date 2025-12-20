@@ -17,7 +17,7 @@ import aiosqlite
 import aiofiles
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, UploadFile, File, Form, HTTPException, Body, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Response, UploadFile, File, Form, HTTPException, Body, Depends
 from starlette.requests import Request as _LimiterRequest
 from starlette.responses import Response as _LimiterResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +32,8 @@ from dotenv import load_dotenv
 import subprocess
 import asyncpg
 import mimetypes
+from jose import jwt, JWTError
+from passlib.context import CryptContext
 from .google_cloud_storage import upload_file_to_gcs, download_file_from_gcs, maybe_signed_url_for, _parse_gcs_url, _get_client
 from prometheus_fastapi_instrumentator import Instrumentator
 from fastapi_limiter import FastAPILimiter
@@ -141,50 +143,163 @@ except Exception:
     # If anything goes wrong, keep default print behavior
     pass
 
-# ── simple password hashing helpers ───────────────────────────────
-def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt), 100_000)
-    return f"{salt}${dk.hex()}"
+# ── Authentication helpers (modern) ────────────────────────────────
+#
+# Password hashing:
+# - New passwords use Argon2 (passlib).
+# - Existing deployments may still have legacy `salt$hexhash` PBKDF2 hashes; we verify those too.
+#
+# Tokens:
+# - Access tokens are JWT (HS256) with short TTL.
+# - Refresh tokens are random secrets stored hashed in DB and sent as HttpOnly cookies.
+#
+AGENT_AUTH_SECRET = os.getenv("AGENT_AUTH_SECRET", "") or os.getenv("SECRET_KEY", "")
 
-def verify_password(password: str, stored: str) -> bool:
+ACCESS_TOKEN_TTL_SECONDS = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "900"))  # 15 min
+REFRESH_TOKEN_TTL_SECONDS = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(30 * 24 * 3600)))  # 30 days
+AUTH_COOKIE_DOMAIN = (os.getenv("AUTH_COOKIE_DOMAIN", "") or "").strip() or None
+AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "").strip()  # "", "0", "1" (auto if empty)
+ACCESS_COOKIE_NAME = "agent_access"
+REFRESH_COOKIE_NAME = "agent_refresh"
+JWT_ISSUER = os.getenv("JWT_ISSUER", "whatsapp-inbox")
+
+pwd_context = CryptContext(
+    schemes=["argon2", "bcrypt"],
+    default="argon2",
+    deprecated="auto",
+)
+
+def _legacy_pbkdf2_verify(password: str, stored: str) -> bool:
     try:
-        salt, h = stored.split('$', 1)
-        dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt), 100_000)
+        salt, h = stored.split("$", 1)
+        if not salt or not h:
+            return False
+        # legacy format: "<hexsalt>$<hexhash>"
+        if not re.fullmatch(r"[0-9a-fA-F]{16,}", salt):
+            return False
+        if not re.fullmatch(r"[0-9a-fA-F]{32,}", h):
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
         return h.lower() == dk.hex().lower()
     except Exception:
         return False
-# ── Agent auth token (stateless, HMAC‑signed) ─────────────────────
-AGENT_AUTH_SECRET = os.getenv("AGENT_AUTH_SECRET", "") or os.getenv("SECRET_KEY", "")
-_AGENT_AUTH_SECRET_BYTES = AGENT_AUTH_SECRET.encode("utf-8")
 
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
 
-def _b64url_decode(data_str: str) -> bytes:
-    padding = "=" * (-len(data_str) % 4)
-    return base64.urlsafe_b64decode((data_str + padding).encode())
-
-def issue_agent_token(username: str, is_admin: bool, ttl_seconds: int = 30 * 24 * 3600) -> str:
-    payload = {"u": username, "a": 1 if is_admin else 0, "exp": int(time.time()) + int(ttl_seconds)}
-    body = _b64url_encode(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode())
-    sig = hmac.new(_AGENT_AUTH_SECRET_BYTES, body.encode(), hashlib.sha256).digest()
-    return f"{body}.{_b64url_encode(sig)}"
-
-def parse_agent_token(token: str) -> Optional[dict]:
+def verify_password(password: str, stored: str) -> bool:
     try:
-        if not token or "." not in token or not _AGENT_AUTH_SECRET_BYTES:
+        if not stored:
+            return False
+        # passlib formats (argon2/bcrypt)
+        if stored.startswith("$"):
+            return pwd_context.verify(password, stored)
+        # legacy pbkdf2
+        return _legacy_pbkdf2_verify(password, stored)
+    except Exception:
+        return False
+
+def _jwt_secret() -> str:
+    # Keep a hard requirement in production, but don't crash tests/dev when DISABLE_AUTH is on.
+    if not AGENT_AUTH_SECRET and not DISABLE_AUTH:
+        # Still allow the app to boot, but login won't work safely without a secret.
+        logging.getLogger(__name__).warning("AGENT_AUTH_SECRET is empty; set it for secure authentication.")
+    return AGENT_AUTH_SECRET or "dev-unsafe-secret"
+
+def issue_access_token(username: str, is_admin: bool) -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": username,
+        "is_admin": bool(is_admin),
+        "iss": JWT_ISSUER,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(seconds=ACCESS_TOKEN_TTL_SECONDS)).timestamp()),
+    }
+    return jwt.encode(payload, _jwt_secret(), algorithm="HS256")
+
+def parse_access_token(token: str) -> Optional[dict]:
+    try:
+        if not token:
             return None
-        body, sig = token.split(".", 1)
-        expected = _b64url_encode(hmac.new(_AGENT_AUTH_SECRET_BYTES, body.encode(), hashlib.sha256).digest())
-        if not hmac.compare_digest(sig, expected):
+        payload = jwt.decode(
+            token,
+            _jwt_secret(),
+            algorithms=["HS256"],
+            options={"require_sub": True, "require_exp": True},
+            issuer=JWT_ISSUER,
+        )
+        username = str(payload.get("sub") or "").strip()
+        if not username:
             return None
-        payload = json.loads(_b64url_decode(body).decode("utf-8"))
-        if int(payload.get("exp", 0)) < int(time.time()):
-            return None
-        return {"username": str(payload.get("u") or ""), "is_admin": bool(payload.get("a"))}
+        return {"username": username, "is_admin": bool(payload.get("is_admin"))}
+    except JWTError:
+        return None
     except Exception:
         return None
+
+def _hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def _cookie_secure_flag(request: Request) -> bool:
+    # If AUTH_COOKIE_SECURE is set explicitly, honor it.
+    if AUTH_COOKIE_SECURE in ("0", "false", "False"):
+        return False
+    if AUTH_COOKIE_SECURE in ("1", "true", "True"):
+        return True
+    try:
+        return (request.url.scheme or "").lower() == "https"
+    except Exception:
+        return False
+
+def _extract_access_token_from_request(request: Request) -> Optional[str]:
+    try:
+        auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+        if auth_header:
+            parts = auth_header.split()
+            if len(parts) >= 2 and parts[0].lower() == "bearer":
+                return parts[1].strip()
+    except Exception:
+        pass
+    try:
+        token = request.cookies.get(ACCESS_COOKIE_NAME)
+        if token:
+            return token
+    except Exception:
+        pass
+    return None
+
+async def get_current_agent(request: Request) -> dict:
+    """Return the authenticated agent (username/is_admin) or raise 401."""
+    if DISABLE_AUTH:
+        return {"username": "admin", "is_admin": True}
+    token = _extract_access_token_from_request(request)
+    parsed = parse_access_token(token or "")
+    if not parsed or not parsed.get("username"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"username": parsed["username"], "is_admin": bool(parsed.get("is_admin"))}
+
+async def require_admin(agent: dict = Depends(get_current_agent)) -> dict:
+    if not agent.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin required")
+    return agent
+
+def _is_public_path(path: str) -> bool:
+    # Static + media
+    if path.startswith("/static/") or path.startswith("/media/"):
+        return True
+    # Frontend entry points
+    if path in ("/", "/login", "/favicon.ico"):
+        return True
+    # Health/version
+    if path in ("/health", "/version"):
+        return True
+    # Auth endpoints (login/refresh/logout are public; /auth/me is protected)
+    if path in ("/auth/login", "/auth/refresh", "/auth/logout"):
+        return True
+    # Webhook endpoints must remain public for Meta
+    if path.startswith("/webhook"):
+        return True
+    return False
 # Get environment variables
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "chafiq")
 ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "your_access_token_here")
@@ -1170,6 +1285,19 @@ class DatabaseManager:
                     created_at    TEXT DEFAULT CURRENT_TIMESTAMP
                 );
 
+                -- Refresh tokens for agents (hashed token stored server-side)
+                CREATE TABLE IF NOT EXISTS agent_refresh_tokens (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_hash    TEXT UNIQUE NOT NULL,
+                    agent_username TEXT NOT NULL REFERENCES agents(username),
+                    expires_at    TEXT NOT NULL,
+                    revoked_at    TEXT,
+                    created_at    TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_refresh_agent_time
+                    ON agent_refresh_tokens (agent_username, datetime(created_at));
+
                 -- Optional metadata per customer conversation
                 CREATE TABLE IF NOT EXISTS conversation_meta (
                     user_id        TEXT PRIMARY KEY,
@@ -1205,8 +1333,6 @@ class DatabaseManager:
                 -- Idempotency: ensure per-chat uniqueness for wa_message_id and temp_id
                 CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa
                     ON messages (user_id, wa_message_id);
-                CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_temp
-                    ON messages (user_id, temp_id);
 
                 -- Orders table used to track payout status
                 CREATE TABLE IF NOT EXISTS orders (
@@ -1337,6 +1463,16 @@ class DatabaseManager:
                 row = await cur.fetchone()
             return row[0] if row else None
 
+    async def set_agent_password_hash(self, username: str, password_hash: str):
+        async with self._conn() as db:
+            query = self._convert("UPDATE agents SET password_hash = ? WHERE username = ?")
+            params = (password_hash, username)
+            if self.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+
     async def get_agent_is_admin(self, username: str) -> int:
         """Return 1 if agent is admin, else 0."""
         async with self._conn() as db:
@@ -1349,6 +1485,59 @@ class DatabaseManager:
                 cur = await db.execute(query, params)
                 row = await cur.fetchone()
                 return int(row[0]) if row else 0
+
+    # ── Refresh token storage ──────────────────────────────────────
+    async def store_refresh_token(self, token_hash: str, agent_username: str, expires_at_iso: str):
+        async with self._conn() as db:
+            query = self._convert(
+                """
+                INSERT INTO agent_refresh_tokens (token_hash, agent_username, expires_at, revoked_at)
+                VALUES (?, ?, ?, NULL)
+                """
+            )
+            params = (token_hash, agent_username, expires_at_iso)
+            if self.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+
+    async def get_refresh_token(self, token_hash: str) -> Optional[dict]:
+        async with self._conn() as db:
+            query = self._convert(
+                "SELECT token_hash, agent_username, expires_at, revoked_at, created_at FROM agent_refresh_tokens WHERE token_hash = ?"
+            )
+            params = (token_hash,)
+            if self.use_postgres:
+                row = await db.fetchrow(query, *params)
+                return dict(row) if row else None
+            cur = await db.execute(query, params)
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def revoke_refresh_token(self, token_hash: str):
+        async with self._conn() as db:
+            query = self._convert(
+                "UPDATE agent_refresh_tokens SET revoked_at = COALESCE(?, CURRENT_TIMESTAMP) WHERE token_hash = ?"
+            )
+            params = (datetime.utcnow().isoformat(), token_hash)
+            if self.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+
+    async def revoke_all_refresh_tokens_for_agent(self, agent_username: str):
+        async with self._conn() as db:
+            query = self._convert(
+                "UPDATE agent_refresh_tokens SET revoked_at = COALESCE(?, CURRENT_TIMESTAMP) WHERE agent_username = ? AND revoked_at IS NULL"
+            )
+            params = (datetime.utcnow().isoformat(), agent_username)
+            if self.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
 
     # ── Conversation metadata (assignment, tags, avatar) ───────────
     async def get_conversation_meta(self, user_id: str) -> dict:
@@ -1780,7 +1969,16 @@ class DatabaseManager:
                 rows = await cur.fetchall()
             return [r["user_id"] for r in rows]
 
-    async def get_conversations_with_stats(self, q: Optional[str] = None, unread_only: bool = False, assigned: Optional[str] = None, tags: Optional[List[str]] = None, limit: int = 1000, offset: int = 0) -> List[dict]:
+    async def get_conversations_with_stats(
+        self,
+        q: Optional[str] = None,
+        unread_only: bool = False,
+        assigned: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        limit: int = 1000,
+        offset: int = 0,
+        viewer_agent: Optional[str] = None,
+    ) -> List[dict]:
         """Return conversation summaries for chat list with optional filters.
 
         Optimized single-query plan for Postgres; SQLite uses existing per-user aggregation.
@@ -1862,9 +2060,12 @@ class DatabaseManager:
                     if unread_only and not (conv.get("unread_count") or 0) > 0:
                         continue
                     if assigned is not None:
-                        if assigned == "unassigned" and conv.get("assigned_agent"):
+                        if assigned == "mine":
+                            if viewer_agent and (conv.get("assigned_agent") not in (None, viewer_agent)):
+                                continue
+                        elif assigned == "unassigned" and conv.get("assigned_agent"):
                             continue
-                        if assigned not in (None, "unassigned") and conv.get("assigned_agent") != assigned:
+                        elif assigned not in (None, "unassigned") and conv.get("assigned_agent") != assigned:
                             continue
                     if tags:
                         conv_tags = set(conv.get("tags") or [])
@@ -1945,9 +2146,12 @@ class DatabaseManager:
                 if unread_only and not (conv.get("unread_count") or 0) > 0:
                     continue
                 if assigned is not None:
-                    if assigned == "unassigned" and conv.get("assigned_agent"):
+                    if assigned == "mine":
+                        if viewer_agent and (conv.get("assigned_agent") not in (None, viewer_agent)):
+                            continue
+                    elif assigned == "unassigned" and conv.get("assigned_agent"):
                         continue
-                    if assigned not in (None, "unassigned") and conv.get("assigned_agent") != assigned:
+                    elif assigned not in (None, "unassigned") and conv.get("assigned_agent") != assigned:
                         continue
                 if tags:
                     conv_tags = set(conv.get("tags") or [])
@@ -2758,6 +2962,9 @@ class MessageProcessor:
 
                         print(f"📤 Uploading media to WhatsApp: {media_path}")
                         media_info = await self._upload_media_to_whatsapp(media_path, message["type"])
+                        # Backward-compatible: allow helper to return either dict({"id": ...}) or raw media id string
+                        media_id = media_info.get("id") if isinstance(media_info, dict) else media_info
+                        mime_type = (media_info.get("mime_type") if isinstance(media_info, dict) else "") or ""
                         if message["type"] == "audio":
                             # Small settle delay after upload to avoid iOS fetching race
                             await asyncio.sleep(0.5)
@@ -2765,18 +2972,16 @@ class MessageProcessor:
                             wa_response = await self.whatsapp_messenger.send_media_message(
                                 user_id,
                                 message["type"],
-                                media_info["id"],
+                                media_id,
                                 message.get("caption", ""),
                                 context_message_id=message.get("reply_to"),
-                                audio_voice=("audio/ogg" in (media_info.get("mime_type") or "")) if message["type"] == "audio" else None,
                             )
                         else:
                             wa_response = await self.whatsapp_messenger.send_media_message(
                                 user_id,
                                 message["type"],
-                                media_info["id"],
+                                media_id,
                                 message.get("caption", ""),
-                                audio_voice=("audio/ogg" in (media_info.get("mime_type") or "")) if message["type"] == "audio" else None,
                             )
                     elif media_url and isinstance(media_url, str) and media_url.startswith(("http://", "https://")):
                         # Prefer reliability: fetch the remote URL, upload to WhatsApp, then send by media_id
@@ -2825,24 +3030,24 @@ class MessageProcessor:
                                     print(f"Audio normalization from URL failed/skipped: {_exc}")
 
                             media_info = await self._upload_media_to_whatsapp(str(local_tmp_path), message["type"])
+                            media_id = media_info.get("id") if isinstance(media_info, dict) else media_info
+                            mime_type = (media_info.get("mime_type") if isinstance(media_info, dict) else "") or ""
                             if message["type"] == "audio":
                                 await asyncio.sleep(0.5)
                             if message.get("reply_to"):
                                 wa_response = await self.whatsapp_messenger.send_media_message(
                                     user_id,
                                     message["type"],
-                                    media_info["id"],
+                                    media_id,
                                     message.get("caption", ""),
                                     context_message_id=message.get("reply_to"),
-                                    audio_voice=("audio/ogg" in (media_info.get("mime_type") or "")) if message["type"] == "audio" else None,
                                 )
                             else:
                                 wa_response = await self.whatsapp_messenger.send_media_message(
                                     user_id,
                                     message["type"],
-                                    media_info["id"],
+                                    media_id,
                                     message.get("caption", ""),
-                                    audio_voice=("audio/ogg" in (media_info.get("mime_type") or "")) if message["type"] == "audio" else None,
                                 )
 
                             # Store media_path for cleanup in finally and to align with DB/UI state
@@ -3792,6 +3997,28 @@ messenger = message_processor.whatsapp_messenger
 # FastAPI app
 app = FastAPI(default_response_class=(ORJSONResponse if _ORJSON_AVAILABLE else JSONResponse))
 
+# ── Auth middleware: protect API routes by default ─────────────────
+@app.middleware("http")
+async def _auth_middleware(request: StarletteRequest, call_next):
+    try:
+        if DISABLE_AUTH:
+            return await call_next(request)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if _is_public_path(path):
+            return await call_next(request)
+        # Enforce authentication
+        try:
+            agent = await get_current_agent(request)  # type: ignore[arg-type]
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        request.state.agent = agent  # type: ignore[attr-defined]
+        return await call_next(request)
+    except Exception:
+        # Fail closed with a generic 401
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
 # Expose Prometheus metrics
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
@@ -4080,13 +4307,51 @@ async def _optional_rate_limit_media(request: _LimiterRequest, response: _Limite
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
     """WebSocket endpoint for real-time communication"""
-    # Capture agent identity from query string if provided
-    agent_username = None
-    try:
-        agent_username = websocket.query_params.get("agent")  # type: ignore[attr-defined]
-    except Exception:
-        agent_username = None
-    await connection_manager.connect(websocket, user_id, client_info={"agent": agent_username} if agent_username else None)
+    # Authenticate agent for WS. Browser sends cookies automatically for same-origin.
+    ws_agent: Optional[dict] = None
+    if DISABLE_AUTH:
+        ws_agent = {"username": "admin", "is_admin": True}
+    else:
+        try:
+            token = websocket.cookies.get(ACCESS_COOKIE_NAME)  # type: ignore[attr-defined]
+        except Exception:
+            token = None
+        ws_agent = parse_access_token(token or "")
+        if not ws_agent:
+            try:
+                await websocket.close(code=4401)
+            except Exception:
+                pass
+            return
+
+    agent_username = str(ws_agent.get("username") or "")
+    is_admin = bool(ws_agent.get("is_admin"))
+
+    # Enforce admin WS scope
+    if user_id == "admin" and not is_admin:
+        try:
+            await websocket.close(code=4403)
+        except Exception:
+            pass
+        return
+
+    # Enforce conversation access for non-admin
+    if (not is_admin) and (user_id != "admin"):
+        try:
+            meta = await db_manager.get_conversation_meta(user_id)
+            assignee = (meta.get("assigned_agent") or "").strip() or None
+            if assignee not in (None, agent_username):
+                await websocket.close(code=4403)
+                return
+        except Exception:
+            try:
+                await websocket.close(code=4403)
+            except Exception:
+                pass
+            return
+
+    # Connect after auth so we can attach reliable agent identity
+    await connection_manager.connect(websocket, user_id, client_info={"agent": agent_username})
     if user_id == "admin":
         await db_manager.upsert_user(user_id, is_admin=1)
     
@@ -4134,11 +4399,11 @@ async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dic
     if message_type == "send_message":
         message_data = data.get("data", {})
         message_data["user_id"] = user_id
-        # Attach agent username from connection metadata if available
+        # Attach agent username from connection metadata (authoritative)
         try:
             meta = connection_manager.connection_metadata.get(websocket) or {}
             agent_username = ((meta.get("client_info") or {}) or {}).get("agent")
-            if agent_username and not message_data.get("agent_username"):
+            if agent_username:
                 message_data["agent_username"] = agent_username
         except Exception:
             pass
@@ -4383,6 +4648,7 @@ async def upload_note_file(
 async def send_message_endpoint(
     request: dict,
     _: None = Depends(_optional_rate_limit_text),
+    actor: dict = Depends(get_current_agent),
 ):
     """Send text message - Frontend uses this endpoint"""
     try:
@@ -4390,7 +4656,7 @@ async def send_message_endpoint(
         user_id = request.get("user_id")
         message_text = request.get("message")
         message_type = request.get("type", "text")
-        from_me = request.get("from_me", True)
+        from_me = True
         
         if not user_id or not message_text:
             return {"error": "Missing user_id or message"}
@@ -4403,9 +4669,17 @@ async def send_message_endpoint(
             "from_me": from_me,
             "timestamp": datetime.utcnow().isoformat()
         }
-        agent_username = request.get("agent") or request.get("agent_username")
+        # Authoritative agent attribution
+        agent_username = actor.get("username")
         if agent_username:
             message_data["agent_username"] = agent_username
+
+        # Access control: non-admin can only send to unassigned/self-assigned conversations
+        if not actor.get("is_admin"):
+            meta = await db_manager.get_conversation_meta(str(user_id))
+            assignee = (meta.get("assigned_agent") or "").strip() or None
+            if assignee not in (None, agent_username):
+                raise HTTPException(status_code=403, detail="Forbidden")
         
         # Process the message
         result = await message_processor.process_outgoing_message(message_data)
@@ -4416,8 +4690,13 @@ async def send_message_endpoint(
         return {"error": str(e)}
 
 @app.get("/conversations/{user_id}/messages")
-async def get_conversation_messages(user_id: str, offset: int = 0, limit: int = 50):
+async def get_conversation_messages(user_id: str, offset: int = 0, limit: int = 50, actor: dict = Depends(get_current_agent)):
     """Get conversation messages with pagination"""
+    if not actor.get("is_admin"):
+        meta = await db_manager.get_conversation_meta(user_id)
+        assignee = (meta.get("assigned_agent") or "").strip() or None
+        if assignee not in (None, actor.get("username")):
+            raise HTTPException(status_code=403, detail="Forbidden")
     if offset == 0:
         cached_messages = await redis_manager.get_recent_messages(user_id, limit)
         if cached_messages:
@@ -4427,9 +4706,14 @@ async def get_conversation_messages(user_id: str, offset: int = 0, limit: int = 
     return {"messages": messages, "source": "database"}
 
 @app.get("/messages/{user_id}/since")
-async def get_messages_since_endpoint(user_id: str, since: str, limit: int = 500):
+async def get_messages_since_endpoint(user_id: str, since: str, limit: int = 500, actor: dict = Depends(get_current_agent)):
     """Get messages newer than the given ISO-8601 timestamp."""
     try:
+        if not actor.get("is_admin"):
+            meta = await db_manager.get_conversation_meta(user_id)
+            assignee = (meta.get("assigned_agent") or "").strip() or None
+            if assignee not in (None, actor.get("username")):
+                raise HTTPException(status_code=403, detail="Forbidden")
         messages = await db_manager.get_messages_since(user_id, since, limit)
         return messages
     except Exception as e:
@@ -4437,9 +4721,14 @@ async def get_messages_since_endpoint(user_id: str, since: str, limit: int = 500
         return []
 
 @app.get("/messages/{user_id}/before")
-async def get_messages_before_endpoint(user_id: str, before: str, limit: int = 50):
+async def get_messages_before_endpoint(user_id: str, before: str, limit: int = 50, actor: dict = Depends(get_current_agent)):
     """Get messages older than the given ISO-8601 timestamp."""
     try:
+        if not actor.get("is_admin"):
+            meta = await db_manager.get_conversation_meta(user_id)
+            assignee = (meta.get("assigned_agent") or "").strip() or None
+            if assignee not in (None, actor.get("username")):
+                raise HTTPException(status_code=403, detail="Forbidden")
         messages = await db_manager.get_messages_before(user_id, before, limit)
         return messages
     except Exception as e:
@@ -4477,16 +4766,40 @@ async def mark_conversation_read(user_id: str, message_ids: List[str] = Body(Non
         return {"error": str(e)}
 
 @app.get("/active-users")
-async def get_active_users():
+async def get_active_users(_: dict = Depends(require_admin)):
     """Get currently active users"""
     return {"active_users": connection_manager.get_active_users()}
 
 @app.get("/conversations")
-async def get_conversations(q: Optional[str] = None, unread_only: bool = False, assigned: Optional[str] = None, tags: Optional[str] = None, unresponded_only: bool = False, limit: int = 1000, offset: int = 0):
+async def get_conversations(
+    q: Optional[str] = None,
+    unread_only: bool = False,
+    assigned: Optional[str] = None,
+    tags: Optional[str] = None,
+    unresponded_only: bool = False,
+    limit: int = 1000,
+    offset: int = 0,
+    agent: dict = Depends(get_current_agent),
+):
     """Get conversations with optional filters: q, unread_only, assigned, tags (csv), unresponded_only."""
     try:
         tag_list = [t.strip() for t in tags.split(",")] if tags else None
-        conversations = await db_manager.get_conversations_with_stats(q=q, unread_only=unread_only, assigned=assigned, tags=tag_list, limit=max(1, min(limit, 1000)), offset=max(0, offset))
+        # Non-admin agents should only see their work queue by default (unassigned + assigned to me)
+        eff_assigned = assigned
+        viewer_agent = None
+        if not agent.get("is_admin"):
+            viewer_agent = agent.get("username")
+            if eff_assigned in (None, "", "all"):
+                eff_assigned = "mine"
+        conversations = await db_manager.get_conversations_with_stats(
+            q=q,
+            unread_only=unread_only,
+            assigned=eff_assigned,
+            tags=tag_list,
+            limit=max(1, min(limit, 1000)),
+            offset=max(0, offset),
+            viewer_agent=viewer_agent,
+        )
         if unresponded_only:
             conversations = [c for c in conversations if (c.get("unresponded_count") or 0) > 0]
         return conversations
@@ -4494,19 +4807,30 @@ async def get_conversations(q: Optional[str] = None, unread_only: bool = False, 
         print(f"Error fetching conversations: {e}")
         return []
 
+# Public-for-agents: list available agents (for assignment dropdowns)
+@app.get("/agents")
+async def list_agents_public(_: dict = Depends(get_current_agent)):
+    agents = await db_manager.list_agents()
+    # Do not expose password hash; list_agents() already omits it. Also omit created_at/is_admin for non-admin UI.
+    return [{"username": a.get("username"), "name": a.get("name")} for a in (agents or [])]
+
 # ----- Agents & assignments management -----
 
 @app.get("/admin/agents")
-async def list_agents_endpoint():
+async def list_agents_endpoint(_: dict = Depends(require_admin)):
     return await db_manager.list_agents()
 
 # ---- Tags options management ----
 @app.get("/admin/tag-options")
-async def get_tag_options_endpoint():
+async def get_tag_options_endpoint(_: dict = Depends(get_current_agent)):
+    return await db_manager.get_tag_options()
+
+@app.get("/tag-options")
+async def get_tag_options_public(_: dict = Depends(get_current_agent)):
     return await db_manager.get_tag_options()
 
 @app.post("/admin/tag-options")
-async def set_tag_options_endpoint(payload: dict = Body(...)):
+async def set_tag_options_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
     options = payload.get("options") or []
     if not isinstance(options, list):
         raise HTTPException(status_code=400, detail="options must be a list")
@@ -4521,7 +4845,7 @@ async def set_tag_options_endpoint(payload: dict = Body(...)):
     return {"ok": True, "count": len(norm)}
 
 @app.post("/admin/agents")
-async def create_agent_endpoint(payload: dict = Body(...)):
+async def create_agent_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
     username = (payload.get("username") or "").strip()
     name = (payload.get("name") or username).strip()
     password = payload.get("password") or ""
@@ -4532,14 +4856,53 @@ async def create_agent_endpoint(payload: dict = Body(...)):
     return {"ok": True}
 
 @app.delete("/admin/agents/{username}")
-async def delete_agent_endpoint(username: str):
+async def delete_agent_endpoint(username: str, _: dict = Depends(require_admin)):
     await db_manager.delete_agent(username)
     return {"ok": True}
 
-SESSIONS: dict[str, dict] = {}
+def _parse_dt_any(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # Normalize common formats: "YYYY-MM-DD HH:MM:SS" -> ISO
+    try:
+        if "T" not in s and " " in s:
+            s = s.replace(" ", "T")
+        # Add timezone if missing
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        # Coerce naive to UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _set_auth_cookies(response: Response, request: Request, access_token: str, refresh_token: str):
+    secure = _cookie_secure_flag(request)
+    cookie_args = {
+        "httponly": True,
+        "secure": secure,
+        "samesite": "lax",
+        "path": "/",
+    }
+    if AUTH_COOKIE_DOMAIN:
+        cookie_args["domain"] = AUTH_COOKIE_DOMAIN
+    response.set_cookie(ACCESS_COOKIE_NAME, access_token, max_age=ACCESS_TOKEN_TTL_SECONDS, **cookie_args)
+    response.set_cookie(REFRESH_COOKIE_NAME, refresh_token, max_age=REFRESH_TOKEN_TTL_SECONDS, **cookie_args)
+
+def _clear_auth_cookies(response: Response):
+    cookie_args = {"path": "/", "samesite": "lax"}
+    if AUTH_COOKIE_DOMAIN:
+        cookie_args["domain"] = AUTH_COOKIE_DOMAIN
+    response.delete_cookie(ACCESS_COOKIE_NAME, **cookie_args)
+    response.delete_cookie(REFRESH_COOKIE_NAME, **cookie_args)
 
 @app.post("/auth/login")
-async def auth_login(payload: dict = Body(...)):
+async def auth_login(request: Request, response: Response, payload: dict = Body(...)):
     if DISABLE_AUTH:
         # Bypass credential checks entirely
         username = (payload.get("username") or "admin").strip() or "admin"
@@ -4550,48 +4913,124 @@ async def auth_login(payload: dict = Body(...)):
         stored = await db_manager.get_agent_password_hash(username)
         if not stored or not verify_password(password, stored):
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        # Resolve admin flag for this agent
         is_admin = bool(await db_manager.get_agent_is_admin(username))
-    # Prefer stateless, signed token when secret is configured; else fall back to in-memory session
-    if AGENT_AUTH_SECRET:
-        token = issue_agent_token(username, is_admin)
-    else:
-        token = uuid.uuid4().hex
-        SESSIONS[token] = {"username": username, "is_admin": is_admin, "created_at": datetime.utcnow().isoformat()}
-    return {"token": token, "username": username, "is_admin": is_admin}
+
+    access_token = issue_access_token(username, is_admin)
+    refresh_token = secrets.token_urlsafe(48)
+    refresh_hash = _hash_refresh_token(refresh_token)
+    expires_at = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
+    try:
+        await db_manager.store_refresh_token(refresh_hash, username, expires_at)
+    except Exception:
+        # If DB token write fails, do not authenticate
+        raise HTTPException(status_code=500, detail="Failed to create session")
+
+    # Set cookies (request/response are always injected by FastAPI)
+    _set_auth_cookies(response, request, access_token, refresh_token)
+    return {"ok": True, "username": username, "is_admin": bool(is_admin)}
+
+@app.post("/auth/refresh")
+async def auth_refresh(request: Request, response: Response):
+    if DISABLE_AUTH:
+        return {"ok": True, "username": "admin", "is_admin": True}
+    refresh = request.cookies.get(REFRESH_COOKIE_NAME) or ""
+    if not refresh:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    refresh_hash = _hash_refresh_token(refresh)
+    row = await db_manager.get_refresh_token(refresh_hash)
+    if not row:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if row.get("revoked_at"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    exp = _parse_dt_any(row.get("expires_at"))
+    if not exp or exp < datetime.now(timezone.utc):
+        try:
+            await db_manager.revoke_refresh_token(refresh_hash)
+        except Exception:
+            pass
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    username = str(row.get("agent_username") or "").strip()
+    if not username:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    is_admin = bool(await db_manager.get_agent_is_admin(username))
+
+    # Rotate refresh token
+    new_refresh = secrets.token_urlsafe(48)
+    new_refresh_hash = _hash_refresh_token(new_refresh)
+    new_expires = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
+    await db_manager.store_refresh_token(new_refresh_hash, username, new_expires)
+    await db_manager.revoke_refresh_token(refresh_hash)
+
+    access_token = issue_access_token(username, is_admin)
+    _set_auth_cookies(response, request, access_token, new_refresh)
+    return {"ok": True, "username": username, "is_admin": bool(is_admin)}
+
+@app.post("/auth/logout")
+async def auth_logout(request: Request, response: Response):
+    if DISABLE_AUTH:
+        return {"ok": True}
+    refresh = request.cookies.get(REFRESH_COOKIE_NAME) or ""
+    if refresh:
+        try:
+            await db_manager.revoke_refresh_token(_hash_refresh_token(refresh))
+        except Exception:
+            pass
+    _clear_auth_cookies(response)
+    return {"ok": True}
 
 @app.get("/auth/me")
-async def auth_me(request: Request):
-    if DISABLE_AUTH:
-        # Always allow and treat caller as admin
-        return {"username": "admin", "is_admin": True}
-    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    parts = auth_header.split()
-    token = parts[-1] if parts else ""
-    if AGENT_AUTH_SECRET:
-        parsed = parse_agent_token(token)
-        if not parsed or not parsed.get("username"):
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        return {"username": parsed["username"], "is_admin": bool(parsed.get("is_admin"))}
-    # Fallback for dev without secret: use in-memory session
-    session = SESSIONS.get(token)
-    if not session:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return {"username": session.get("username"), "is_admin": bool(session.get("is_admin"))}
+async def auth_me(agent: dict = Depends(get_current_agent)):
+    return {"username": agent["username"], "is_admin": bool(agent.get("is_admin"))}
+
+@app.post("/auth/change-password")
+async def auth_change_password(payload: dict = Body(...), agent: dict = Depends(get_current_agent)):
+    username = (payload.get("username") or agent.get("username") or "").strip()
+    old_password = payload.get("old_password") or ""
+    new_password = payload.get("new_password") or ""
+    if not username or not new_password:
+        raise HTTPException(status_code=400, detail="username and new_password are required")
+    # Non-admins can only change their own password and must provide old password
+    if not agent.get("is_admin"):
+        if username != agent.get("username"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        stored = await db_manager.get_agent_password_hash(username)
+        if not stored or not verify_password(old_password, stored):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+    # Admin changing someone else's password: allow without old_password
+    await db_manager.set_agent_password_hash(username, hash_password(new_password))
+    return {"ok": True}
 
 @app.post("/conversations/{user_id}/assign")
-async def assign_conversation(user_id: str, payload: dict = Body(...)):
-    agent = payload.get("agent")  # string or None
-    await db_manager.set_conversation_assignment(user_id, agent)
-    return {"ok": True, "user_id": user_id, "assigned_agent": agent}
+async def assign_conversation(user_id: str, payload: dict = Body(...), actor: dict = Depends(get_current_agent)):
+    target_agent = payload.get("agent")  # string or None
+    # Non-admin agents may only "claim" a conversation for themselves (or clear their own claim).
+    if not actor.get("is_admin"):
+        me = actor.get("username")
+        if target_agent not in (None, "", me):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        # Prevent stealing: if currently assigned to someone else, only admin may change it.
+        meta = await db_manager.get_conversation_meta(user_id)
+        current = (meta.get("assigned_agent") or "").strip() or None
+        if current not in (None, me):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        # Normalize empty to None for "unassigned"
+        if target_agent == "":
+            target_agent = None
+    await db_manager.set_conversation_assignment(user_id, target_agent)
+    return {"ok": True, "user_id": user_id, "assigned_agent": target_agent}
 
 @app.post("/conversations/{user_id}/tags")
-async def update_conversation_tags(user_id: str, payload: dict = Body(...)):
+async def update_conversation_tags(user_id: str, payload: dict = Body(...), actor: dict = Depends(get_current_agent)):
     tags = payload.get("tags") or []
     if not isinstance(tags, list):
         raise HTTPException(status_code=400, detail="tags must be a list")
+    # Ensure caller can access this conversation
+    if not actor.get("is_admin"):
+        meta = await db_manager.get_conversation_meta(user_id)
+        assignee = (meta.get("assigned_agent") or "").strip() or None
+        if assignee not in (None, actor.get("username")):
+            raise HTTPException(status_code=403, detail="Forbidden")
     await db_manager.set_conversation_tags(user_id, tags)
     return {"ok": True, "user_id": user_id, "tags": tags}
 
@@ -4639,17 +5078,17 @@ async def list_archive():
     return await db_manager.get_archived_orders()
 
 @app.post("/orders/created/log")
-async def log_order_created(payload: dict = Body(...)):
+async def log_order_created(payload: dict = Body(...), actor: dict = Depends(get_current_agent)):
     order_id = (payload.get("order_id") or "").strip()
     user_id = (payload.get("user_id") or None)
-    agent = (payload.get("agent") or payload.get("agent_username") or None)
+    agent = actor.get("username")
     if not order_id:
         raise HTTPException(status_code=400, detail="order_id is required")
     await db_manager.log_order_created(order_id=order_id, user_id=user_id, agent_username=agent)
     return {"ok": True}
 
 @app.get("/messages/{user_id}")
-async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, since: str | None = None, before: str | None = None):
+async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, since: str | None = None, before: str | None = None, actor: dict = Depends(get_current_agent)):
     """Cursor-friendly fetch: use since/before OR legacy offset.
 
     - since: return messages newer than this timestamp (ascending)
@@ -4657,6 +5096,12 @@ async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, 
     - else: use legacy offset/limit window (ascending)
     """
     try:
+        # Access control: non-admin can only read unassigned or self-assigned conversations
+        if not actor.get("is_admin"):
+            meta = await db_manager.get_conversation_meta(user_id)
+            assignee = (meta.get("assigned_agent") or "").strip() or None
+            if assignee not in (None, actor.get("username")):
+                raise HTTPException(status_code=403, detail="Forbidden")
         if since:
             return await db_manager.get_messages_since(user_id, since, limit=max(1, min(limit, 500)))
         if before:
@@ -4692,11 +5137,14 @@ except Exception:
 
 # ----- Agent analytics -----
 @app.get("/analytics/agents")
-async def get_agents_analytics(start: Optional[str] = None, end: Optional[str] = None):
+async def get_agents_analytics(start: Optional[str] = None, end: Optional[str] = None, _: dict = Depends(require_admin)):
     return await db_manager.get_all_agents_analytics(start=start, end=end)
 
 @app.get("/analytics/agents/{username}")
-async def get_agent_analytics(username: str, start: Optional[str] = None, end: Optional[str] = None):
+async def get_agent_analytics(username: str, start: Optional[str] = None, end: Optional[str] = None, agent: dict = Depends(get_current_agent)):
+    # Admins can view anyone; agents can only view themselves.
+    if not agent.get("is_admin") and username != agent.get("username"):
+        raise HTTPException(status_code=403, detail="Forbidden")
     return await db_manager.get_agent_analytics(agent_username=username, start=start, end=end)
 
 @app.get("/login", response_class=HTMLResponse)
@@ -4834,16 +5282,20 @@ async def send_media(
                     # If probing fails, continue – conversion will enforce mono
                     pass
 
-            # ---------- AUDIO: always re-encode to OGG/Opus 48k mono ----------
+            # ---------- AUDIO: re-encode WebM → OGG/Opus 48k mono (skip if already OGG) ----------
             if media_type == "audio":
                 try:
-                    ogg_path = await convert_webm_to_ogg(file_path)
-                    try:
-                        file_path.unlink(missing_ok=True)  # delete original
-                    except Exception:
-                        pass
-                    file_path = ogg_path
-                    filename = ogg_path.name
+                    ext = (Path(file.filename).suffix or file_extension or "").lower()
+                    ctype = (getattr(file, "content_type", None) or "").lower()
+                    needs_convert = (ext in (".webm", ".weba")) or ("webm" in ctype)
+                    if needs_convert:
+                        ogg_path = await convert_webm_to_ogg(file_path)
+                        try:
+                            file_path.unlink(missing_ok=True)  # delete original
+                        except Exception:
+                            pass
+                        file_path = ogg_path
+                        filename = ogg_path.name
                 except Exception as exc:
                     raise HTTPException(status_code=500, detail=f"Audio conversion failed: {exc}")
 
@@ -4940,15 +5392,19 @@ async def send_media_async(
                 except Exception:
                     pass
 
-            # ---------- AUDIO: always re-encode to OGG/Opus 48k mono ----------
+            # ---------- AUDIO: re-encode WebM → OGG/Opus 48k mono (skip if already OGG) ----------
             if media_type == "audio":
                 try:
-                    ogg_path = await convert_webm_to_ogg(file_path)
-                    try:
-                        file_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    file_path = ogg_path
+                    ext = (Path(file.filename).suffix or file_extension or "").lower()
+                    ctype = (getattr(file, "content_type", None) or "").lower()
+                    needs_convert = (ext in (".webm", ".weba")) or ("webm" in ctype)
+                    if needs_convert:
+                        ogg_path = await convert_webm_to_ogg(file_path)
+                        try:
+                            file_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        file_path = ogg_path
                 except Exception as exc:
                     raise HTTPException(status_code=500, detail=f"Audio conversion failed: {exc}")
 

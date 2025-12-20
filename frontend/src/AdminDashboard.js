@@ -24,7 +24,7 @@ export default function AdminDashboard({ onClose, isAdmin = false, currentAgent 
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get('/admin/tag-options');
+        const res = await api.get('/tag-options');
         setTagOptions(Array.isArray(res.data) ? res.data : []);
       } catch (e) {}
     })();

@@ -8,23 +8,14 @@ const baseUrl =
   "";
 
 const api = axios.create({
-  baseURL: baseUrl
+  baseURL: baseUrl,
+  // Use HttpOnly cookies for auth (access + refresh). This is safer than localStorage tokens.
+  withCredentials: true,
 });
 
 // Avoid stale caches for GETs and attach auth token
 api.interceptors.request.use((config) => {
   try {
-    // Attach Authorization header if token exists
-    try {
-      const token = localStorage.getItem('agent_token');
-      if (token) {
-        config.headers = {
-          ...(config.headers || {}),
-          Authorization: `Bearer ${token}`,
-        };
-      }
-    } catch {}
-
     if ((config.method || 'get').toLowerCase() === 'get') {
       // Add cache-buster param
       const ts = Date.now();
@@ -43,12 +34,27 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Do not redirect on auth errors; allow app to continue (temporary auth disabled mode)
+let _refreshInFlight = null;
+
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    try {
+      const status = error?.response?.status;
+      const original = error?.config;
+      const url = String(original?.url || '');
+      const isAuthCall = url.includes('/auth/login') || url.includes('/auth/refresh');
+      if (status === 401 && original && !original.__retried && !isAuthCall) {
+        original.__retried = true;
+        if (!_refreshInFlight) {
+          _refreshInFlight = api.post('/auth/refresh').finally(() => { _refreshInFlight = null; });
+        }
+        await _refreshInFlight;
+        return api(original);
+      }
+    } catch {}
     return Promise.reject(error);
-  }
+  },
 );
 
 // expose axios utility helpers on the instance

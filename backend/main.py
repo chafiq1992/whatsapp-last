@@ -1309,6 +1309,51 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_refresh_agent_time
                     ON agent_refresh_tokens (agent_username, datetime(created_at));
 
+                -- Durable analytics events (append-only, idempotent via UNIQUE indexes)
+                -- event_type:
+                --   inbound_message | outbound_message | inbound_replied | order_created
+                CREATE TABLE IF NOT EXISTS agent_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type      TEXT NOT NULL,
+                    user_id         TEXT,
+                    agent_username  TEXT,
+                    assigned_agent  TEXT,  -- snapshot for inbound messages at receive time
+                    wa_message_id   TEXT,
+                    inbound_wa_message_id TEXT,
+                    outbound_wa_message_id TEXT,
+                    order_id        TEXT,
+                    ts              TEXT NOT NULL,
+                    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_events_type_ts
+                    ON agent_events (event_type, datetime(ts));
+                CREATE INDEX IF NOT EXISTS idx_agent_events_agent_ts
+                    ON agent_events (agent_username, datetime(ts));
+                CREATE INDEX IF NOT EXISTS idx_agent_events_assigned_ts
+                    ON agent_events (assigned_agent, datetime(ts));
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_agent_events_inbound
+                    ON agent_events (event_type, user_id, wa_message_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_agent_events_outbound
+                    ON agent_events (event_type, user_id, wa_message_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_agent_events_order
+                    ON agent_events (event_type, order_id);
+
+                -- Link an inbound customer message to the first agent reply (counts "messages replied to" accurately)
+                CREATE TABLE IF NOT EXISTS inbound_replies (
+                    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id                TEXT NOT NULL,
+                    inbound_wa_message_id  TEXT NOT NULL,
+                    inbound_ts             TEXT NOT NULL,
+                    replied_by_agent       TEXT NOT NULL,
+                    first_reply_wa_message_id TEXT NOT NULL,
+                    first_reply_ts         TEXT NOT NULL,
+                    created_at             TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_inbound_replies_inbound
+                    ON inbound_replies (user_id, inbound_wa_message_id);
+                CREATE INDEX IF NOT EXISTS idx_inbound_replies_agent_ts
+                    ON inbound_replies (replied_by_agent, datetime(first_reply_ts));
+
                 -- Optional metadata per customer conversation
                 CREATE TABLE IF NOT EXISTS conversation_meta (
                     user_id        TEXT PRIMARY KEY,
@@ -1364,6 +1409,8 @@ class DatabaseManager:
 
                 CREATE INDEX IF NOT EXISTS idx_orders_created_agent_time
                     ON orders_created (agent_username, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_orders_created_order
+                    ON orders_created (order_id);
 
                 -- Key/value settings store (JSON-encoded values)
                 CREATE TABLE IF NOT EXISTS settings (
@@ -1549,6 +1596,137 @@ class DatabaseManager:
             else:
                 await db.execute(query, params)
                 await db.commit()
+
+    # ── Durable analytics events (append-only) ─────────────────────
+    async def log_agent_event(
+        self,
+        *,
+        event_type: str,
+        ts: str,
+        user_id: Optional[str] = None,
+        agent_username: Optional[str] = None,
+        assigned_agent: Optional[str] = None,
+        wa_message_id: Optional[str] = None,
+        inbound_wa_message_id: Optional[str] = None,
+        outbound_wa_message_id: Optional[str] = None,
+        order_id: Optional[str] = None,
+    ) -> None:
+        """Insert an analytics event idempotently (UNIQUE indexes prevent duplicates)."""
+        async with self._conn() as db:
+            query = self._convert(
+                """
+                INSERT OR IGNORE INTO agent_events
+                  (event_type, user_id, agent_username, assigned_agent, wa_message_id, inbound_wa_message_id, outbound_wa_message_id, order_id, ts)
+                VALUES
+                  (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            )
+            # Postgres: emulate OR IGNORE using ON CONFLICT DO NOTHING
+            if self.use_postgres:
+                query = self._convert(
+                    """
+                    INSERT INTO agent_events
+                      (event_type, user_id, agent_username, assigned_agent, wa_message_id, inbound_wa_message_id, outbound_wa_message_id, order_id, ts)
+                    VALUES
+                      (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    """
+                )
+            params = (
+                event_type,
+                user_id,
+                agent_username,
+                assigned_agent,
+                wa_message_id,
+                inbound_wa_message_id,
+                outbound_wa_message_id,
+                order_id,
+                ts,
+            )
+            if self.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+
+    async def mark_latest_inbound_replied(
+        self,
+        *,
+        user_id: str,
+        replied_by_agent: str,
+        outbound_wa_message_id: str,
+        first_reply_ts: str,
+    ) -> Optional[dict]:
+        """Find the latest inbound customer message not yet counted as replied, and link it to this reply."""
+        async with self._conn() as db:
+            # Find the latest inbound message with wa_message_id, not yet present in inbound_replies
+            q = self._convert(
+                """
+                SELECT wa_message_id, COALESCE(server_ts, timestamp) AS ts
+                FROM messages
+                WHERE user_id = ?
+                  AND from_me = 0
+                  AND wa_message_id IS NOT NULL
+                  AND wa_message_id != ''
+                  AND COALESCE(server_ts, timestamp) <= ?
+                  AND wa_message_id NOT IN (
+                    SELECT inbound_wa_message_id FROM inbound_replies WHERE user_id = ?
+                  )
+                ORDER BY COALESCE(server_ts, timestamp) DESC
+                LIMIT 1
+                """
+            )
+            params = (user_id, first_reply_ts, user_id)
+            if self.use_postgres:
+                row = await db.fetchrow(q, *params)
+                inbound_wa = (row["wa_message_id"] if row else None)
+                inbound_ts = (row["ts"] if row else None)
+            else:
+                cur = await db.execute(q, params)
+                row = await cur.fetchone()
+                inbound_wa = (row["wa_message_id"] if row else None) if row else None
+                inbound_ts = (row["ts"] if row else None) if row else None
+            if not inbound_wa or not inbound_ts:
+                return None
+
+            ins = self._convert(
+                """
+                INSERT OR IGNORE INTO inbound_replies
+                  (user_id, inbound_wa_message_id, inbound_ts, replied_by_agent, first_reply_wa_message_id, first_reply_ts)
+                VALUES
+                  (?, ?, ?, ?, ?, ?)
+                """
+            )
+            if self.use_postgres:
+                ins = self._convert(
+                    """
+                    INSERT INTO inbound_replies
+                      (user_id, inbound_wa_message_id, inbound_ts, replied_by_agent, first_reply_wa_message_id, first_reply_ts)
+                    VALUES
+                      (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (user_id, inbound_wa_message_id) DO NOTHING
+                    """
+                )
+            iparams = (user_id, inbound_wa, inbound_ts, replied_by_agent, outbound_wa_message_id, first_reply_ts)
+            if self.use_postgres:
+                await db.execute(ins, *iparams)
+            else:
+                await db.execute(ins, iparams)
+                await db.commit()
+
+            # Also log an event for fast reporting
+            try:
+                await self.log_agent_event(
+                    event_type="inbound_replied",
+                    ts=first_reply_ts,
+                    user_id=user_id,
+                    agent_username=replied_by_agent,
+                    inbound_wa_message_id=inbound_wa,
+                    outbound_wa_message_id=outbound_wa_message_id,
+                )
+            except Exception:
+                pass
+            return {"user_id": user_id, "inbound_wa_message_id": inbound_wa, "inbound_ts": inbound_ts}
 
     # ── Conversation metadata (assignment, tags, avatar) ───────────
     async def get_conversation_meta(self, user_id: str) -> dict:
@@ -1949,6 +2127,28 @@ class DatabaseManager:
         clean = {k: v for k, v in data.items() if v is not None}
         await self.upsert_message(clean)
 
+        # Durable analytics: log outbound + mark reply-to-inbound when we have final WA id
+        try:
+            agent_username = (message.get("agent_username") or message.get("agent") or "").strip() or None
+            if agent_username:
+                ts = str(message.get("server_ts") or message.get("timestamp") or datetime.utcnow().isoformat())
+                await self.log_agent_event(
+                    event_type="outbound_message",
+                    ts=ts,
+                    user_id=str(message.get("user_id") or ""),
+                    agent_username=agent_username,
+                    wa_message_id=str(wa_message_id),
+                )
+                # Count this as replying to the latest unreplied inbound message (1-to-1)
+                await self.mark_latest_inbound_replied(
+                    user_id=str(message.get("user_id") or ""),
+                    replied_by_agent=agent_username,
+                    outbound_wa_message_id=str(wa_message_id),
+                    first_reply_ts=ts,
+                )
+        except Exception:
+            pass
+
     async def mark_messages_as_read(self, user_id: str, message_ids: List[str] | None = None):
         """Mark one or all messages in a conversation as read."""
         async with self._conn() as db:
@@ -2313,26 +2513,72 @@ class DatabaseManager:
         end_iso = end or datetime.utcnow().isoformat()
         start_iso = start or (datetime.utcnow() - timedelta(days=30)).isoformat()
         async with self._conn() as db:
-            # messages sent by this agent
-            q_msg = self._convert(
+            params = [start_iso, end_iso, agent_username]
+
+            # Durable analytics:
+            # - received: inbound messages assigned to this agent at receive-time
+            # - replied_to: number of inbound messages that this agent replied to (distinct inbound)
+            # - sent: number of outbound messages successfully sent by this agent
+            # - orders: number of orders created by this agent
+
+            # inbound received (snapshot assignment)
+            q_recv = self._convert(
                 """
                 SELECT COUNT(*) AS c
-                FROM messages
-                WHERE from_me = 1 AND agent_username = ?
-                  AND SUBSTR(REPLACE(COALESCE(server_ts, timestamp), ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
-                  AND SUBSTR(REPLACE(COALESCE(server_ts, timestamp), ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                FROM agent_events
+                WHERE event_type = 'inbound_message'
+                  AND assigned_agent = ?
+                  AND SUBSTR(REPLACE(ts, ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                  AND SUBSTR(REPLACE(ts, ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
                 """
             )
-            params = [agent_username, start_iso, end_iso]
+            rparams = [agent_username, start_iso, end_iso]
             if self.use_postgres:
-                row = await db.fetchrow(q_msg, *params)
-                messages_sent = (row[0] if row else 0) or 0
+                row = await db.fetchrow(q_recv, *rparams)
+                messages_received = int((row[0] if row else 0) or 0)
             else:
-                cur = await db.execute(q_msg, tuple(params))
+                cur = await db.execute(q_recv, tuple(rparams))
                 row = await cur.fetchone()
-                messages_sent = (row[0] if row else 0) or 0
+                messages_received = int((row[0] if row else 0) or 0)
 
-            # orders created by this agent
+            # inbound replied-to (distinct inbound)
+            q_replied = self._convert(
+                """
+                SELECT COUNT(*) AS c
+                FROM inbound_replies
+                WHERE replied_by_agent = ?
+                  AND SUBSTR(REPLACE(first_reply_ts, ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                  AND SUBSTR(REPLACE(first_reply_ts, ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                """
+            )
+            if self.use_postgres:
+                row = await db.fetchrow(q_replied, *rparams)
+                messages_replied_to = int((row[0] if row else 0) or 0)
+            else:
+                cur = await db.execute(q_replied, tuple(rparams))
+                row = await cur.fetchone()
+                messages_replied_to = int((row[0] if row else 0) or 0)
+
+            # outbound sent (final WA id saved)
+            q_sent = self._convert(
+                """
+                SELECT COUNT(*) AS c
+                FROM agent_events
+                WHERE event_type = 'outbound_message'
+                  AND agent_username = ?
+                  AND SUBSTR(REPLACE(ts, ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                  AND SUBSTR(REPLACE(ts, ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                """
+            )
+            if self.use_postgres:
+                row = await db.fetchrow(q_sent, *rparams)
+                messages_sent = int((row[0] if row else 0) or 0)
+            else:
+                cur = await db.execute(q_sent, tuple(rparams))
+                row = await cur.fetchone()
+                messages_sent = int((row[0] if row else 0) or 0)
+
+            # orders created
             q_order = self._convert(
                 """
                 SELECT COUNT(*) AS c
@@ -2343,12 +2589,12 @@ class DatabaseManager:
                 """
             )
             if self.use_postgres:
-                row = await db.fetchrow(q_order, *params)
-                orders_created = (row[0] if row else 0) or 0
+                row = await db.fetchrow(q_order, *rparams)
+                orders_created = int((row[0] if row else 0) or 0)
             else:
-                cur = await db.execute(q_order, tuple(params))
+                cur = await db.execute(q_order, tuple(rparams))
                 row = await cur.fetchone()
-                orders_created = (row[0] if row else 0) or 0
+                orders_created = int((row[0] if row else 0) or 0)
 
             # average response time in seconds (to previous inbound)
             if self.use_postgres:
@@ -2403,7 +2649,11 @@ class DatabaseManager:
                 "agent": agent_username,
                 "start": start_iso,
                 "end": end_iso,
+                # Backwards compatible field name, but now counts *successful outbound sends* from durable events
                 "messages_sent": int(messages_sent),
+                # New, more precise breakdown
+                "messages_received": int(messages_received),
+                "messages_replied_to": int(messages_replied_to),
                 "orders_created": int(orders_created),
                 **({"avg_response_seconds": avg_response_seconds} if avg_response_seconds is not None else {}),
             }
@@ -3543,6 +3793,24 @@ class MessageProcessor:
         await self.db_manager.upsert_message(db_data)
         await self.redis_manager.cache_message(sender, db_data)
 
+        # Durable analytics: inbound message received (assigned snapshot at receive time)
+        try:
+            assigned_snapshot = None
+            try:
+                meta = await self.db_manager.get_conversation_meta(sender)
+                assigned_snapshot = (meta.get("assigned_agent") if isinstance(meta, dict) else None)
+            except Exception:
+                assigned_snapshot = None
+            await self.db_manager.log_agent_event(
+                event_type="inbound_message",
+                ts=str(db_data.get("server_ts") or db_data.get("timestamp") or datetime.utcnow().isoformat()),
+                user_id=str(sender),
+                assigned_agent=(str(assigned_snapshot).strip() if assigned_snapshot else None),
+                wa_message_id=str(db_data.get("wa_message_id") or ""),
+            )
+        except Exception:
+            pass
+
         # Now deliver to UI and admin dashboards
         await self.connection_manager.send_to_user(sender, {
             "type": "message_received",
@@ -4338,28 +4606,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     agent_username = str(ws_agent.get("username") or "")
     is_admin = bool(ws_agent.get("is_admin"))
 
-    # Enforce admin WS scope
-    if user_id == "admin" and not is_admin:
-        try:
-            await websocket.close(code=4403)
-        except Exception:
-            pass
-        return
-
-    # Enforce conversation access for non-admin
-    if (not is_admin) and (user_id != "admin"):
-        try:
-            meta = await db_manager.get_conversation_meta(user_id)
-            assignee = (meta.get("assigned_agent") or "").strip() or None
-            if assignee not in (None, agent_username):
-                await websocket.close(code=4403)
-                return
-        except Exception:
-            try:
-                await websocket.close(code=4403)
-            except Exception:
-                pass
-            return
+    # NOTE: By request, all authenticated agents can access the shared inbox
+    # and thus can connect to /ws/admin and any /ws/{user_id}.
 
     # Connect after auth so we can attach reliable agent identity
     await connection_manager.connect(websocket, user_id, client_info={"agent": agent_username})
@@ -4685,13 +4933,6 @@ async def send_message_endpoint(
         if agent_username:
             message_data["agent_username"] = agent_username
 
-        # Access control: non-admin can only send to unassigned/self-assigned conversations
-        if not actor.get("is_admin"):
-            meta = await db_manager.get_conversation_meta(str(user_id))
-            assignee = (meta.get("assigned_agent") or "").strip() or None
-            if assignee not in (None, agent_username):
-                raise HTTPException(status_code=403, detail="Forbidden")
-        
         # Process the message
         result = await message_processor.process_outgoing_message(message_data)
         return {"status": "success", "message": result}
@@ -4703,11 +4944,6 @@ async def send_message_endpoint(
 @app.get("/conversations/{user_id}/messages")
 async def get_conversation_messages(user_id: str, offset: int = 0, limit: int = 50, actor: dict = Depends(get_current_agent)):
     """Get conversation messages with pagination"""
-    if not actor.get("is_admin"):
-        meta = await db_manager.get_conversation_meta(user_id)
-        assignee = (meta.get("assigned_agent") or "").strip() or None
-        if assignee not in (None, actor.get("username")):
-            raise HTTPException(status_code=403, detail="Forbidden")
     if offset == 0:
         cached_messages = await redis_manager.get_recent_messages(user_id, limit)
         if cached_messages:
@@ -4720,11 +4956,6 @@ async def get_conversation_messages(user_id: str, offset: int = 0, limit: int = 
 async def get_messages_since_endpoint(user_id: str, since: str, limit: int = 500, actor: dict = Depends(get_current_agent)):
     """Get messages newer than the given ISO-8601 timestamp."""
     try:
-        if not actor.get("is_admin"):
-            meta = await db_manager.get_conversation_meta(user_id)
-            assignee = (meta.get("assigned_agent") or "").strip() or None
-            if assignee not in (None, actor.get("username")):
-                raise HTTPException(status_code=403, detail="Forbidden")
         messages = await db_manager.get_messages_since(user_id, since, limit)
         return messages
     except Exception as e:
@@ -4735,11 +4966,6 @@ async def get_messages_since_endpoint(user_id: str, since: str, limit: int = 500
 async def get_messages_before_endpoint(user_id: str, before: str, limit: int = 50, actor: dict = Depends(get_current_agent)):
     """Get messages older than the given ISO-8601 timestamp."""
     try:
-        if not actor.get("is_admin"):
-            meta = await db_manager.get_conversation_meta(user_id)
-            assignee = (meta.get("assigned_agent") or "").strip() or None
-            if assignee not in (None, actor.get("username")):
-                raise HTTPException(status_code=403, detail="Forbidden")
         messages = await db_manager.get_messages_before(user_id, before, limit)
         return messages
     except Exception as e:
@@ -4795,21 +5021,14 @@ async def get_conversations(
     """Get conversations with optional filters: q, unread_only, assigned, tags (csv), unresponded_only."""
     try:
         tag_list = [t.strip() for t in tags.split(",")] if tags else None
-        # Non-admin agents should only see their work queue by default (unassigned + assigned to me)
-        eff_assigned = assigned
-        viewer_agent = None
-        if not agent.get("is_admin"):
-            viewer_agent = agent.get("username")
-            if eff_assigned in (None, "", "all"):
-                eff_assigned = "mine"
         conversations = await db_manager.get_conversations_with_stats(
             q=q,
             unread_only=unread_only,
-            assigned=eff_assigned,
+            assigned=assigned,
             tags=tag_list,
             limit=max(1, min(limit, 1000)),
             offset=max(0, offset),
-            viewer_agent=viewer_agent,
+            viewer_agent=None,
         )
         if unresponded_only:
             conversations = [c for c in conversations if (c.get("unresponded_count") or 0) > 0]
@@ -5096,6 +5315,16 @@ async def log_order_created(payload: dict = Body(...), actor: dict = Depends(get
     if not order_id:
         raise HTTPException(status_code=400, detail="order_id is required")
     await db_manager.log_order_created(order_id=order_id, user_id=user_id, agent_username=agent)
+    try:
+        await db_manager.log_agent_event(
+            event_type="order_created",
+            ts=datetime.utcnow().isoformat(),
+            user_id=str(user_id) if user_id else None,
+            agent_username=str(agent) if agent else None,
+            order_id=str(order_id),
+        )
+    except Exception:
+        pass
     return {"ok": True}
 
 @app.get("/messages/{user_id}")
@@ -5107,12 +5336,6 @@ async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, 
     - else: use legacy offset/limit window (ascending)
     """
     try:
-        # Access control: non-admin can only read unassigned or self-assigned conversations
-        if not actor.get("is_admin"):
-            meta = await db_manager.get_conversation_meta(user_id)
-            assignee = (meta.get("assigned_agent") or "").strip() or None
-            if assignee not in (None, actor.get("username")):
-                raise HTTPException(status_code=403, detail="Forbidden")
         if since:
             return await db_manager.get_messages_since(user_id, since, limit=max(1, min(limit, 500)))
         if before:

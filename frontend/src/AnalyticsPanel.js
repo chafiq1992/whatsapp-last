@@ -90,10 +90,12 @@ export default function AnalyticsPanel() {
   }, [period]);
 
   const totals = useMemo(() => {
-    const totalMessages = stats.reduce((s, x) => s + (Number(x.messages_sent || 0) || 0), 0);
+    const totalReceived = stats.reduce((s, x) => s + (Number(x.messages_received || 0) || 0), 0);
+    const totalRepliedTo = stats.reduce((s, x) => s + (Number(x.messages_replied_to || 0) || 0), 0);
+    const totalSent = stats.reduce((s, x) => s + (Number(x.messages_sent || 0) || 0), 0);
     const totalOrders = stats.reduce((s, x) => s + (Number(x.orders_created || 0) || 0), 0);
     const totalAgents = agents.length;
-    return { totalMessages, totalOrders, totalAgents };
+    return { totalReceived, totalRepliedTo, totalSent, totalOrders, totalAgents };
   }, [stats, agents]);
 
   const nameOf = (username) => {
@@ -101,7 +103,7 @@ export default function AnalyticsPanel() {
     return a?.name || username;
   };
 
-  const maxMsgs = Math.max(1, ...stats.map((x) => Number(x.messages_sent || 0)));
+  const maxReplied = Math.max(1, ...stats.map((x) => Number(x.messages_replied_to || 0)));
   const maxOrders = Math.max(1, ...stats.map((x) => Number(x.orders_created || 0)));
 
   return (
@@ -135,32 +137,36 @@ export default function AnalyticsPanel() {
 
       {error && <div className="text-red-400 text-sm">{error}</div>}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="text-sm text-gray-400">Total messages</div>
-          <div className="text-2xl font-bold">{totals.totalMessages}</div>
+          <div className="text-sm text-gray-400">Total received</div>
+          <div className="text-2xl font-bold">{totals.totalReceived}</div>
+        </div>
+        <div className="bg-gray-800 rounded p-4 border border-gray-700">
+          <div className="text-sm text-gray-400">Total replied-to</div>
+          <div className="text-2xl font-bold">{totals.totalRepliedTo}</div>
+        </div>
+        <div className="bg-gray-800 rounded p-4 border border-gray-700">
+          <div className="text-sm text-gray-400">Total sent</div>
+          <div className="text-2xl font-bold">{totals.totalSent}</div>
         </div>
         <div className="bg-gray-800 rounded p-4 border border-gray-700">
           <div className="text-sm text-gray-400">Total orders</div>
           <div className="text-2xl font-bold">{totals.totalOrders}</div>
         </div>
-        <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="text-sm text-gray-400">Total agents</div>
-          <div className="text-2xl font-bold">{totals.totalAgents}</div>
-        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="font-medium mb-2">Messages by agent</div>
+          <div className="font-medium mb-2">Inbound messages replied-to (by agent)</div>
           <div className="space-y-2">
             {stats.map((s) => (
               <div key={s.agent} className="flex items-center gap-2">
                 <div className="w-32 text-sm text-gray-300 truncate" title={nameOf(s.agent)}>{nameOf(s.agent)}</div>
                 <div className="flex-1 h-4 bg-gray-900 rounded overflow-hidden">
-                  <div className="h-4 bg-blue-600" style={{ width: `${Math.round((Number(s.messages_sent||0)/maxMsgs)*100)}%` }}></div>
+                  <div className="h-4 bg-blue-600" style={{ width: `${Math.round((Number(s.messages_replied_to||0)/maxReplied)*100)}%` }}></div>
                 </div>
-                <div className="w-12 text-right text-sm">{s.messages_sent || 0}</div>
+                <div className="w-12 text-right text-sm">{s.messages_replied_to || 0}</div>
               </div>
             ))}
             {stats.length === 0 && <div className="text-sm text-gray-400">No data</div>}
@@ -190,7 +196,9 @@ export default function AnalyticsPanel() {
             <thead>
               <tr className="text-gray-400 text-left">
                 <th className="py-1 pr-2">Agent</th>
-                <th className="py-1 pr-2">Replies</th>
+                <th className="py-1 pr-2">Received</th>
+                <th className="py-1 pr-2">Replied-to</th>
+                <th className="py-1 pr-2">Sent</th>
                 <th className="py-1 pr-2">Orders</th>
                 <th className="py-1 pr-2">Avg reply time</th>
               </tr>
@@ -199,13 +207,15 @@ export default function AnalyticsPanel() {
               {stats.map((s) => (
                 <tr key={s.agent} className="border-t border-gray-700">
                   <td className="py-1 pr-2">{nameOf(s.agent)}</td>
+                  <td className="py-1 pr-2">{s.messages_received || 0}</td>
+                  <td className="py-1 pr-2">{s.messages_replied_to || 0}</td>
                   <td className="py-1 pr-2">{s.messages_sent || 0}</td>
                   <td className="py-1 pr-2">{s.orders_created || 0}</td>
                   <td className="py-1 pr-2">{formatDuration(s.avg_response_seconds)}</td>
                 </tr>
               ))}
               {stats.length === 0 && (
-                <tr><td colSpan={4} className="py-2 text-gray-400">No data</td></tr>
+                <tr><td colSpan={6} className="py-2 text-gray-400">No data</td></tr>
               )}
             </tbody>
           </table>

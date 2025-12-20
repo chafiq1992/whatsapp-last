@@ -486,7 +486,7 @@ export default function App() {
               setActiveUser={setActiveUser}
               activeUser={activeUser}
               wsConnected={adminWsConnected}
-              defaultAssignedFilter={(agentInboxMode && currentAgent) ? currentAgent : (myAssignedOnly && currentAgent ? currentAgent : 'all')}
+              defaultAssignedFilter={'all'}
               showArchive={showArchive}
               currentAgent={currentAgent}
               loading={loadingConversations}

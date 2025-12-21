@@ -1128,7 +1128,28 @@ class DatabaseManager:
     """Database helper supporting SQLite and optional PostgreSQL."""
 
     def __init__(self, db_path: str | None = None, db_url: str | None = None):
-        self.db_url = db_url or DATABASE_URL
+        # Normalize DB URL. Some platforms/tools provide SQLAlchemy-style URLs like
+        # "postgresql+asyncpg://..." which asyncpg does NOT accept.
+        raw_url = (db_url or DATABASE_URL or "").strip() or None
+        if raw_url:
+            if raw_url.startswith("postgresql+asyncpg://"):
+                raw_url = raw_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+            if raw_url.startswith("postgres+asyncpg://"):
+                raw_url = raw_url.replace("postgres+asyncpg://", "postgresql://", 1)
+            if raw_url.startswith("postgresql+psycopg://"):
+                raw_url = raw_url.replace("postgresql+psycopg://", "postgresql://", 1)
+            if raw_url.startswith("postgresql+psycopg2://"):
+                raw_url = raw_url.replace("postgresql+psycopg2://", "postgresql://", 1)
+            # Only treat as Postgres when scheme matches what asyncpg expects
+            try:
+                from urllib.parse import urlparse as _urlparse
+                scheme = (_urlparse(raw_url).scheme or "").lower()
+            except Exception:
+                scheme = ""
+            if scheme not in ("postgresql", "postgres"):
+                raw_url = None
+
+        self.db_url = raw_url
         self.db_path = db_path or DB_PATH
         self.use_postgres = bool(self.db_url)
         if not self.use_postgres:

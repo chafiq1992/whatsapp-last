@@ -90,6 +90,17 @@ history is retained across restarts.
 `GET /health` includes a lightweight DB connectivity check (`db.ok`) so you can
 quickly verify whether the service can reach its database in production.
 
+### Webhook 504s / slow processing
+
+WhatsApp (Meta) expects your webhook to respond quickly. The backend now ACKs
+webhooks quickly by enqueueing the payload and processing it in background
+workers. If the queue is full, the endpoint returns `503` so Meta retries later.
+You can tune:
+
+- `WEBHOOK_QUEUE_MAXSIZE`
+- `WEBHOOK_WORKERS`
+- `WEBHOOK_PROCESSING_TIMEOUT_SECONDS`
+
 Recent versions add indexes on the `wa_message_id` and `temp_id` columns of the
 `messages` table. Running the backend automatically applies these indexes if
 they are missing. If upgrading an existing deployment manually, execute:

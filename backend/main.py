@@ -80,6 +80,11 @@ SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "3000"))
 AUTH_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_DB_TIMEOUT_SECONDS", "8"))
 # Health DB check timeout (seconds)
 HEALTH_DB_TIMEOUT_SECONDS = float(os.getenv("HEALTH_DB_TIMEOUT_SECONDS", "2"))
+# Webhook ingress queue to ensure we ACK Meta quickly and process in background.
+WEBHOOK_QUEUE_MAXSIZE = int(os.getenv("WEBHOOK_QUEUE_MAXSIZE", "1000"))
+WEBHOOK_WORKERS = int(os.getenv("WEBHOOK_WORKERS", "2"))
+# Safety timeout for processing a single webhook event (seconds). If exceeded, we log and drop that event.
+WEBHOOK_PROCESSING_TIMEOUT_SECONDS = float(os.getenv("WEBHOOK_PROCESSING_TIMEOUT_SECONDS", "300"))
 # Anything that **must not** be baked in the image (tokens, IDs …) is
 # already picked up with os.getenv() further below. Keep it that way.
 
@@ -4334,6 +4339,30 @@ db_manager = DatabaseManager()
 connection_manager = ConnectionManager()
 redis_manager = RedisManager()
 message_processor = MessageProcessor(connection_manager, redis_manager, db_manager)
+
+# ────────────────────────────────────────────────────────────
+# Webhook ingress: ACK fast, process async
+# ────────────────────────────────────────────────────────────
+WEBHOOK_QUEUE: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=max(1, int(WEBHOOK_QUEUE_MAXSIZE)))
+
+async def _webhook_worker(worker_id: int):
+    log = logging.getLogger(__name__)
+    while True:
+        data = await WEBHOOK_QUEUE.get()
+        try:
+            await asyncio.wait_for(
+                message_processor.process_incoming_message(data),
+                timeout=max(1.0, float(WEBHOOK_PROCESSING_TIMEOUT_SECONDS)),
+            )
+        except asyncio.TimeoutError:
+            log.error("Webhook worker %s: processing timed out after %ss", worker_id, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
+        except Exception as exc:
+            log.exception("Webhook worker %s: processing failed: %s", worker_id, exc)
+        finally:
+            try:
+                WEBHOOK_QUEUE.task_done()
+            except Exception:
+                pass
 messenger = message_processor.whatsapp_messenger
 
 # FastAPI app
@@ -4522,6 +4551,14 @@ async def startup():
                 await db.commit()
     except Exception as exc:
         print(f"conversation_notes ensure failed: {exc}")
+
+    # Start webhook background workers so /webhook can ACK quickly.
+    try:
+        for i in range(max(1, int(WEBHOOK_WORKERS))):
+            asyncio.create_task(_webhook_worker(i + 1))
+        print(f"Webhook workers started: {max(1, int(WEBHOOK_WORKERS))} (queue maxsize={WEBHOOK_QUEUE_MAXSIZE})")
+    except Exception as exc:
+        print(f"Webhook worker startup failed: {exc}")
     # Catalog cache: avoid blocking startup in production
     try:
         # Try hydrate from GCS quickly if missing
@@ -4892,7 +4929,7 @@ async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dic
             pass
 
 @app.api_route("/webhook", methods=["GET", "POST"])
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     """WhatsApp webhook endpoint"""
     if request.method == "GET":
         # --- Meta verification logic ---
@@ -4944,7 +4981,18 @@ async def webhook(request: Request):
             # Non-fatal: fall through to normal processing
             pass
 
-        await message_processor.process_incoming_message(data)
+        # ACK fast: enqueue for background processing. If we're overloaded, return 503 so Meta retries.
+        try:
+            WEBHOOK_QUEUE.put_nowait(data)
+        except asyncio.QueueFull:
+            return PlainTextResponse("Webhook queue full", status_code=503)
+        except Exception:
+            # If we couldn't enqueue, fail fast so Meta retries
+            return PlainTextResponse("Webhook enqueue failed", status_code=503)
+
+        # Also attach a no-op background task to keep FastAPI from optimizing away background infrastructure
+        # and to make it explicit that this endpoint is async-by-design.
+        background_tasks.add_task(lambda: None)
         return {"ok": True}
 
 @app.post("/test-media-upload")
@@ -5410,6 +5458,11 @@ async def health_check():
             "ok": bool(db_ok),
             # expose path only for sqlite to aid debugging; avoid leaking connection strings
             "db_path": DB_PATH if db_backend == "sqlite" else None,
+        },
+        "webhook": {
+            "queue_size": getattr(WEBHOOK_QUEUE, "qsize", lambda: None)(),
+            "queue_maxsize": int(WEBHOOK_QUEUE_MAXSIZE),
+            "workers": int(max(1, int(WEBHOOK_WORKERS))),
         },
         "active_connections": len(connection_manager.active_connections),
         "timestamp": datetime.utcnow().isoformat(),

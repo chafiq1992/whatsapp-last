@@ -101,7 +101,13 @@ You can tune:
 - `WEBHOOK_WORKERS`
 - `WEBHOOK_PROCESSING_TIMEOUT_SECONDS`
 
-For strongest delivery guarantees, enable the **durable Redis Stream queue** (requires `REDIS_URL`):
+If you already use **Postgres** (set `DATABASE_URL`), you can enable the **DB-backed queue** (no Redis required):
+
+- `WEBHOOK_USE_DB_QUEUE=1`
+- `WEBHOOK_DB_BATCH_SIZE`
+- `WEBHOOK_DB_POLL_INTERVAL_SEC`
+
+Alternatively, you can enable the **durable Redis Stream queue** (requires `REDIS_URL`):
 
 - `WEBHOOK_USE_REDIS_STREAM=1`
 - `WEBHOOK_STREAM_KEY`

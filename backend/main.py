@@ -1447,6 +1447,8 @@ class DatabaseManager:
                 # index definitions, so index the raw timestamp column instead.
                 script = script.replace("datetime(timestamp)", "timestamp")
                 script = script.replace("datetime(created_at)", "created_at")
+                script = script.replace("datetime(ts)", "ts")
+                script = script.replace("datetime(first_reply_ts)", "first_reply_ts")
                 statements = [s.strip() for s in script.split(";") if s.strip()]
                 for stmt in statements:
                     await db.execute(stmt)

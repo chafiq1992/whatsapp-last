@@ -101,6 +101,14 @@ You can tune:
 - `WEBHOOK_WORKERS`
 - `WEBHOOK_PROCESSING_TIMEOUT_SECONDS`
 
+For strongest delivery guarantees, enable the **durable Redis Stream queue** (requires `REDIS_URL`):
+
+- `WEBHOOK_USE_REDIS_STREAM=1`
+- `WEBHOOK_STREAM_KEY`
+- `WEBHOOK_STREAM_GROUP`
+- `WEBHOOK_STREAM_DLQ_KEY` (dead-letter queue)
+- `WEBHOOK_MAX_ATTEMPTS`
+
 Recent versions add indexes on the `wa_message_id` and `temp_id` columns of the
 `messages` table. Running the backend automatically applies these indexes if
 they are missing. If upgrading an existing deployment manually, execute:

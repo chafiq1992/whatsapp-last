@@ -85,6 +85,14 @@ WEBHOOK_QUEUE_MAXSIZE = int(os.getenv("WEBHOOK_QUEUE_MAXSIZE", "1000"))
 WEBHOOK_WORKERS = int(os.getenv("WEBHOOK_WORKERS", "2"))
 # Safety timeout for processing a single webhook event (seconds). If exceeded, we log and drop that event.
 WEBHOOK_PROCESSING_TIMEOUT_SECONDS = float(os.getenv("WEBHOOK_PROCESSING_TIMEOUT_SECONDS", "300"))
+# Durable webhook queue (recommended): Redis Streams.
+# When enabled and Redis is connected, /webhook will XADD events and ACK immediately.
+WEBHOOK_USE_REDIS_STREAM = os.getenv("WEBHOOK_USE_REDIS_STREAM", "1") == "1"
+WEBHOOK_STREAM_KEY = os.getenv("WEBHOOK_STREAM_KEY", "wa:webhooks")
+WEBHOOK_STREAM_GROUP = os.getenv("WEBHOOK_STREAM_GROUP", "webhook-workers")
+WEBHOOK_STREAM_DLQ_KEY = os.getenv("WEBHOOK_STREAM_DLQ_KEY", "wa:webhooks:dlq")
+WEBHOOK_MAX_ATTEMPTS = int(os.getenv("WEBHOOK_MAX_ATTEMPTS", "20"))
+WEBHOOK_CLAIM_MIN_IDLE_MS = int(os.getenv("WEBHOOK_CLAIM_MIN_IDLE_MS", "60000"))  # 60s
 # Anything that **must not** be baked in the image (tokens, IDs …) is
 # already picked up with os.getenv() further below. Keep it that way.
 
@@ -4345,19 +4353,155 @@ message_processor = MessageProcessor(connection_manager, redis_manager, db_manag
 # ────────────────────────────────────────────────────────────
 WEBHOOK_QUEUE: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=max(1, int(WEBHOOK_QUEUE_MAXSIZE)))
 
+async def _ensure_webhook_stream_group() -> bool:
+    """Ensure Redis Stream + consumer group exists (durable webhook queue)."""
+    try:
+        r = getattr(redis_manager, "redis_client", None)
+        if not r or not WEBHOOK_USE_REDIS_STREAM:
+            return False
+        try:
+            # mkstream=True creates stream if missing; "0-0" so we can claim pending reliably.
+            await r.xgroup_create(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, id="0-0", mkstream=True)
+        except Exception as exc:
+            # BUSYGROUP is fine (already exists)
+            if "BUSYGROUP" not in str(exc).upper():
+                raise
+        return True
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to ensure webhook redis stream group: %s", exc)
+        return False
+
 async def _webhook_worker(worker_id: int):
     log = logging.getLogger(__name__)
+    # Unique consumer name so multiple Cloud Run instances can safely share a group.
+    consumer = f"w{worker_id}-{uuid.uuid4().hex[:10]}"
+    last_claim = 0.0
+
+    async def process_one(payload: dict, *, source_id: str | None = None):
+        await asyncio.wait_for(
+            message_processor.process_incoming_message(payload),
+            timeout=max(1.0, float(WEBHOOK_PROCESSING_TIMEOUT_SECONDS)),
+        )
+
     while True:
+        r = getattr(redis_manager, "redis_client", None)
+        use_stream = bool(r and WEBHOOK_USE_REDIS_STREAM)
+
+        # Preferred: Redis Streams (durable)
+        if use_stream:
+            now = time.time()
+            try:
+                # Periodically reclaim stale pending entries (e.g., crashed worker).
+                if now - last_claim > 15:
+                    last_claim = now
+                    try:
+                        res = await r.xautoclaim(
+                            WEBHOOK_STREAM_KEY,
+                            WEBHOOK_STREAM_GROUP,
+                            consumer,
+                            min_idle_time=max(1, int(WEBHOOK_CLAIM_MIN_IDLE_MS)),
+                            start_id="0-0",
+                            count=25,
+                        )
+                        # redis-py returns (next_start_id, messages, deleted_ids)
+                        claimed = res[1] if isinstance(res, (list, tuple)) and len(res) >= 2 else []
+                    except Exception:
+                        claimed = []
+
+                    for msg_id, fields in claimed or []:
+                        try:
+                            raw = fields.get("payload") if isinstance(fields, dict) else None
+                            if raw is None and isinstance(fields, dict):
+                                raw = fields.get(b"payload")
+                            payload = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else None
+                            if isinstance(payload, (bytes, bytearray)):
+                                payload = json.loads(payload.decode("utf-8"))
+                            if not isinstance(payload, dict):
+                                raise ValueError("bad payload")
+                            await process_one(payload, source_id=str(msg_id))
+                            await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
+                            try:
+                                await r.hdel("wa:webhooks:attempts", str(msg_id))
+                            except Exception:
+                                pass
+                        except Exception as exc:
+                            # Track attempts and send to DLQ if poisoned.
+                            try:
+                                attempts = await r.hincrby("wa:webhooks:attempts", str(msg_id), 1)
+                            except Exception:
+                                attempts = 1
+                            if int(attempts) >= int(WEBHOOK_MAX_ATTEMPTS):
+                                try:
+                                    await r.xadd(WEBHOOK_STREAM_DLQ_KEY, {"id": str(msg_id), "error": str(exc), "payload": raw if isinstance(raw, str) else (raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else "")})
+                                except Exception:
+                                    pass
+                                await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
+                            log.exception("Webhook worker %s: redis-stream claimed msg failed: %s", worker_id, exc)
+
+                # Read new messages (">")
+                resp = await r.xreadgroup(
+                    WEBHOOK_STREAM_GROUP,
+                    consumer,
+                    streams={WEBHOOK_STREAM_KEY: ">"},
+                    count=25,
+                    block=5000,
+                )
+                if resp:
+                    for _stream, messages in resp:
+                        for msg_id, fields in messages:
+                            raw = None
+                            try:
+                                raw = fields.get("payload") if isinstance(fields, dict) else None
+                                if raw is None and isinstance(fields, dict):
+                                    raw = fields.get(b"payload")
+                                payload = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else None
+                                if isinstance(payload, (bytes, bytearray)):
+                                    payload = json.loads(payload.decode("utf-8"))
+                                if not isinstance(payload, dict):
+                                    raise ValueError("bad payload")
+                                await process_one(payload, source_id=str(msg_id))
+                                await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
+                                try:
+                                    await r.hdel("wa:webhooks:attempts", str(msg_id))
+                                except Exception:
+                                    pass
+                            except asyncio.TimeoutError:
+                                log.error("Webhook worker %s: msg %s timed out after %ss", worker_id, msg_id, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
+                                try:
+                                    attempts = await r.hincrby("wa:webhooks:attempts", str(msg_id), 1)
+                                except Exception:
+                                    attempts = 1
+                                if int(attempts) >= int(WEBHOOK_MAX_ATTEMPTS):
+                                    try:
+                                        await r.xadd(WEBHOOK_STREAM_DLQ_KEY, {"id": str(msg_id), "error": "timeout", "payload": raw if isinstance(raw, str) else (raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else "")})
+                                    except Exception:
+                                        pass
+                                    await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
+                            except Exception as exc:
+                                try:
+                                    attempts = await r.hincrby("wa:webhooks:attempts", str(msg_id), 1)
+                                except Exception:
+                                    attempts = 1
+                                if int(attempts) >= int(WEBHOOK_MAX_ATTEMPTS):
+                                    try:
+                                        await r.xadd(WEBHOOK_STREAM_DLQ_KEY, {"id": str(msg_id), "error": str(exc), "payload": raw if isinstance(raw, str) else (raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else "")})
+                                    except Exception:
+                                        pass
+                                    await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
+                                log.exception("Webhook worker %s: msg %s failed: %s", worker_id, msg_id, exc)
+                continue
+            except Exception as exc:
+                # If Redis stream read fails, fall back to in-memory queue (best-effort)
+                log.warning("Webhook worker %s: redis stream read failed, falling back to in-memory: %s", worker_id, exc)
+
+        # Fallback: in-memory queue (not durable)
         data = await WEBHOOK_QUEUE.get()
         try:
-            await asyncio.wait_for(
-                message_processor.process_incoming_message(data),
-                timeout=max(1.0, float(WEBHOOK_PROCESSING_TIMEOUT_SECONDS)),
-            )
+            await process_one(data)
         except asyncio.TimeoutError:
-            log.error("Webhook worker %s: processing timed out after %ss", worker_id, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
+            log.error("Webhook worker %s: in-memory processing timed out after %ss", worker_id, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
         except Exception as exc:
-            log.exception("Webhook worker %s: processing failed: %s", worker_id, exc)
+            log.exception("Webhook worker %s: in-memory processing failed: %s", worker_id, exc)
         finally:
             try:
                 WEBHOOK_QUEUE.task_done()
@@ -4554,6 +4698,8 @@ async def startup():
 
     # Start webhook background workers so /webhook can ACK quickly.
     try:
+        # Prefer durable Redis stream queue when Redis is available.
+        await _ensure_webhook_stream_group()
         for i in range(max(1, int(WEBHOOK_WORKERS))):
             asyncio.create_task(_webhook_worker(i + 1))
         print(f"Webhook workers started: {max(1, int(WEBHOOK_WORKERS))} (queue maxsize={WEBHOOK_QUEUE_MAXSIZE})")
@@ -4982,12 +5128,18 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             pass
 
         # ACK fast: enqueue for background processing. If we're overloaded, return 503 so Meta retries.
+        # Best practice: persist the event durably (Redis Stream) before returning 200.
         try:
-            WEBHOOK_QUEUE.put_nowait(data)
+            r = getattr(redis_manager, "redis_client", None)
+            if r and WEBHOOK_USE_REDIS_STREAM:
+                await r.xadd(WEBHOOK_STREAM_KEY, {"payload": json.dumps(data)})
+            else:
+                # Fallback: in-memory queue (not durable across instance crashes)
+                WEBHOOK_QUEUE.put_nowait(data)
         except asyncio.QueueFull:
             return PlainTextResponse("Webhook queue full", status_code=503)
         except Exception:
-            # If we couldn't enqueue, fail fast so Meta retries
+            # If we couldn't persist/enqueue, fail fast so Meta retries.
             return PlainTextResponse("Webhook enqueue failed", status_code=503)
 
         # Also attach a no-op background task to keep FastAPI from optimizing away background infrastructure
@@ -5463,6 +5615,9 @@ async def health_check():
             "queue_size": getattr(WEBHOOK_QUEUE, "qsize", lambda: None)(),
             "queue_maxsize": int(WEBHOOK_QUEUE_MAXSIZE),
             "workers": int(max(1, int(WEBHOOK_WORKERS))),
+            "use_redis_stream": bool(WEBHOOK_USE_REDIS_STREAM and bool(redis_manager.redis_client)),
+            "stream_key": WEBHOOK_STREAM_KEY if (WEBHOOK_USE_REDIS_STREAM and redis_manager.redis_client) else None,
+            "dlq_key": WEBHOOK_STREAM_DLQ_KEY if (WEBHOOK_USE_REDIS_STREAM and redis_manager.redis_client) else None,
         },
         "active_connections": len(connection_manager.active_connections),
         "timestamp": datetime.utcnow().isoformat(),

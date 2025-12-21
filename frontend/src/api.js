@@ -16,6 +16,18 @@ const api = axios.create({
 // Avoid stale caches for GETs and attach auth token
 api.interceptors.request.use((config) => {
   try {
+    // Fallback: attach Authorization header from sessionStorage if present
+    // (used only when cookies are blocked/dropped by the client).
+    try {
+      const t = sessionStorage.getItem('agent_access_token');
+      if (t) {
+        config.headers = {
+          ...(config.headers || {}),
+          Authorization: `Bearer ${t}`,
+        };
+      }
+    } catch {}
+
     if ((config.method || 'get').toLowerCase() === 'get') {
       // Add cache-buster param
       const ts = Date.now();
@@ -49,8 +61,15 @@ api.interceptors.response.use(
         if (!_refreshInFlight) {
           _refreshInFlight = api.post('/auth/refresh').finally(() => { _refreshInFlight = null; });
         }
-        await _refreshInFlight;
-        return api(original);
+        try {
+          await _refreshInFlight;
+          return api(original);
+        } catch (e) {
+          // If refresh fails (e.g., cookies blocked), drop any header token and force re-login.
+          try { sessionStorage.removeItem('agent_access_token'); } catch {}
+          try { window.location.replace('/login'); } catch {}
+          throw e;
+        }
       }
     } catch {}
     return Promise.reject(error);

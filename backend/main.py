@@ -4633,6 +4633,14 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         except Exception:
             token = None
         ws_agent = parse_access_token(token or "")
+        # Fallback: allow token via query string when cookies are blocked.
+        if not ws_agent:
+            try:
+                qs_token = websocket.query_params.get("token")  # type: ignore[attr-defined]
+            except Exception:
+                qs_token = None
+            if qs_token:
+                ws_agent = parse_access_token(str(qs_token))
         if not ws_agent:
             # Helpful log for diagnosing cookie issues in production
             try:
@@ -4640,7 +4648,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             except Exception:
                 has_cookie_hdr = False
             logging.getLogger(__name__).warning(
-                "WS auth failed: missing/invalid %s cookie (has_cookie_header=%s) path=/ws/%s",
+                "WS auth failed: missing/invalid cookie and no valid token query (has_cookie_header=%s) path=/ws/%s",
                 ACCESS_COOKIE_NAME,
                 has_cookie_hdr,
                 user_id,
@@ -5210,7 +5218,9 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
 
     # Set cookies (request/response are always injected by FastAPI)
     _set_auth_cookies(response, request, access_token, refresh_token)
-    return {"ok": True, "username": username, "is_admin": bool(is_admin)}
+    # Also return access token so clients can fall back to Authorization header
+    # if their environment blocks cookies (some browsers/settings/extensions).
+    return {"ok": True, "username": username, "is_admin": bool(is_admin), "access_token": access_token, "token_type": "bearer"}
 
 @app.post("/auth/refresh")
 async def auth_refresh(request: Request, response: Response):

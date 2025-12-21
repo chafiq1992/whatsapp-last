@@ -305,7 +305,12 @@ export default function App() {
       `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/`;
 
     const connectAdmin = () => {
-      const ws = new WebSocket(`${wsBase}admin`);
+      let tokenQS = '';
+      try {
+        const t = sessionStorage.getItem('agent_access_token');
+        if (t) tokenQS = `?token=${encodeURIComponent(t)}`;
+      } catch {}
+      const ws = new WebSocket(`${wsBase}admin${tokenQS}`);
       adminWsRef.current = ws;
       ws.addEventListener('open', () => {
         retry = 0;
@@ -410,8 +415,12 @@ export default function App() {
       `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/`;
 
     const connectUser = () => {
-      const agentQS = currentAgent ? `?agent=${encodeURIComponent(currentAgent)}` : '';
-      const ws = new WebSocket(`${wsBase}${activeUserRef.current?.user_id}${agentQS}`);
+      let tokenQS = '';
+      try {
+        const t = sessionStorage.getItem('agent_access_token');
+        if (t) tokenQS = `?token=${encodeURIComponent(t)}`;
+      } catch {}
+      const ws = new WebSocket(`${wsBase}${activeUserRef.current?.user_id}${tokenQS}`);
       wsRef.current = ws;
       ws.addEventListener('open', () => {
         retry = 0;

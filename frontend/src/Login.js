@@ -19,9 +19,12 @@ export default function Login({ onSuccess }) {
       const res = await api.post('/auth/login', { username, password });
       const user = res?.data?.username || username;
       const isAdmin = !!res?.data?.is_admin;
+      const accessToken = res?.data?.access_token;
       try {
         if (user) localStorage.setItem('agent_username', user);
         localStorage.setItem('agent_is_admin', isAdmin ? '1' : '0');
+        // Fallback token for environments that block cookies
+        if (accessToken) sessionStorage.setItem('agent_access_token', accessToken);
       } catch {}
       if (typeof onSuccess === 'function') onSuccess(user, null, isAdmin);
     } catch (e) {

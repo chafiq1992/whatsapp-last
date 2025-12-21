@@ -47,6 +47,19 @@ Messages are stored in a local SQLite file. By default the backend writes to
 `data/whatsapp_messages.db`. The directory is created automatically if it does
 not exist.
 
+### Bootstrapping the first admin agent
+
+Fresh deployments start with an empty `agents` table. To avoid a chicken-and-egg
+where creating agents requires an admin login, you can bootstrap an initial
+admin user via environment variables:
+
+- `BOOTSTRAP_ADMIN_USERNAME`
+- `BOOTSTRAP_ADMIN_PASSWORD`
+- `BOOTSTRAP_ADMIN_NAME` (optional)
+
+If these are set and the `agents` table is empty, the backend will create that
+admin user on startup.
+
 To use PostgreSQL instead of SQLite, set the `DATABASE_URL` environment variable
 to a valid connection string. When this variable is present the backend will use
 `asyncpg` to communicate with PostgreSQL.
@@ -71,6 +84,11 @@ Uniform bucket-level access accordingly.
 When deploying to providers with ephemeral filesystems, point the `DB_PATH`
 environment variable at a location backed by a persistent volume so that chat
 history is retained across restarts.
+
+### Health checks
+
+`GET /health` includes a lightweight DB connectivity check (`db.ok`) so you can
+quickly verify whether the service can reach its database in production.
 
 Recent versions add indexes on the `wa_message_id` and `temp_id` columns of the
 `messages` table. Running the backend automatically applies these indexes if

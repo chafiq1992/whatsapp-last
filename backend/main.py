@@ -61,21 +61,27 @@ MEDIA_DIR.mkdir(exist_ok=True)
 
 # (static mount will be added later, after route declarations)
 
+# Load environment variables early so defaults below can be overridden by a local `.env`.
+# In managed platforms (Cloud Run/Render), environment variables are injected directly and this is a no-op.
+load_dotenv()
 
 # ── Cloud‑Run helpers ────────────────────────────────────────────
 PORT = int(os.getenv("PORT", "8080"))
 BASE_URL = os.getenv("BASE_URL", f"http://localhost:{PORT}")
 REDIS_URL = os.getenv("REDIS_URL", "")
-DB_PATH = os.getenv("DB_PATH") or "/tmp/whatsapp_messages.db"
+DB_PATH = os.getenv("DB_PATH") or str(ROOT_DIR / "data" / "whatsapp_messages.db")
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional PostgreSQL URL
 PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "1"))
 PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "4"))
 REQUIRE_POSTGRES = int(os.getenv("REQUIRE_POSTGRES", "1"))  # when 1 and DATABASE_URL is set, never fallback to SQLite
+# SQLite lock/backoff tuning (ms). Keep small so endpoints don't hang for a long time under contention.
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "3000"))
+# Auth DB operation timeout (seconds). Prevents Cloud Run from returning an upstream 504 on slow DB calls.
+AUTH_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_DB_TIMEOUT_SECONDS", "8"))
+# Health DB check timeout (seconds)
+HEALTH_DB_TIMEOUT_SECONDS = float(os.getenv("HEALTH_DB_TIMEOUT_SECONDS", "2"))
 # Anything that **must not** be baked in the image (tokens, IDs …) is
 # already picked up with os.getenv() further below. Keep it that way.
-
-# Load environment variables
-load_dotenv()
 
 # Configure logging early
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -1282,9 +1288,29 @@ class DatabaseManager:
             if self.db_url and REQUIRE_POSTGRES:
                 raise RuntimeError("Postgres required but connection pool is unavailable")
             self.use_postgres = False
-        async with aiosqlite.connect(self.db_path) as db:
+        # For SQLite, keep lock waits bounded so requests don't hang indefinitely.
+        # `timeout` is in seconds and controls how long SQLite waits to acquire locks.
+        timeout_s = max(0.1, float(SQLITE_BUSY_TIMEOUT_MS) / 1000.0)
+        async with aiosqlite.connect(self.db_path, timeout=timeout_s) as db:
             db.row_factory = aiosqlite.Row
+            try:
+                await db.execute(f"PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_MS)}")
+            except Exception:
+                pass
             yield db
+
+    async def ping(self) -> bool:
+        """Lightweight DB connectivity check (used by /health)."""
+        try:
+            async with self._conn() as db:
+                if self.use_postgres:
+                    row = await db.fetchrow("SELECT 1 AS ok")
+                    return bool(row[0]) if row else False
+                cur = await db.execute("SELECT 1")
+                row = await cur.fetchone()
+                return bool(row[0]) if row else False
+        except Exception:
+            return False
 
     # ── schema ──
     async def init_db(self):
@@ -4408,6 +4434,33 @@ async def no_cache_html(request: StarletteRequest, call_next):
 async def startup():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     await db_manager.init_db()
+    # Optional: bootstrap an initial admin agent for fresh deployments.
+    # This avoids a chicken-and-egg situation where /admin/agents requires an admin,
+    # but there are no agents yet.
+    try:
+        bootstrap_user = (os.getenv("BOOTSTRAP_ADMIN_USERNAME", "") or "").strip()
+        bootstrap_pass = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "") or ""
+        bootstrap_name = (os.getenv("BOOTSTRAP_ADMIN_NAME", "") or "").strip() or bootstrap_user or "Admin"
+        if bootstrap_user and bootstrap_pass:
+            agent_count = 0
+            async with db_manager._conn() as db:
+                if db_manager.use_postgres:
+                    row = await db.fetchrow("SELECT COUNT(*) AS c FROM agents")
+                    agent_count = int(row[0]) if row else 0
+                else:
+                    cur = await db.execute("SELECT COUNT(*) FROM agents")
+                    row = await cur.fetchone()
+                    agent_count = int(row[0]) if row else 0
+            if agent_count == 0:
+                await db_manager.create_agent(
+                    username=bootstrap_user,
+                    name=bootstrap_name,
+                    password_hash=hash_password(bootstrap_pass),
+                    is_admin=1,
+                )
+                print(f"✅ Bootstrapped initial admin agent: {bootstrap_user}")
+    except Exception as exc:
+        print(f"Bootstrap admin skipped/failed: {exc}")
     try:
         # Safe startup hint about DB backend and pool settings
         from urllib.parse import urlparse
@@ -5192,6 +5245,19 @@ def _clear_auth_cookies(response: Response):
     response.delete_cookie(ACCESS_COOKIE_NAME, **cookie_args)
     response.delete_cookie(REFRESH_COOKIE_NAME, **cookie_args)
 
+async def _auth_db_call(coro, *, op: str):
+    """Await a DB coroutine with a hard timeout so auth endpoints don't hang and hit upstream 504s."""
+    try:
+        return await asyncio.wait_for(coro, timeout=AUTH_DB_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logging.getLogger(__name__).error("Auth DB operation timed out: %s (timeout=%ss)", op, AUTH_DB_TIMEOUT_SECONDS)
+        raise HTTPException(status_code=503, detail="Authentication backend timeout")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Auth DB operation failed: %s: %s", op, exc)
+        raise HTTPException(status_code=503, detail="Authentication backend unavailable")
+
 @app.post("/auth/login")
 async def auth_login(request: Request, response: Response, payload: dict = Body(...)):
     if DISABLE_AUTH:
@@ -5201,20 +5267,19 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
     else:
         username = (payload.get("username") or "").strip()
         password = payload.get("password") or ""
-        stored = await db_manager.get_agent_password_hash(username)
+        stored = await _auth_db_call(db_manager.get_agent_password_hash(username), op=f"get_agent_password_hash({username})")
         if not stored or not verify_password(password, stored):
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        is_admin = bool(await db_manager.get_agent_is_admin(username))
+        is_admin = bool(await _auth_db_call(db_manager.get_agent_is_admin(username), op=f"get_agent_is_admin({username})"))
 
     access_token = issue_access_token(username, is_admin)
     refresh_token = secrets.token_urlsafe(48)
     refresh_hash = _hash_refresh_token(refresh_token)
     expires_at = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
-    try:
-        await db_manager.store_refresh_token(refresh_hash, username, expires_at)
-    except Exception:
-        # If DB token write fails, do not authenticate
-        raise HTTPException(status_code=500, detail="Failed to create session")
+    await _auth_db_call(
+        db_manager.store_refresh_token(refresh_hash, username, expires_at),
+        op=f"store_refresh_token({username})",
+    )
 
     # Set cookies (request/response are always injected by FastAPI)
     _set_auth_cookies(response, request, access_token, refresh_token)
@@ -5230,7 +5295,7 @@ async def auth_refresh(request: Request, response: Response):
     if not refresh:
         raise HTTPException(status_code=401, detail="Unauthorized")
     refresh_hash = _hash_refresh_token(refresh)
-    row = await db_manager.get_refresh_token(refresh_hash)
+    row = await _auth_db_call(db_manager.get_refresh_token(refresh_hash), op="get_refresh_token(hash)")
     if not row:
         raise HTTPException(status_code=401, detail="Unauthorized")
     if row.get("revoked_at"):
@@ -5246,14 +5311,14 @@ async def auth_refresh(request: Request, response: Response):
     username = str(row.get("agent_username") or "").strip()
     if not username:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    is_admin = bool(await db_manager.get_agent_is_admin(username))
+    is_admin = bool(await _auth_db_call(db_manager.get_agent_is_admin(username), op=f"get_agent_is_admin({username})"))
 
     # Rotate refresh token
     new_refresh = secrets.token_urlsafe(48)
     new_refresh_hash = _hash_refresh_token(new_refresh)
     new_expires = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
-    await db_manager.store_refresh_token(new_refresh_hash, username, new_expires)
-    await db_manager.revoke_refresh_token(refresh_hash)
+    await _auth_db_call(db_manager.store_refresh_token(new_refresh_hash, username, new_expires), op=f"store_refresh_token({username})")
+    await _auth_db_call(db_manager.revoke_refresh_token(refresh_hash), op="revoke_refresh_token(hash)")
 
     access_token = issue_access_token(username, is_admin)
     _set_auth_cookies(response, request, access_token, new_refresh)
@@ -5331,9 +5396,21 @@ async def update_conversation_tags(user_id: str, payload: dict = Body(...), acto
 async def health_check():
     """Health check endpoint"""  
     redis_status = "connected" if redis_manager.redis_client else "disconnected"
+    db_backend = "postgres" if db_manager.use_postgres else "sqlite"
+    db_ok = False
+    try:
+        db_ok = await asyncio.wait_for(db_manager.ping(), timeout=HEALTH_DB_TIMEOUT_SECONDS)
+    except Exception:
+        db_ok = False
     return {
         "status": "healthy",
         "redis": redis_status,
+        "db": {
+            "backend": db_backend,
+            "ok": bool(db_ok),
+            # expose path only for sqlite to aid debugging; avoid leaking connection strings
+            "db_path": DB_PATH if db_backend == "sqlite" else None,
+        },
         "active_connections": len(connection_manager.active_connections),
         "timestamp": datetime.utcnow().isoformat(),
         "whatsapp_config": {

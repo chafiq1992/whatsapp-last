@@ -28,7 +28,14 @@ export default function Login({ onSuccess }) {
       } catch {}
       if (typeof onSuccess === 'function') onSuccess(user, null, isAdmin);
     } catch (e) {
-      setError('Invalid credentials');
+      const status = e?.response?.status;
+      if (status === 401) {
+        setError('Invalid credentials');
+      } else if (status === 503 || status === 504) {
+        setError('Server timeout/unavailable. Please try again.');
+      } else {
+        setError('Login failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }

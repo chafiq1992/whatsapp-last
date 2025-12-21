@@ -159,6 +159,7 @@ ACCESS_TOKEN_TTL_SECONDS = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "900"))  # 
 REFRESH_TOKEN_TTL_SECONDS = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(30 * 24 * 3600)))  # 30 days
 AUTH_COOKIE_DOMAIN = (os.getenv("AUTH_COOKIE_DOMAIN", "") or "").strip() or None
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "").strip()  # "", "0", "1" (auto if empty)
+AUTH_COOKIE_SAMESITE = (os.getenv("AUTH_COOKIE_SAMESITE", "") or "").strip().lower() or "none"  # none|lax|strict
 ACCESS_COOKIE_NAME = "agent_access"
 REFRESH_COOKIE_NAME = "agent_refresh"
 JWT_ISSUER = os.getenv("JWT_ISSUER", "whatsapp-inbox")
@@ -250,6 +251,19 @@ def _cookie_secure_flag(request: Request) -> bool:
         return (request.url.scheme or "").lower() == "https"
     except Exception:
         return False
+
+def _cookie_domain_for_request(request: Request) -> str | None:
+    """Return AUTH_COOKIE_DOMAIN only if it matches the current host (prevents invalid Domain attrs)."""
+    if not AUTH_COOKIE_DOMAIN:
+        return None
+    try:
+        host = (request.url.hostname or "").lower()
+        dom = str(AUTH_COOKIE_DOMAIN).lstrip(".").lower()
+        if host == dom or host.endswith("." + dom):
+            return AUTH_COOKIE_DOMAIN
+    except Exception:
+        return None
+    return None
 
 def _extract_access_token_from_request(request: Request) -> Optional[str]:
     try:
@@ -4620,6 +4634,17 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             token = None
         ws_agent = parse_access_token(token or "")
         if not ws_agent:
+            # Helpful log for diagnosing cookie issues in production
+            try:
+                has_cookie_hdr = bool(websocket.headers.get("cookie"))  # type: ignore[attr-defined]
+            except Exception:
+                has_cookie_hdr = False
+            logging.getLogger(__name__).warning(
+                "WS auth failed: missing/invalid %s cookie (has_cookie_header=%s) path=/ws/%s",
+                ACCESS_COOKIE_NAME,
+                has_cookie_hdr,
+                user_id,
+            )
             try:
                 await websocket.close(code=4401)
             except Exception:
@@ -5135,21 +5160,26 @@ def _parse_dt_any(value: Optional[str]) -> Optional[datetime]:
         return None
 
 def _set_auth_cookies(response: Response, request: Request, access_token: str, refresh_token: str):
-    secure = _cookie_secure_flag(request)
+    # For SameSite=None, Secure must be true or browsers will drop the cookie.
+    secure = _cookie_secure_flag(request) or (AUTH_COOKIE_SAMESITE == "none")
+    samesite = AUTH_COOKIE_SAMESITE if AUTH_COOKIE_SAMESITE in ("none", "lax", "strict") else "none"
     cookie_args = {
         "httponly": True,
         "secure": secure,
-        "samesite": "lax",
+        "samesite": samesite,
         "path": "/",
     }
-    if AUTH_COOKIE_DOMAIN:
-        cookie_args["domain"] = AUTH_COOKIE_DOMAIN
+    dom = _cookie_domain_for_request(request)
+    if dom:
+        cookie_args["domain"] = dom
     response.set_cookie(ACCESS_COOKIE_NAME, access_token, max_age=ACCESS_TOKEN_TTL_SECONDS, **cookie_args)
     response.set_cookie(REFRESH_COOKIE_NAME, refresh_token, max_age=REFRESH_TOKEN_TTL_SECONDS, **cookie_args)
 
 def _clear_auth_cookies(response: Response):
-    cookie_args = {"path": "/", "samesite": "lax"}
+    samesite = AUTH_COOKIE_SAMESITE if AUTH_COOKIE_SAMESITE in ("none", "lax", "strict") else "none"
+    cookie_args = {"path": "/", "samesite": samesite}
     if AUTH_COOKIE_DOMAIN:
+        # Best-effort: allow env-configured domain clearing.
         cookie_args["domain"] = AUTH_COOKIE_DOMAIN
     response.delete_cookie(ACCESS_COOKIE_NAME, **cookie_args)
     response.delete_cookie(REFRESH_COOKIE_NAME, **cookie_args)

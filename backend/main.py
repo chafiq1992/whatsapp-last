@@ -183,7 +183,14 @@ except Exception:
 #
 AGENT_AUTH_SECRET = os.getenv("AGENT_AUTH_SECRET", "") or os.getenv("SECRET_KEY", "")
 
-ACCESS_TOKEN_TTL_SECONDS = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "900"))  # 15 min
+# Default to 24h to avoid frequent logouts in production.
+# We also enforce a minimum of 24h to prevent accidental short TTLs in Cloud Run env.
+# - 86400  = 24 hours
+# - 172800 = 48 hours
+ACCESS_TOKEN_TTL_SECONDS = max(
+    int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", str(24 * 3600))),
+    24 * 3600,
+)
 REFRESH_TOKEN_TTL_SECONDS = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(30 * 24 * 3600)))  # 30 days
 AUTH_COOKIE_DOMAIN = (os.getenv("AUTH_COOKIE_DOMAIN", "") or "").strip() or None
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "").strip()  # "", "0", "1" (auto if empty)
@@ -191,6 +198,8 @@ AUTH_COOKIE_SAMESITE = (os.getenv("AUTH_COOKIE_SAMESITE", "") or "").strip().low
 ACCESS_COOKIE_NAME = "agent_access"
 REFRESH_COOKIE_NAME = "agent_refresh"
 JWT_ISSUER = os.getenv("JWT_ISSUER", "whatsapp-inbox")
+EXPOSE_REFRESH_TOKEN_FALLBACK = os.getenv("EXPOSE_REFRESH_TOKEN_FALLBACK", "1") == "1"
+REFRESH_ROTATE_ON_REFRESH = os.getenv("REFRESH_ROTATE_ON_REFRESH", "0") == "1"
 
 pwd_context = CryptContext(
     schemes=["argon2", "bcrypt"],
@@ -5768,13 +5777,35 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
     _set_auth_cookies(response, request, access_token, refresh_token)
     # Also return access token so clients can fall back to Authorization header
     # if their environment blocks cookies (some browsers/settings/extensions).
-    return {"ok": True, "username": username, "is_admin": bool(is_admin), "access_token": access_token, "token_type": "bearer"}
+    out = {"ok": True, "username": username, "is_admin": bool(is_admin), "access_token": access_token, "token_type": "bearer"}
+    # Optional: also return refresh token as a fallback (for clients that can't use cookies).
+    try:
+        wants = bool(payload.get("token_fallback")) or bool(payload.get("use_token_fallback"))
+    except Exception:
+        wants = False
+    if EXPOSE_REFRESH_TOKEN_FALLBACK and wants:
+        out["refresh_token"] = refresh_token
+        out["refresh_token_ttl_seconds"] = int(REFRESH_TOKEN_TTL_SECONDS)
+    return out
 
 @app.post("/auth/refresh")
 async def auth_refresh(request: Request, response: Response):
     if DISABLE_AUTH:
         return {"ok": True, "username": "admin", "is_admin": True}
     refresh = request.cookies.get(REFRESH_COOKIE_NAME) or ""
+    # Fallback: accept refresh token from header for clients that can't store cookies
+    if not refresh:
+        try:
+            refresh = (request.headers.get("x-refresh-token") or request.headers.get("X-Refresh-Token") or "").strip()
+        except Exception:
+            refresh = ""
+    if not refresh:
+        # Optional: accept JSON body {refresh_token:"..."} (no dependency on cookies)
+        try:
+            body = await request.json()
+            refresh = str((body or {}).get("refresh_token") or "").strip()
+        except Exception:
+            refresh = ""
     if not refresh:
         raise HTTPException(status_code=401, detail="Unauthorized")
     refresh_hash = _hash_refresh_token(refresh)
@@ -5796,22 +5827,56 @@ async def auth_refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Unauthorized")
     is_admin = bool(await _auth_db_call(db_manager.get_agent_is_admin(username), op=f"get_agent_is_admin({username})"))
 
-    # Rotate refresh token
-    new_refresh = secrets.token_urlsafe(48)
-    new_refresh_hash = _hash_refresh_token(new_refresh)
-    new_expires = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
-    await _auth_db_call(db_manager.store_refresh_token(new_refresh_hash, username, new_expires), op=f"store_refresh_token({username})")
-    await _auth_db_call(db_manager.revoke_refresh_token(refresh_hash), op="revoke_refresh_token(hash)")
-
+    # Issue a new access token. By default we DO NOT rotate refresh tokens on every refresh
+    # to avoid multi-tab/device race conditions that can log users out.
     access_token = issue_access_token(username, is_admin)
-    _set_auth_cookies(response, request, access_token, new_refresh)
-    return {"ok": True, "username": username, "is_admin": bool(is_admin)}
+
+    if REFRESH_ROTATE_ON_REFRESH:
+        new_refresh = secrets.token_urlsafe(48)
+        new_refresh_hash = _hash_refresh_token(new_refresh)
+        new_expires = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
+        await _auth_db_call(db_manager.store_refresh_token(new_refresh_hash, username, new_expires), op=f"store_refresh_token({username})")
+        await _auth_db_call(db_manager.revoke_refresh_token(refresh_hash), op="revoke_refresh_token(hash)")
+        _set_auth_cookies(response, request, access_token, new_refresh)
+        out_refresh = new_refresh
+    else:
+        # Keep the same refresh token; just refresh the access cookie.
+        # (Keep refresh cookie as-is; browsers will continue to send it.)
+        try:
+            response.set_cookie(
+                ACCESS_COOKIE_NAME,
+                access_token,
+                max_age=ACCESS_TOKEN_TTL_SECONDS,
+                httponly=True,
+                secure=_cookie_secure_flag(request) or (AUTH_COOKIE_SAMESITE == "none"),
+                samesite=(AUTH_COOKIE_SAMESITE if AUTH_COOKIE_SAMESITE in ("none", "lax", "strict") else "none"),
+                path="/",
+                **({"domain": _cookie_domain_for_request(request)} if _cookie_domain_for_request(request) else {}),
+            )
+        except Exception:
+            # Fallback to helper (will also rewrite refresh cookie, but with same token if caller had it)
+            _set_auth_cookies(response, request, access_token, refresh)
+        out_refresh = refresh
+
+    return {
+        "ok": True,
+        "username": username,
+        "is_admin": bool(is_admin),
+        "access_token": access_token,
+        "token_type": "bearer",
+        **({"refresh_token": out_refresh, "refresh_token_ttl_seconds": int(REFRESH_TOKEN_TTL_SECONDS)} if EXPOSE_REFRESH_TOKEN_FALLBACK else {}),
+    }
 
 @app.post("/auth/logout")
 async def auth_logout(request: Request, response: Response):
     if DISABLE_AUTH:
         return {"ok": True}
     refresh = request.cookies.get(REFRESH_COOKIE_NAME) or ""
+    if not refresh:
+        try:
+            refresh = (request.headers.get("x-refresh-token") or request.headers.get("X-Refresh-Token") or "").strip()
+        except Exception:
+            refresh = ""
     if refresh:
         try:
             await db_manager.revoke_refresh_token(_hash_refresh_token(refresh))

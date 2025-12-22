@@ -352,7 +352,24 @@ def _is_public_path(path: str) -> bool:
     # Webhook endpoints must remain public for Meta
     if path.startswith("/webhook"):
         return True
+    # Image proxy must be reachable by <img> tags (no Authorization header).
+    # Endpoint itself enforces allowlist/auth to avoid becoming an open proxy.
+    if path.startswith("/proxy-image"):
+        return True
     return False
+
+def _maybe_get_agent_from_request(request: Request) -> Optional[dict]:
+    """Best-effort auth parse for endpoints that are public but still want gating for some hosts."""
+    if DISABLE_AUTH:
+        return {"username": "admin", "is_admin": True}
+    try:
+        token = _extract_access_token_from_request(request)
+        parsed = parse_access_token(token or "")
+        if parsed and parsed.get("username"):
+            return {"username": parsed["username"], "is_admin": bool(parsed.get("is_admin"))}
+    except Exception:
+        pass
+    return None
 # Get environment variables
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "chafiq")
 ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "your_access_token_here")
@@ -6640,7 +6657,7 @@ async def proxy_audio(url: str, request: StarletteRequest):
 
 
 @app.get("/proxy-image")
-async def proxy_image(url: str, w: int | None = None, q: int | None = None):
+async def proxy_image(request: Request, url: str, w: int | None = None, q: int | None = None):
     """Proxy/redirect images.
 
     Prefer 302 redirect to signed GCS URL when our bucket; otherwise fetch and
@@ -6648,6 +6665,21 @@ async def proxy_image(url: str, w: int | None = None, q: int | None = None):
     """
     if not url or not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Invalid url")
+    # Public access is ONLY allowed for safe, whitelisted hosts (e.g., Shopify CDN).
+    # Any other host requires a valid app auth token, to avoid turning this into an open proxy
+    # and to avoid accidentally exposing private GCS objects via server credentials.
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        host = ""
+    # Allow Shopify CDN images without auth (catalog thumbnails in <img> tags don't carry Authorization headers).
+    PUBLIC_PROXY_IMAGE_HOSTS = ("cdn.shopify.com",)
+    is_public_host = any(host == h or host.endswith("." + h) for h in PUBLIC_PROXY_IMAGE_HOSTS)
+    if not is_public_host:
+        agent = _maybe_get_agent_from_request(request)
+        if not agent:
+            raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         signed = maybe_signed_url_for(url, ttl_seconds=600)
         # Only redirect to signed URL when not resizing
@@ -6707,6 +6739,19 @@ async def proxy_image(url: str, w: int | None = None, q: int | None = None):
             except Exception:
                 # Fall back to generic HTTP fetch below
                 pass
+        # Clamp resizing parameters to avoid excessive CPU/memory usage per request.
+        if w is not None:
+            try:
+                w = int(w)
+            except Exception:
+                w = None
+            if w is not None:
+                w = max(1, min(1024, w))
+        if q is not None:
+            try:
+                q = int(q)
+            except Exception:
+                q = None
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         media_type = resp.headers.get("Content-Type", "image/jpeg")

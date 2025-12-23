@@ -143,6 +143,11 @@ SEND_TEXT_PER_MIN = int(os.getenv("SEND_TEXT_PER_MIN", "30"))
 SEND_MEDIA_PER_MIN = int(os.getenv("SEND_MEDIA_PER_MIN", "5"))
 BURST_WINDOW_SEC = int(os.getenv("BURST_WINDOW_SEC", "10"))
 ENABLE_WS_PUBSUB = os.getenv("ENABLE_WS_PUBSUB", "1") == "1"
+TRACK_CLICKS_PER_MIN = int(os.getenv("TRACK_CLICKS_PER_MIN", "240"))
+# NOTE: TRACK_IP_SALT is finalized after AGENT_AUTH_SECRET is loaded (defined later).
+TRACK_IP_SALT = (os.getenv("TRACK_IP_SALT", "") or "").strip()
+TRACK_ALLOWED_ORIGINS_ENV = (os.getenv("TRACK_ALLOWED_ORIGINS", "") or "").strip()
+TRACK_ALLOWED_ORIGINS = [o.strip().lower() for o in TRACK_ALLOWED_ORIGINS_ENV.split(",") if o.strip()]
 
 # Global semaphore to cap concurrent WhatsApp Graph API calls per instance
 wa_semaphore = asyncio.Semaphore(WA_MAX_CONCURRENCY)
@@ -182,6 +187,10 @@ except Exception:
 # - Refresh tokens are random secrets stored hashed in DB and sent as HttpOnly cookies.
 #
 AGENT_AUTH_SECRET = os.getenv("AGENT_AUTH_SECRET", "") or os.getenv("SECRET_KEY", "")
+if not TRACK_IP_SALT:
+    # Best-effort: re-use auth secret as salt (keeps deterministic hashing across instances),
+    # otherwise fall back to a dev-only salt.
+    TRACK_IP_SALT = (AGENT_AUTH_SECRET or "dev-unsafe-salt").strip()
 
 # Default to 24h to avoid frequent logouts in production.
 # We also enforce a minimum of 24h to prevent accidental short TTLs in Cloud Run env.
@@ -360,6 +369,9 @@ def _is_public_path(path: str) -> bool:
         return True
     # Webhook endpoints must remain public for Meta
     if path.startswith("/webhook"):
+        return True
+    # Public tracking endpoints (Shopify theme / website)
+    if path.startswith("/track/"):
         return True
     # Image proxy must be reachable by <img> tags (no Authorization header).
     # Endpoint itself enforces allowlist/auth to avoid becoming an open proxy.
@@ -1475,8 +1487,16 @@ class DatabaseManager:
                     user_id        TEXT PRIMARY KEY,
                     assigned_agent TEXT REFERENCES agents(username),
                     tags           TEXT, -- JSON array of strings
-                    avatar_url     TEXT
+                    avatar_url     TEXT,
+                    -- attribution fields (e.g. website WhatsApp icon)
+                    source         TEXT,
+                    click_id       TEXT,
+                    source_first_inbound_ts TEXT
                 );
+                CREATE INDEX IF NOT EXISTS idx_conv_source_ts
+                    ON conversation_meta (source, source_first_inbound_ts);
+                CREATE INDEX IF NOT EXISTS idx_conv_click_id
+                    ON conversation_meta (click_id);
 
                 -- Internal, agent-only notes attached to a conversation
                 CREATE TABLE IF NOT EXISTS conversation_notes (
@@ -1533,6 +1553,20 @@ class DatabaseManager:
                     key   TEXT PRIMARY KEY,
                     value TEXT
                 );
+
+                -- Website (Shopify) WhatsApp click tracking (public, append-only)
+                CREATE TABLE IF NOT EXISTS whatsapp_clicks (
+                    click_id    TEXT PRIMARY KEY,
+                    ts          TEXT NOT NULL,
+                    page_url    TEXT,
+                    product_id  TEXT,
+                    shop_domain TEXT,
+                    ua          TEXT,
+                    ip_hash     TEXT,
+                    created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_whatsapp_clicks_ts
+                    ON whatsapp_clicks (ts);
 
                 -- Durable webhook queue (SQLite fallback; Postgres has a dedicated JSONB schema below)
                 CREATE TABLE IF NOT EXISTS webhook_events (
@@ -1607,6 +1641,25 @@ class DatabaseManager:
             await self._add_column_if_missing(db, "messages", "server_ts", "TEXT")
             # Ensure agent attribution column exists
             await self._add_column_if_missing(db, "messages", "agent_username", "TEXT")
+
+            # Ensure conversation attribution columns exist
+            await self._add_column_if_missing(db, "conversation_meta", "source", "TEXT")
+            await self._add_column_if_missing(db, "conversation_meta", "click_id", "TEXT")
+            await self._add_column_if_missing(db, "conversation_meta", "source_first_inbound_ts", "TEXT")
+            try:
+                # Indexes (idempotent)
+                if self.use_postgres:
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_source_ts ON conversation_meta (source, source_first_inbound_ts)")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_click_id ON conversation_meta (click_id)")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_whatsapp_clicks_ts ON whatsapp_clicks (ts)")
+                else:
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_source_ts ON conversation_meta (source, source_first_inbound_ts)")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_click_id ON conversation_meta (click_id)")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_whatsapp_clicks_ts ON whatsapp_clicks (ts)")
+                    await db.commit()
+            except Exception:
+                # Non-fatal: indexes are best-effort
+                pass
             # Add index on server_ts for ordering by receive time
             if self.use_postgres:
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_msg_user_server_ts ON messages (user_id, server_ts)")
@@ -1885,7 +1938,10 @@ class DatabaseManager:
     # ── Conversation metadata (assignment, tags, avatar) ───────────
     async def get_conversation_meta(self, user_id: str) -> dict:
         async with self._conn() as db:
-            query = self._convert("SELECT assigned_agent, tags, avatar_url FROM conversation_meta WHERE user_id = ?")
+            query = self._convert(
+                "SELECT assigned_agent, tags, avatar_url, source, click_id, source_first_inbound_ts "
+                "FROM conversation_meta WHERE user_id = ?"
+            )
             params = (user_id,)
             if self.use_postgres:
                 row = await db.fetchrow(query, *params)
@@ -1901,6 +1957,257 @@ class DatabaseManager:
             except Exception:
                 d["tags"] = []
             return d
+
+    async def log_whatsapp_click(
+        self,
+        click_id: str,
+        ts: str,
+        page_url: Optional[str] = None,
+        product_id: Optional[str] = None,
+        shop_domain: Optional[str] = None,
+        ua: Optional[str] = None,
+        ip_hash: Optional[str] = None,
+    ) -> None:
+        async with self._conn() as db:
+            query = self._convert(
+                """
+                INSERT INTO whatsapp_clicks (click_id, ts, page_url, product_id, shop_domain, ua, ip_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(click_id) DO NOTHING
+                """
+            )
+            params = (click_id, ts, page_url, product_id, shop_domain, ua, ip_hash)
+            if self.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+
+    async def try_set_conversation_attribution_from_click(
+        self,
+        user_id: str,
+        click_id: str,
+        first_inbound_ts: str,
+        source: str = "shopify_wa_icon",
+    ) -> bool:
+        """Set attribution only if not already attributed. Returns True if updated."""
+        if not user_id or not click_id:
+            return False
+        try:
+            meta = await self.get_conversation_meta(user_id)
+            if (meta.get("source") or meta.get("click_id")):
+                return False
+        except Exception:
+            meta = {}
+        async with self._conn() as db:
+            query = self._convert(
+                """
+                INSERT INTO conversation_meta (user_id, source, click_id, source_first_inbound_ts)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    source=EXCLUDED.source,
+                    click_id=EXCLUDED.click_id,
+                    source_first_inbound_ts=COALESCE(source_first_inbound_ts, EXCLUDED.source_first_inbound_ts)
+                """
+            )
+            params = (user_id, source, click_id, first_inbound_ts)
+            if self.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+        return True
+
+    async def get_shopify_inbox_analytics(self, start: Optional[str] = None, end: Optional[str] = None, bucket: str = "day") -> dict:
+        """Analytics for website WhatsApp icon funnel (clicks -> initiated chats -> inbound msgs -> orders)."""
+        end_iso = end or datetime.utcnow().isoformat()
+        start_iso = start or (datetime.utcnow() - timedelta(days=30)).isoformat()
+        bucket = (bucket or "day").lower().strip()
+        if bucket not in ("hour", "day"):
+            bucket = "day"
+
+        def _bucket_expr_sqlite(col: str) -> str:
+            # Normalize to "YYYY-MM-DDTHH:00:00" or "YYYY-MM-DDT00:00:00" text
+            if bucket == "hour":
+                return f"strftime('%Y-%m-%dT%H:00:00', SUBSTR(REPLACE({col}, ' ', 'T'), 1, 19))"
+            return f"strftime('%Y-%m-%dT00:00:00', SUBSTR(REPLACE({col}, ' ', 'T'), 1, 19))"
+
+        def _bucket_expr_pg(col: str) -> str:
+            # Cast text timestamps to timestamp, then date_trunc and format back to ISO-ish text
+            if bucket == "hour":
+                return f"to_char(date_trunc('hour', CAST(SUBSTRING(REPLACE({col}, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP)), 'YYYY-MM-DD\"T\"HH24:00:00')"
+            return f"to_char(date_trunc('day', CAST(SUBSTRING(REPLACE({col}, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP)), 'YYYY-MM-DD\"T\"00:00:00')"
+
+        async with self._conn() as db:
+            src = "shopify_wa_icon"
+
+            # Clicks
+            if self.use_postgres:
+                b_click = _bucket_expr_pg("ts")
+                q_clicks = self._convert(
+                    f"""
+                    SELECT {b_click} AS bucket, COUNT(*) AS c
+                    FROM whatsapp_clicks
+                    WHERE SUBSTRING(REPLACE(ts, ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                      AND SUBSTRING(REPLACE(ts, ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                rows = await db.fetch(q_clicks, start_iso, end_iso)
+                clicks = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+            else:
+                b_click = _bucket_expr_sqlite("ts")
+                q_clicks = self._convert(
+                    f"""
+                    SELECT {b_click} AS bucket, COUNT(*) AS c
+                    FROM whatsapp_clicks
+                    WHERE SUBSTR(REPLACE(ts, ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                      AND SUBSTR(REPLACE(ts, ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                cur = await db.execute(q_clicks, (start_iso, end_iso))
+                rows = await cur.fetchall()
+                clicks = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+
+            # Conversations initiated (first inbound stamped)
+            if self.use_postgres:
+                b_init = _bucket_expr_pg("source_first_inbound_ts")
+                q_init = self._convert(
+                    f"""
+                    SELECT {b_init} AS bucket, COUNT(*) AS c
+                    FROM conversation_meta
+                    WHERE source = ?
+                      AND source_first_inbound_ts IS NOT NULL
+                      AND SUBSTRING(REPLACE(source_first_inbound_ts, ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                      AND SUBSTRING(REPLACE(source_first_inbound_ts, ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                rows = await db.fetch(q_init, src, start_iso, end_iso)
+                initiated = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+            else:
+                b_init = _bucket_expr_sqlite("source_first_inbound_ts")
+                q_init = self._convert(
+                    f"""
+                    SELECT {b_init} AS bucket, COUNT(*) AS c
+                    FROM conversation_meta
+                    WHERE source = ?
+                      AND source_first_inbound_ts IS NOT NULL
+                      AND SUBSTR(REPLACE(source_first_inbound_ts, ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                      AND SUBSTR(REPLACE(source_first_inbound_ts, ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                cur = await db.execute(q_init, (src, start_iso, end_iso))
+                rows = await cur.fetchall()
+                initiated = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+
+            # Inbound messages for attributed conversations
+            if self.use_postgres:
+                b_msg = _bucket_expr_pg("COALESCE(server_ts, timestamp)")
+                q_msgs = self._convert(
+                    f"""
+                    SELECT {b_msg} AS bucket, COUNT(*) AS c
+                    FROM messages m
+                    WHERE m.from_me = 0
+                      AND m.user_id IN (SELECT user_id FROM conversation_meta WHERE source = ?)
+                      AND SUBSTRING(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                      AND SUBSTRING(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                rows = await db.fetch(q_msgs, src, start_iso, end_iso)
+                inbound_msgs = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+            else:
+                b_msg = _bucket_expr_sqlite("COALESCE(server_ts, timestamp)")
+                q_msgs = self._convert(
+                    f"""
+                    SELECT {b_msg} AS bucket, COUNT(*) AS c
+                    FROM messages m
+                    WHERE m.from_me = 0
+                      AND m.user_id IN (SELECT user_id FROM conversation_meta WHERE source = ?)
+                      AND SUBSTR(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                      AND SUBSTR(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                cur = await db.execute(q_msgs, (src, start_iso, end_iso))
+                rows = await cur.fetchall()
+                inbound_msgs = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+
+            # Orders created for attributed conversations
+            if self.use_postgres:
+                b_ord = _bucket_expr_pg("oc.created_at")
+                q_ord = self._convert(
+                    f"""
+                    SELECT {b_ord} AS bucket, COUNT(*) AS c
+                    FROM orders_created oc
+                    JOIN conversation_meta cm ON cm.user_id = oc.user_id
+                    WHERE cm.source = ?
+                      AND SUBSTRING(REPLACE(oc.created_at, ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                      AND SUBSTRING(REPLACE(oc.created_at, ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                rows = await db.fetch(q_ord, src, start_iso, end_iso)
+                orders = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+            else:
+                b_ord = _bucket_expr_sqlite("oc.created_at")
+                q_ord = self._convert(
+                    f"""
+                    SELECT {b_ord} AS bucket, COUNT(*) AS c
+                    FROM orders_created oc
+                    JOIN conversation_meta cm ON cm.user_id = oc.user_id
+                    WHERE cm.source = ?
+                      AND SUBSTR(REPLACE(oc.created_at, ' ', 'T'), 1, 19) >= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                      AND SUBSTR(REPLACE(oc.created_at, ' ', 'T'), 1, 19) <= SUBSTR(REPLACE(?, ' ', 'T'), 1, 19)
+                    GROUP BY bucket
+                    ORDER BY bucket
+                    """
+                )
+                cur = await db.execute(q_ord, (src, start_iso, end_iso))
+                rows = await cur.fetchall()
+                orders = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
+
+        # Merge into a single aligned series
+        all_keys = sorted(set(clicks.keys()) | set(initiated.keys()) | set(inbound_msgs.keys()) | set(orders.keys()))
+        series = []
+        total_clicks = 0
+        total_initiated = 0
+        total_inbound = 0
+        total_orders = 0
+        for k in all_keys:
+            c = int(clicks.get(k, 0) or 0)
+            i = int(initiated.get(k, 0) or 0)
+            m = int(inbound_msgs.get(k, 0) or 0)
+            o = int(orders.get(k, 0) or 0)
+            total_clicks += c
+            total_initiated += i
+            total_inbound += m
+            total_orders += o
+            series.append({"bucket": k, "clicks": c, "initiated": i, "inbound_messages": m, "orders_created": o})
+
+        return {
+            "start": start_iso,
+            "end": end_iso,
+            "bucket": bucket,
+            "totals": {
+                "clicks": total_clicks,
+                "initiated_conversations": total_initiated,
+                "inbound_messages": total_inbound,
+                "orders_created": total_orders,
+                "orders_per_initiated": (float(total_orders) / float(total_initiated)) if total_initiated else 0.0,
+            },
+            "series": series,
+        }
 
     async def upsert_conversation_meta(self, user_id: str, assigned_agent: Optional[str] = None, tags: Optional[List[str]] = None, avatar_url: Optional[str] = None):
         async with self._conn() as db:
@@ -3818,7 +4125,33 @@ class MessageProcessor:
         
         # Extract message content and generate proper URLs
         if msg_type == "text":
-            message_obj["message"] = message["text"]["body"]
+            body = message["text"]["body"]
+            click_id = None
+            try:
+                # Shopify theme tracking marker (we strip it from the visible chat)
+                m = re.search(r"(?:^|\n)\s*WA_CLICK_ID\s*[:=]\s*([a-f0-9]{16,64})\s*(?:\n|$)", body or "", re.IGNORECASE)
+                if m:
+                    click_id = (m.group(1) or "").strip().lower()
+                    # Remove the marker line from the message shown to agents
+                    body = re.sub(
+                        r"(?:^|\n)\s*WA_CLICK_ID\s*[:=]\s*[a-f0-9]{16,64}\s*(?=\n|$)",
+                        "",
+                        body or "",
+                        flags=re.IGNORECASE,
+                    ).strip()
+            except Exception:
+                click_id = None
+            message_obj["message"] = body
+            if click_id:
+                try:
+                    await self.db_manager.try_set_conversation_attribution_from_click(
+                        user_id=sender,
+                        click_id=click_id,
+                        first_inbound_ts=str(server_now or timestamp or datetime.utcnow().isoformat()),
+                        source="shopify_wa_icon",
+                    )
+                except Exception:
+                    pass
         elif msg_type == "interactive":
             try:
                 inter = message.get("interactive", {}) or {}
@@ -5135,6 +5468,14 @@ async def _optional_rate_limit_media(request: _LimiterRequest, response: _Limite
     except Exception:
         return
 
+async def _optional_rate_limit_track(request: _LimiterRequest, response: _LimiterResponse):
+    try:
+        if FastAPILimiter.redis:
+            limiter = RateLimiter(times=TRACK_CLICKS_PER_MIN, seconds=60)
+            return await limiter(request, response)
+    except Exception:
+        return
+
     
 
 @app.websocket("/ws/{user_id}")
@@ -6026,6 +6367,78 @@ async def log_order_created(payload: dict = Body(...), actor: dict = Depends(get
         pass
     return {"ok": True}
 
+
+@app.post("/track/whatsapp-click")
+async def track_whatsapp_click(
+    request: Request,
+    payload: dict = Body(...),
+    _: Any = Depends(_optional_rate_limit_track),
+):
+    """Public endpoint called from the Shopify theme to record WhatsApp icon clicks."""
+    try:
+        origin = (request.headers.get("origin") or "").strip()
+        if TRACK_ALLOWED_ORIGINS and origin:
+            try:
+                host = (urlparse(origin).hostname or "").lower()
+            except Exception:
+                host = ""
+            allowed = False
+            for a in TRACK_ALLOWED_ORIGINS:
+                a = (a or "").lower().strip()
+                if not a:
+                    continue
+                try:
+                    ahost = (urlparse(a).hostname or "").lower() if "://" in a else a
+                except Exception:
+                    ahost = a
+                if origin.lower() == a or host == ahost or (host and ahost and host.endswith(ahost.lstrip("."))):
+                    allowed = True
+                    break
+            if not allowed:
+                raise HTTPException(status_code=403, detail="Origin not allowed")
+
+        page_url = (payload.get("page_url") or payload.get("url") or "").strip() or None
+        product_id = (payload.get("product_id") or "").strip() or None
+        shop_domain = (payload.get("shop_domain") or payload.get("shop") or "").strip() or None
+
+        ua = (request.headers.get("user-agent") or "").strip() or None
+        if ua and len(ua) > 300:
+            ua = ua[:300]
+        ip = None
+        try:
+            ip = request.client.host  # type: ignore[union-attr]
+        except Exception:
+            ip = None
+        ip_hash = None
+        if ip:
+            try:
+                ip_hash = hashlib.sha256(f"{TRACK_IP_SALT}|{ip}".encode("utf-8")).hexdigest()[:32]
+            except Exception:
+                ip_hash = None
+
+        proposed = (payload.get("click_id") or "").strip().lower()
+        if proposed and re.fullmatch(r"[a-f0-9]{16,64}", proposed):
+            click_id = proposed
+        else:
+            click_id = uuid.uuid4().hex
+        ts = datetime.utcnow().isoformat()
+        await db_manager.log_whatsapp_click(
+            click_id=click_id,
+            ts=ts,
+            page_url=page_url,
+            product_id=product_id,
+            shop_domain=shop_domain,
+            ua=ua,
+            ip_hash=ip_hash,
+        )
+        return {"ok": True, "click_id": click_id, "ts": ts}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Never block the user from opening WhatsApp because analytics failed
+        logging.getLogger(__name__).warning("track_whatsapp_click failed: %s", exc)
+        return {"ok": False}
+
 @app.get("/messages/{user_id}")
 async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, since: str | None = None, before: str | None = None, actor: dict = Depends(get_current_agent)):
     """Cursor-friendly fetch: use since/before OR legacy offset.
@@ -6069,6 +6482,20 @@ except Exception:
     pass
 
 # ----- Agent analytics -----
+@app.get("/analytics/inbox/shopify")
+async def analytics_shopify_inbox(start: Optional[str] = None, end: Optional[str] = None, bucket: Optional[str] = None, _: dict = Depends(require_admin)):
+    # Auto-pick bucket if not provided
+    b = (bucket or "").strip().lower()
+    if not b:
+        try:
+            end_dt = datetime.fromisoformat((end or datetime.utcnow().isoformat()).replace("Z", ""))
+            start_dt = datetime.fromisoformat((start or (datetime.utcnow() - timedelta(days=30)).isoformat()).replace("Z", ""))
+            span = abs((end_dt - start_dt).total_seconds())
+            b = "hour" if span <= (3 * 86400) else "day"
+        except Exception:
+            b = "day"
+    return await db_manager.get_shopify_inbox_analytics(start=start, end=end, bucket=b)
+
 @app.get("/analytics/agents")
 async def get_agents_analytics(start: Optional[str] = None, end: Optional[str] = None, _: dict = Depends(require_admin)):
     return await db_manager.get_all_agents_analytics(start=start, end=end)

@@ -48,6 +48,31 @@ api.interceptors.request.use((config) => {
 
 let _refreshInFlight = null;
 
+async function refreshSession() {
+  // Prefer header-based refresh token fallback if present (for cookie-blocked clients).
+  let rt = null;
+  try { rt = sessionStorage.getItem('agent_refresh_token'); } catch {}
+  if (rt) {
+    const res = await api.post('/auth/refresh', null, { headers: { 'X-Refresh-Token': rt } });
+    const at = res?.data?.access_token;
+    const nrt = res?.data?.refresh_token;
+    try {
+      if (at) sessionStorage.setItem('agent_access_token', at);
+      if (nrt) sessionStorage.setItem('agent_refresh_token', nrt);
+    } catch {}
+    return res;
+  }
+  // Cookie-based refresh (normal path)
+  const res = await api.post('/auth/refresh');
+  const at = res?.data?.access_token;
+  const nrt = res?.data?.refresh_token;
+  try {
+    if (at) sessionStorage.setItem('agent_access_token', at);
+    if (nrt) sessionStorage.setItem('agent_refresh_token', nrt);
+  } catch {}
+  return res;
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -59,7 +84,7 @@ api.interceptors.response.use(
       if (status === 401 && original && !original.__retried && !isAuthCall) {
         original.__retried = true;
         if (!_refreshInFlight) {
-          _refreshInFlight = api.post('/auth/refresh').finally(() => { _refreshInFlight = null; });
+          _refreshInFlight = refreshSession().finally(() => { _refreshInFlight = null; });
         }
         try {
           await _refreshInFlight;
@@ -67,6 +92,7 @@ api.interceptors.response.use(
         } catch (e) {
           // If refresh fails (e.g., cookies blocked), drop any header token and force re-login.
           try { sessionStorage.removeItem('agent_access_token'); } catch {}
+          try { sessionStorage.removeItem('agent_refresh_token'); } catch {}
           try { window.location.replace('/login'); } catch {}
           throw e;
         }

@@ -33,11 +33,14 @@ function formatDuration(seconds) {
 export default function AnalyticsPanel() {
   const [agents, setAgents] = useState([]);
   const [stats, setStats] = useState([]);
+  const [shopify, setShopify] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [shopifyError, setShopifyError] = useState('');
   const [period, setPeriod] = useState('30d'); // today | 7d | 30d | 90d | custom
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
+  const [shopifyMetric, setShopifyMetric] = useState('initiated'); // initiated | inbound_messages | clicks | orders_created
 
   useEffect(() => {
     (async () => {
@@ -72,11 +75,24 @@ export default function AnalyticsPanel() {
   const fetchStats = async () => {
     setLoading(true);
     setError('');
+    setShopifyError('');
     try {
       const { start, end } = computeRange();
       const qs = new URLSearchParams({ start, end }).toString();
       const res = await api.get(`/analytics/agents?${qs}`);
       setStats(Array.isArray(res.data) ? res.data : []);
+
+      // Shopify / website WhatsApp analytics (admin-only endpoint, same permissions as /analytics/agents)
+      try {
+        const spanMs = Math.abs(new Date(end).getTime() - new Date(start).getTime());
+        const bucket = spanMs <= (3 * 24 * 60 * 60 * 1000) ? 'hour' : 'day';
+        const qs2 = new URLSearchParams({ start, end, bucket }).toString();
+        const r2 = await api.get(`/analytics/inbox/shopify?${qs2}`);
+        setShopify(r2?.data || null);
+      } catch (e) {
+        setShopify(null);
+        setShopifyError('Failed to load website WhatsApp analytics');
+      }
     } catch (e) {
       setError('Failed to load analytics');
     } finally {
@@ -105,6 +121,25 @@ export default function AnalyticsPanel() {
 
   const maxReplied = Math.max(1, ...stats.map((x) => Number(x.messages_replied_to || 0)));
   const maxOrders = Math.max(1, ...stats.map((x) => Number(x.orders_created || 0)));
+
+  const shopSeries = Array.isArray(shopify?.series) ? shopify.series : [];
+  const shopTotals = shopify?.totals || {};
+  const metricKey = shopifyMetric;
+  const maxShop = Math.max(1, ...shopSeries.map((x) => Number(x?.[metricKey] || 0)));
+
+  const formatBucketLabel = (b) => {
+    try {
+      // b comes as "YYYY-MM-DDTHH:00:00" or "YYYY-MM-DDT00:00:00"
+      const d = new Date(b);
+      if (Number.isNaN(d.getTime())) return String(b || '');
+      if ((shopify?.bucket || '') === 'hour') {
+        return d.toISOString().slice(11, 16); // HH:MM
+      }
+      return d.toISOString().slice(0, 10); // YYYY-MM-DD
+    } catch {
+      return String(b || '');
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -153,6 +188,71 @@ export default function AnalyticsPanel() {
         <div className="bg-gray-800 rounded p-4 border border-gray-700">
           <div className="text-sm text-gray-400">Total orders</div>
           <div className="text-2xl font-bold">{totals.totalOrders}</div>
+        </div>
+      </div>
+
+      <div className="bg-gray-800 rounded p-4 border border-gray-700">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <div className="font-medium">Website WhatsApp icon (Shopify) analytics</div>
+          <div className="flex items-center gap-2">
+            {['initiated','inbound_messages','clicks','orders_created'].map((k) => (
+              <button
+                key={k}
+                onClick={() => setShopifyMetric(k)}
+                className={`px-2 py-1 rounded text-xs ${shopifyMetric===k ? 'bg-blue-600 text-white' : 'bg-gray-900 text-gray-300'}`}
+                title={k}
+              >
+                {k.replaceAll('_',' ').toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {shopifyError && <div className="text-red-400 text-sm mb-2">{shopifyError}</div>}
+
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
+          <div className="bg-gray-900 rounded p-3 border border-gray-700">
+            <div className="text-xs text-gray-400">Clicks</div>
+            <div className="text-xl font-bold">{Number(shopTotals.clicks || 0)}</div>
+          </div>
+          <div className="bg-gray-900 rounded p-3 border border-gray-700">
+            <div className="text-xs text-gray-400">Initiated chats</div>
+            <div className="text-xl font-bold">{Number(shopTotals.initiated_conversations || 0)}</div>
+          </div>
+          <div className="bg-gray-900 rounded p-3 border border-gray-700">
+            <div className="text-xs text-gray-400">Inbound msgs</div>
+            <div className="text-xl font-bold">{Number(shopTotals.inbound_messages || 0)}</div>
+          </div>
+          <div className="bg-gray-900 rounded p-3 border border-gray-700">
+            <div className="text-xs text-gray-400">Orders created</div>
+            <div className="text-xl font-bold">{Number(shopTotals.orders_created || 0)}</div>
+          </div>
+          <div className="bg-gray-900 rounded p-3 border border-gray-700">
+            <div className="text-xs text-gray-400">Orders / initiated</div>
+            <div className="text-xl font-bold">{((Number(shopTotals.orders_per_initiated || 0)) * 100).toFixed(1)}%</div>
+          </div>
+        </div>
+
+        <div className="overflow-auto">
+          <div className="flex items-end gap-1 h-32 min-w-[520px]">
+            {shopSeries.map((x) => {
+              const v = Number(x?.[metricKey] || 0);
+              const h = Math.round((v / maxShop) * 100);
+              return (
+                <div key={x.bucket} className="flex flex-col items-center gap-1">
+                  <div
+                    className="w-3 bg-blue-600 rounded-t"
+                    style={{ height: `${Math.max(1, h)}%` }}
+                    title={`${formatBucketLabel(x.bucket)} • ${metricKey}: ${v}`}
+                  />
+                  <div className="text-[10px] text-gray-500 rotate-[-45deg] origin-top-left whitespace-nowrap">
+                    {formatBucketLabel(x.bucket)}
+                  </div>
+                </div>
+              );
+            })}
+            {shopSeries.length === 0 && <div className="text-sm text-gray-400">No data</div>}
+          </div>
         </div>
       </div>
 

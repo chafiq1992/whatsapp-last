@@ -2048,8 +2048,8 @@ class DatabaseManager:
                     f"""
                     SELECT {b_click} AS bucket, COUNT(*) AS c
                     FROM whatsapp_clicks
-                    WHERE SUBSTRING(REPLACE(ts, ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
-                      AND SUBSTRING(REPLACE(ts, ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                    WHERE CAST(SUBSTRING(REPLACE(ts, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) >= CAST(? AS TIMESTAMP)
+                      AND CAST(SUBSTRING(REPLACE(ts, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) <= CAST(? AS TIMESTAMP)
                     GROUP BY bucket
                     ORDER BY bucket
                     """
@@ -2081,8 +2081,8 @@ class DatabaseManager:
                     FROM conversation_meta
                     WHERE source = ?
                       AND source_first_inbound_ts IS NOT NULL
-                      AND SUBSTRING(REPLACE(source_first_inbound_ts, ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
-                      AND SUBSTRING(REPLACE(source_first_inbound_ts, ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                      AND CAST(SUBSTRING(REPLACE(source_first_inbound_ts, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) >= CAST(? AS TIMESTAMP)
+                      AND CAST(SUBSTRING(REPLACE(source_first_inbound_ts, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) <= CAST(? AS TIMESTAMP)
                     GROUP BY bucket
                     ORDER BY bucket
                     """
@@ -2116,8 +2116,8 @@ class DatabaseManager:
                     FROM messages m
                     WHERE m.from_me = 0
                       AND m.user_id IN (SELECT user_id FROM conversation_meta WHERE source = ?)
-                      AND SUBSTRING(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
-                      AND SUBSTRING(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                      AND CAST(SUBSTRING(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) >= CAST(? AS TIMESTAMP)
+                      AND CAST(SUBSTRING(REPLACE(COALESCE(m.server_ts, m.timestamp), ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) <= CAST(? AS TIMESTAMP)
                     GROUP BY bucket
                     ORDER BY bucket
                     """
@@ -2151,8 +2151,8 @@ class DatabaseManager:
                     FROM orders_created oc
                     JOIN conversation_meta cm ON cm.user_id = oc.user_id
                     WHERE cm.source = ?
-                      AND SUBSTRING(REPLACE(oc.created_at, ' ', 'T') FROM 1 FOR 19) >= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
-                      AND SUBSTRING(REPLACE(oc.created_at, ' ', 'T') FROM 1 FOR 19) <= SUBSTRING(REPLACE(?, ' ', 'T') FROM 1 FOR 19)
+                      AND CAST(SUBSTRING(REPLACE(oc.created_at, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) >= CAST(? AS TIMESTAMP)
+                      AND CAST(SUBSTRING(REPLACE(oc.created_at, ' ', 'T') FROM 1 FOR 19) AS TIMESTAMP) <= CAST(? AS TIMESTAMP)
                     GROUP BY bucket
                     ORDER BY bucket
                     """

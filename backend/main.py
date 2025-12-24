@@ -77,7 +77,8 @@ REQUIRE_POSTGRES = int(os.getenv("REQUIRE_POSTGRES", "1"))  # when 1 and DATABAS
 # SQLite lock/backoff tuning (ms). Keep small so endpoints don't hang for a long time under contention.
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "3000"))
 # Auth DB operation timeout (seconds). Prevents Cloud Run from returning an upstream 504 on slow DB calls.
-AUTH_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_DB_TIMEOUT_SECONDS", "8"))
+# NOTE: 8s was too tight for cold pool creation / transient DB slowness and caused intermittent /auth/login 503s.
+AUTH_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_DB_TIMEOUT_SECONDS", "15"))
 # Health DB check timeout (seconds)
 HEALTH_DB_TIMEOUT_SECONDS = float(os.getenv("HEALTH_DB_TIMEOUT_SECONDS", "2"))
 # Postgres connection/pool behavior.
@@ -224,6 +225,9 @@ REFRESH_COOKIE_NAME = "agent_refresh"
 JWT_ISSUER = os.getenv("JWT_ISSUER", "whatsapp-inbox")
 EXPOSE_REFRESH_TOKEN_FALLBACK = os.getenv("EXPOSE_REFRESH_TOKEN_FALLBACK", "1") == "1"
 REFRESH_ROTATE_ON_REFRESH = os.getenv("REFRESH_ROTATE_ON_REFRESH", "0") == "1"
+# Agent auth cache (in-memory). Helps avoid intermittent DB timeouts on /auth/login.
+# Keep TTL short to limit exposure if an admin changes a password.
+AGENT_AUTH_CACHE_TTL_SECONDS = int(os.getenv("AGENT_AUTH_CACHE_TTL_SECONDS", "60"))
 
 pwd_context = CryptContext(
     schemes=["argon2", "bcrypt"],
@@ -1286,6 +1290,9 @@ class DatabaseManager:
         self._pool_lock = asyncio.Lock()
         self._pool_failed_until: float = 0.0
         self._pool_last_error: Optional[BaseException] = None
+        # In-memory cache for agent auth records (password_hash + is_admin). Speeds up login and
+        # reduces impact of transient DB slowness. TTL is controlled by AGENT_AUTH_CACHE_TTL_SECONDS.
+        self._agent_auth_cache: Dict[str, dict] = {}
         # Columns allowed in the messages table (except auto-increment id)
         self.message_columns = {
             "wa_message_id",
@@ -1798,6 +1805,11 @@ class DatabaseManager:
             else:
                 await db.execute(query, params)
                 await db.commit()
+        try:
+            # Populate cache immediately (helps first login after agent creation).
+            self._agent_auth_cache_set(username, password_hash, int(is_admin or 0))
+        except Exception:
+            pass
 
     async def list_agents(self) -> List[dict]:
         async with self._conn() as db:
@@ -1820,17 +1832,81 @@ class DatabaseManager:
             else:
                 await db.execute(query, params)
                 await db.commit()
+        try:
+            self._agent_auth_cache.pop(str(username or ""), None)
+        except Exception:
+            pass
 
-    async def get_agent_password_hash(self, username: str) -> Optional[str]:
+    def _agent_auth_cache_get(self, username: str) -> Optional[dict]:
+        try:
+            ttl = int(AGENT_AUTH_CACHE_TTL_SECONDS)
+            if ttl <= 0:
+                return None
+            u = str(username or "").strip()
+            if not u:
+                return None
+            entry = self._agent_auth_cache.get(u)
+            if not entry:
+                return None
+            ts = float(entry.get("ts") or 0.0)
+            if (time.time() - ts) > ttl:
+                self._agent_auth_cache.pop(u, None)
+                return None
+            return entry
+        except Exception:
+            return None
+
+    def _agent_auth_cache_set(self, username: str, password_hash: str, is_admin: int) -> None:
+        try:
+            ttl = int(AGENT_AUTH_CACHE_TTL_SECONDS)
+            if ttl <= 0:
+                return
+            u = str(username or "").strip()
+            if not u:
+                return
+            self._agent_auth_cache[u] = {
+                "password_hash": str(password_hash or ""),
+                "is_admin": int(is_admin or 0),
+                "ts": time.time(),
+            }
+        except Exception:
+            return
+
+    async def get_agent_auth_record(self, username: str) -> Optional[dict]:
+        """Return {'password_hash': str, 'is_admin': int} for an agent, or None.
+
+        Uses a small in-memory cache to reduce DB calls on /auth/login.
+        """
+        cached = self._agent_auth_cache_get(username)
+        if cached:
+            return {"password_hash": cached.get("password_hash") or "", "is_admin": int(cached.get("is_admin") or 0)}
+
         async with self._conn() as db:
-            query = self._convert("SELECT password_hash FROM agents WHERE username = ?")
+            query = self._convert("SELECT password_hash, is_admin FROM agents WHERE username = ?")
             params = (username,)
             if self.use_postgres:
                 row = await db.fetchrow(query, *params)
+                if not row:
+                    return None
+                password_hash = row[0]
+                is_admin = row[1]
             else:
                 cur = await db.execute(query, params)
                 row = await cur.fetchone()
-            return row[0] if row else None
+                if not row:
+                    return None
+                password_hash = row[0]
+                is_admin = row[1] if len(row) > 1 else 0
+            out = {"password_hash": password_hash, "is_admin": int(is_admin or 0)}
+            try:
+                self._agent_auth_cache_set(username, str(password_hash or ""), int(is_admin or 0))
+            except Exception:
+                pass
+            return out
+
+    async def get_agent_password_hash(self, username: str) -> Optional[str]:
+        rec = await self.get_agent_auth_record(username)
+        return (rec or {}).get("password_hash") or None
 
     async def set_agent_password_hash(self, username: str, password_hash: str):
         async with self._conn() as db:
@@ -1841,19 +1917,16 @@ class DatabaseManager:
             else:
                 await db.execute(query, params)
                 await db.commit()
+        try:
+            # Invalidate cache so the next login re-reads both password_hash and is_admin from DB.
+            self._agent_auth_cache.pop(str(username or ""), None)
+        except Exception:
+            pass
 
     async def get_agent_is_admin(self, username: str) -> int:
         """Return 1 if agent is admin, else 0."""
-        async with self._conn() as db:
-            query = self._convert("SELECT is_admin FROM agents WHERE username = ?")
-            params = (username,)
-            if self.use_postgres:
-                row = await db.fetchrow(query, *params)
-                return int(row[0]) if row else 0
-            else:
-                cur = await db.execute(query, params)
-                row = await cur.fetchone()
-                return int(row[0]) if row else 0
+        rec = await self.get_agent_auth_record(username)
+        return int((rec or {}).get("is_admin") or 0)
 
     # ── Refresh token storage ──────────────────────────────────────
     async def store_refresh_token(self, token_hash: str, agent_username: str, expires_at_iso: str):
@@ -6216,12 +6289,14 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
     else:
         username = (payload.get("username") or "").strip()
         password = payload.get("password") or ""
-        stored = await _auth_db_call(db_manager.get_agent_password_hash(username), op=f"get_agent_password_hash({username})")
+        rec = await _auth_db_call(db_manager.get_agent_auth_record(username), op=f"get_agent_auth_record({username})")
+        stored = (rec or {}).get("password_hash") or ""
+        is_admin = bool((rec or {}).get("is_admin") or 0)
         if not stored or not verify_password(password, stored):
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        is_admin = bool(await _auth_db_call(db_manager.get_agent_is_admin(username), op=f"get_agent_is_admin({username})"))
+        # is_admin already determined above (single DB hit)
 
-    access_token = issue_access_token(username, is_admin)
+    access_token = issue_access_token(username, bool(is_admin))
     refresh_token = secrets.token_urlsafe(48)
     refresh_hash = _hash_refresh_token(refresh_token)
     expires_at = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()

@@ -86,12 +86,14 @@ PG_CONNECT_TIMEOUT_SECONDS = float(
     os.getenv("PG_CONNECT_TIMEOUT_SECONDS", str(min(10.0, max(2.0, AUTH_DB_TIMEOUT_SECONDS - 0.5))))
 )
 PG_POOL_RETRY_BACKOFF_SECONDS = float(os.getenv("PG_POOL_RETRY_BACKOFF_SECONDS", "15"))
-# Default behavior: if Postgres is configured and required, do NOT start serving traffic in a degraded mode.
+# Startup gating:
+# If enabled, a DB init failure will fail the process startup (Cloud Run won't route traffic to a broken revision).
+# NOTE: This can also cause deployment failures if the DB is temporarily unreachable during rollout.
 _BLOCK_STARTUP_ON_DB_FAILURE_ENV = (os.getenv("BLOCK_STARTUP_ON_DB_FAILURE", "") or "").strip()
 BLOCK_STARTUP_ON_DB_FAILURE = (
     (_BLOCK_STARTUP_ON_DB_FAILURE_ENV == "1")
     if _BLOCK_STARTUP_ON_DB_FAILURE_ENV
-    else bool(DATABASE_URL and REQUIRE_POSTGRES)
+    else False
 )
 # Webhook ingress queue to ensure we ACK Meta quickly and process in background.
 WEBHOOK_QUEUE_MAXSIZE = int(os.getenv("WEBHOOK_QUEUE_MAXSIZE", "1000"))

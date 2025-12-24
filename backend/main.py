@@ -228,6 +228,11 @@ REFRESH_ROTATE_ON_REFRESH = os.getenv("REFRESH_ROTATE_ON_REFRESH", "0") == "1"
 # Agent auth cache (in-memory). Helps avoid intermittent DB timeouts on /auth/login.
 # Keep TTL short to limit exposure if an admin changes a password.
 AGENT_AUTH_CACHE_TTL_SECONDS = int(os.getenv("AGENT_AUTH_CACHE_TTL_SECONDS", "60"))
+# Agent auth cache in Redis (shared across instances). This is the robust path for Cloud Run:
+# even if Postgres is slow/unreachable during cold starts, agents can still login.
+AGENT_AUTH_REDIS_TTL_SECONDS = int(os.getenv("AGENT_AUTH_REDIS_TTL_SECONDS", str(7 * 24 * 3600)))  # 7 days
+# For login, use a shorter DB timeout and fall back to Redis cache. Prevents 15s hangs.
+AUTH_LOGIN_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_LOGIN_DB_TIMEOUT_SECONDS", "6"))
 
 pwd_context = CryptContext(
     schemes=["argon2", "bcrypt"],
@@ -823,6 +828,57 @@ class RedisManager:
             await self.redis_client.publish("ws_events", payload)
         except Exception as exc:
             print(f"Redis publish error: {exc}")
+
+    # -------- agent auth cache helpers --------
+    def _agent_auth_key(self, username: str) -> str:
+        return f"agent_auth:{str(username or '').strip().lower()}"
+
+    async def get_agent_auth_record(self, username: str) -> Optional[dict]:
+        """Get cached agent auth record from Redis: {'password_hash': str, 'is_admin': int}."""
+        if not self.redis_client:
+            return None
+        u = str(username or "").strip().lower()
+        if not u:
+            return None
+        try:
+            raw = await self.redis_client.get(self._agent_auth_key(u))
+            if not raw:
+                return None
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", "ignore")
+            data = json.loads(raw) if isinstance(raw, str) else None
+            if not isinstance(data, dict):
+                return None
+            ph = data.get("password_hash")
+            if not ph:
+                return None
+            return {"password_hash": str(ph), "is_admin": int(data.get("is_admin") or 0)}
+        except Exception:
+            return None
+
+    async def set_agent_auth_record(self, username: str, password_hash: str, is_admin: int, ttl_seconds: int | None = None) -> None:
+        if not self.redis_client:
+            return
+        u = str(username or "").strip().lower()
+        if not u:
+            return
+        payload = {"password_hash": str(password_hash or ""), "is_admin": int(is_admin or 0)}
+        try:
+            ttl = int(ttl_seconds) if ttl_seconds is not None else int(AGENT_AUTH_REDIS_TTL_SECONDS)
+            await self.set_json(self._agent_auth_key(u), payload, ttl=ttl if ttl > 0 else None)
+        except Exception:
+            return
+
+    async def delete_agent_auth_record(self, username: str) -> None:
+        if not self.redis_client:
+            return
+        u = str(username or "").strip().lower()
+        if not u:
+            return
+        try:
+            await self.redis_client.delete(self._agent_auth_key(u))
+        except Exception:
+            return
 
     # -------- simple feature helpers --------
     async def was_auto_reply_recent(self, user_id: str, window_sec: int = 24 * 60 * 60) -> bool:
@@ -1822,6 +1878,17 @@ class DatabaseManager:
                 cur = await db.execute(query)
                 rows = await cur.fetchall()
                 return [dict(r) for r in rows]
+
+    async def list_agent_auth_records(self) -> List[dict]:
+        """Return username/password_hash/is_admin for all agents (used to warm Redis cache)."""
+        async with self._conn() as db:
+            query = self._convert("SELECT username, password_hash, is_admin FROM agents")
+            if self.use_postgres:
+                rows = await db.fetch(query)
+                return [{"username": r[0], "password_hash": r[1], "is_admin": int(r[2] or 0)} for r in rows]
+            cur = await db.execute(query)
+            rows = await cur.fetchall()
+            return [{"username": r[0], "password_hash": r[1], "is_admin": int((r[2] if len(r) > 2 else 0) or 0)} for r in rows]
 
     async def delete_agent(self, username: str):
         async with self._conn() as db:
@@ -6213,12 +6280,21 @@ async def create_agent_endpoint(payload: dict = Body(...), _: dict = Depends(req
     is_admin = int(bool(payload.get("is_admin", False)))
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password are required")
-    await db_manager.create_agent(username=username, name=name, password_hash=hash_password(password), is_admin=is_admin)
+    pw_hash = hash_password(password)
+    await db_manager.create_agent(username=username, name=name, password_hash=pw_hash, is_admin=is_admin)
+    try:
+        await redis_manager.set_agent_auth_record(username, pw_hash, is_admin)
+    except Exception:
+        pass
     return {"ok": True}
 
 @app.delete("/admin/agents/{username}")
 async def delete_agent_endpoint(username: str, _: dict = Depends(require_admin)):
     await db_manager.delete_agent(username)
+    try:
+        await redis_manager.delete_agent_auth_record(username)
+    except Exception:
+        pass
     return {"ok": True}
 
 def _parse_dt_any(value: Optional[str]) -> Optional[datetime]:
@@ -6280,6 +6356,67 @@ async def _auth_db_call(coro, *, op: str):
         logging.getLogger(__name__).exception("Auth DB operation failed: %s: %s", op, exc)
         raise HTTPException(status_code=503, detail="Authentication backend unavailable")
 
+async def _get_agent_auth_record_resilient(username: str) -> Optional[dict]:
+    """Fetch agent auth record with Redis-first strategy and DB fallback.
+
+    Goal: make /auth/login robust even when Postgres is slow/unreachable.
+    """
+    u = (username or "").strip()
+    if not u:
+        return None
+
+    # 1) Redis cache (shared across instances)
+    try:
+        rec = await redis_manager.get_agent_auth_record(u)
+        if rec and rec.get("password_hash"):
+            return rec
+    except Exception:
+        pass
+
+    # Warm Redis agent auth cache (best-effort, non-blocking). This makes logins robust across instances.
+    async def _warm_agent_auth_cache() -> None:
+        try:
+            if not getattr(redis_manager, "redis_client", None):
+                return
+            records = await db_manager.list_agent_auth_records()
+            for r in records or []:
+                u = (r.get("username") or "").strip()
+                ph = r.get("password_hash") or ""
+                ia = int(r.get("is_admin") or 0)
+                if u and ph:
+                    await redis_manager.set_agent_auth_record(u, str(ph), ia)
+        except Exception:
+            return
+
+    try:
+        asyncio.create_task(_warm_agent_auth_cache())
+    except Exception:
+        pass
+
+    # 2) DB (short timeout) -> refresh Redis
+    try:
+        rec = await asyncio.wait_for(db_manager.get_agent_auth_record(u), timeout=max(0.5, float(AUTH_LOGIN_DB_TIMEOUT_SECONDS)))
+        if rec and rec.get("password_hash"):
+            try:
+                await redis_manager.set_agent_auth_record(u, rec.get("password_hash") or "", int(rec.get("is_admin") or 0))
+            except Exception:
+                pass
+            return rec
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
+        pass
+
+    # 3) Redis again (race with warmup/other instance)
+    try:
+        rec = await redis_manager.get_agent_auth_record(u)
+        if rec and rec.get("password_hash"):
+            return rec
+    except Exception:
+        pass
+
+    return None
+
 @app.post("/auth/login")
 async def auth_login(request: Request, response: Response, payload: dict = Body(...)):
     if DISABLE_AUTH:
@@ -6289,9 +6426,23 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
     else:
         username = (payload.get("username") or "").strip()
         password = payload.get("password") or ""
-        rec = await _auth_db_call(db_manager.get_agent_auth_record(username), op=f"get_agent_auth_record({username})")
+        rec = await _get_agent_auth_record_resilient(username)
         stored = (rec or {}).get("password_hash") or ""
         is_admin = bool((rec or {}).get("is_admin") or 0)
+        if not stored:
+            # Keep the same observable behavior as before, but distinguish "unavailable" from "invalid credentials"
+            # only when the backend cannot retrieve auth records.
+            # If user truly doesn't exist, stored will also be empty; treat as invalid credentials (401).
+            # However, when Postgres is timing out and Redis is empty, we should return 503 so clients can retry.
+            try:
+                # Best-effort: if DB is reachable quickly, confirm non-existence.
+                quick = await asyncio.wait_for(db_manager.get_agent_auth_record(username), timeout=1.5)
+                if not quick or not (quick.get("password_hash") or ""):
+                    raise HTTPException(status_code=401, detail="Invalid credentials")
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=503, detail="Authentication backend unavailable")
         if not stored or not verify_password(password, stored):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         # is_admin already determined above (single DB hit)
@@ -6436,7 +6587,20 @@ async def auth_change_password(payload: dict = Body(...), agent: dict = Depends(
         if not stored or not verify_password(old_password, stored):
             raise HTTPException(status_code=401, detail="Invalid credentials")
     # Admin changing someone else's password: allow without old_password
-    await db_manager.set_agent_password_hash(username, hash_password(new_password))
+    new_hash = hash_password(new_password)
+    await db_manager.set_agent_password_hash(username, new_hash)
+    # Refresh Redis auth cache for robustness
+    try:
+        ia = 0
+        try:
+            ia = int(await db_manager.get_agent_is_admin(username))
+        except Exception:
+            # Best-effort: keep whatever Redis already had
+            cached = await redis_manager.get_agent_auth_record(username)
+            ia = int((cached or {}).get("is_admin") or 0)
+        await redis_manager.set_agent_auth_record(username, new_hash, ia)
+    except Exception:
+        pass
     return {"ok": True}
 
 @app.post("/conversations/{user_id}/assign")

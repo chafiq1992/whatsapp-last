@@ -1682,9 +1682,25 @@ class DatabaseManager:
                 script = script.replace("datetime(created_at)", "created_at")
                 script = script.replace("datetime(ts)", "ts")
                 script = script.replace("datetime(first_reply_ts)", "first_reply_ts")
-                statements = [s.strip() for s in script.split(";") if s.strip()]
+                def _strip_sql_line_comments(sql: str) -> str:
+                    # Avoid executing comment-only chunks (e.g. "-- comment") which can trigger
+                    # asyncpg protocol edge cases on some Postgres deployments.
+                    try:
+                        lines = []
+                        for line in (sql or "").splitlines():
+                            if line.lstrip().startswith("--"):
+                                continue
+                            lines.append(line)
+                        return "\n".join(lines).strip()
+                    except Exception:
+                        return (sql or "").strip()
+
+                statements = [s.strip() for s in script.split(";") if s and s.strip()]
                 for stmt in statements:
-                    await db.execute(stmt)
+                    cleaned = _strip_sql_line_comments(stmt)
+                    if not cleaned:
+                        continue
+                    await db.execute(cleaned)
                 # Ensure the additional composite index exists in Postgres as well
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_msg_user_ts_text ON messages (user_id, timestamp)")
                 # Durable webhook queue schema for Postgres (JSONB + timestamptz + SKIP LOCKED friendly index)

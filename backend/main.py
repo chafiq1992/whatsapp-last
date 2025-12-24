@@ -80,6 +80,19 @@ SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "3000"))
 AUTH_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_DB_TIMEOUT_SECONDS", "8"))
 # Health DB check timeout (seconds)
 HEALTH_DB_TIMEOUT_SECONDS = float(os.getenv("HEALTH_DB_TIMEOUT_SECONDS", "2"))
+# Postgres connection/pool behavior.
+# Important: pool creation must be faster than AUTH_DB_TIMEOUT_SECONDS, otherwise auth endpoints will 503 on cold start.
+PG_CONNECT_TIMEOUT_SECONDS = float(
+    os.getenv("PG_CONNECT_TIMEOUT_SECONDS", str(min(10.0, max(2.0, AUTH_DB_TIMEOUT_SECONDS - 0.5))))
+)
+PG_POOL_RETRY_BACKOFF_SECONDS = float(os.getenv("PG_POOL_RETRY_BACKOFF_SECONDS", "15"))
+# Default behavior: if Postgres is configured and required, do NOT start serving traffic in a degraded mode.
+_BLOCK_STARTUP_ON_DB_FAILURE_ENV = (os.getenv("BLOCK_STARTUP_ON_DB_FAILURE", "") or "").strip()
+BLOCK_STARTUP_ON_DB_FAILURE = (
+    (_BLOCK_STARTUP_ON_DB_FAILURE_ENV == "1")
+    if _BLOCK_STARTUP_ON_DB_FAILURE_ENV
+    else bool(DATABASE_URL and REQUIRE_POSTGRES)
+)
 # Webhook ingress queue to ensure we ACK Meta quickly and process in background.
 WEBHOOK_QUEUE_MAXSIZE = int(os.getenv("WEBHOOK_QUEUE_MAXSIZE", "1000"))
 WEBHOOK_WORKERS = int(os.getenv("WEBHOOK_WORKERS", "2"))
@@ -497,7 +510,8 @@ async def convert_webm_to_ogg(src_path: Path) -> Path:
     loop = asyncio.get_event_loop()
     proc = await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True))
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.decode())
+        err = (proc.stderr or b"").decode("utf-8", "ignore")
+        raise RuntimeError(err or "ffmpeg failed")
     return dst_path
 
 async def compute_audio_waveform(src_path: Path, buckets: int = 56) -> list[int]:
@@ -590,7 +604,8 @@ async def convert_any_to_m4a(src_path: Path) -> Path:
     loop = asyncio.get_event_loop()
     proc = await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True))
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.decode())
+        err = (proc.stderr or b"").decode("utf-8", "ignore")
+        raise RuntimeError(err or "ffmpeg failed")
     return dst_path
 
 async def probe_audio_channels(src_path: Path) -> int:
@@ -1242,6 +1257,11 @@ class DatabaseManager:
         if not self.use_postgres:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._pool: Optional[asyncpg.pool.Pool] = None
+        # Pool creation can be slow/fail on cold start. Protect with a lock and add backoff
+        # so every request doesn't stampede the DB.
+        self._pool_lock = asyncio.Lock()
+        self._pool_failed_until: float = 0.0
+        self._pool_last_error: Optional[BaseException] = None
         # Columns allowed in the messages table (except auto-increment id)
         self.message_columns = {
             "wa_message_id",
@@ -1300,21 +1320,64 @@ class DatabaseManager:
                 await db.commit()
 
     async def _get_pool(self):
-        if not self._pool:
+        if self._pool:
+            return self._pool
+        if not self.db_url:
+            return None
+
+        # Fast-fail during backoff windows to avoid repeated slow connection attempts.
+        now = time.time()
+        if self._pool_failed_until and now < self._pool_failed_until:
+            remaining = max(0.0, self._pool_failed_until - now)
+            last = type(self._pool_last_error).__name__ if self._pool_last_error else "unknown"
+            raise RuntimeError(f"Postgres pool unavailable (retry in ~{remaining:.0f}s; last_error={last})")
+
+        async with self._pool_lock:
+            if self._pool:
+                return self._pool
+            now = time.time()
+            if self._pool_failed_until and now < self._pool_failed_until:
+                remaining = max(0.0, self._pool_failed_until - now)
+                last = type(self._pool_last_error).__name__ if self._pool_last_error else "unknown"
+                raise RuntimeError(f"Postgres pool unavailable (retry in ~{remaining:.0f}s; last_error={last})")
+
+            def _db_url_summary(url: str) -> str:
+                # Avoid leaking credentials in logs. Only log basic routing info.
+                try:
+                    p = urlparse(url)
+                    dbname = (p.path or "").lstrip("/") or None
+                    user = p.username or None
+                    host = p.hostname or None
+                    port = p.port or None
+                    has_pw = bool(p.password)
+                    return f"{p.scheme}://{user or '?'}@{host or '?'}:{port or '?'}{('/' + dbname) if dbname else ''} (password={'set' if has_pw else 'missing'})"
+                except Exception:
+                    return "unparseable"
+
             try:
                 # Limit pool sizes to avoid exhausting free-tier Postgres (e.g., Supabase)
                 self._pool = await asyncpg.create_pool(
                     self.db_url,
                     min_size=PG_POOL_MIN,
                     max_size=PG_POOL_MAX,
-                    timeout=30.0,
+                    timeout=float(PG_CONNECT_TIMEOUT_SECONDS),
                     # PgBouncer (Supabase pooler) + prepared statements don't mix in transaction pooling
                     # Disable statement cache to avoid prepared-statement usage across pooled connections
                     statement_cache_size=0,
                     # Recycle idle connections to keep footprint small on free tiers
                     max_inactive_connection_lifetime=60.0,
                 )
+                self._pool_last_error = None
+                self._pool_failed_until = 0.0
             except Exception as exc:
+                self._pool_last_error = exc
+                self._pool_failed_until = time.time() + float(PG_POOL_RETRY_BACKOFF_SECONDS)
+                logging.getLogger(__name__).error(
+                    "Postgres pool creation failed (will back off %ss). db=%s err=%s",
+                    float(PG_POOL_RETRY_BACKOFF_SECONDS),
+                    _db_url_summary(self.db_url or ""),
+                    exc,
+                )
                 if self.db_url and REQUIRE_POSTGRES:
                     # Explicitly require Postgres: surface error and do not silently fallback
                     raise
@@ -1322,6 +1385,7 @@ class DatabaseManager:
                 print(f"⚠️ Postgres pool creation failed, falling back to SQLite: {exc}")
                 self.use_postgres = False
                 self._pool = None
+
         return self._pool
 
     def _convert(self, query: str) -> str:
@@ -5207,12 +5271,19 @@ async def no_cache_html(request: StarletteRequest, call_next):
 @app.on_event("startup")
 async def startup():
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    # Never block container readiness on DB init. If Postgres is down/misconfigured,
-    # we still want the HTTP server to start so /webhook can return 503 quickly and Meta can retry.
+    # DB init strategy:
+    # - If Postgres is configured+required, we fail startup so Cloud Run won't route traffic to a broken revision.
+    # - Otherwise (SQLite/dev), we allow startup to continue in "degraded" mode and endpoints will surface 503s as needed.
     try:
         await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
     except Exception as exc:
-        logging.getLogger(__name__).exception("DB init failed during startup (continuing degraded): %s", exc)
+        logging.getLogger(__name__).exception(
+            "DB init failed during startup (%s): %s",
+            "failing startup" if BLOCK_STARTUP_ON_DB_FAILURE else "continuing degraded",
+            exc,
+        )
+        if BLOCK_STARTUP_ON_DB_FAILURE:
+            raise
     # Optional: bootstrap an initial admin agent for fresh deployments.
     # This avoids a chicken-and-egg situation where /admin/agents requires an admin,
     # but there are no agents yet.

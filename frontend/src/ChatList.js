@@ -576,9 +576,23 @@ const ConversationRow = memo(function Row({
   const [tagsEditOpen, setTagsEditOpen] = useState(false);
   const [tagsInput, setTagsInput] = useState("");
   const [tags, setTags] = useState(conv.tags || []);
+  const [flash, setFlash] = useState(false);
   const rowRef = useCallback((el) => {
     try { registerRowNode && registerRowNode(conv.user_id, el); } catch {}
   }, [registerRowNode, conv?.user_id]);
+
+  // Subtle WhatsApp-like highlight when a new inbound message arrives (chat list preview bumps).
+  useEffect(() => {
+    // Only flash on inbound (from customer), and don't distract when the chat is currently open.
+    if (selected) return;
+    if (conv?.last_message_from_me) return;
+    if (!conv?._flash_ts) return;
+    let t = null;
+    setFlash(true);
+    t = setTimeout(() => setFlash(false), 900);
+    return () => { try { t && clearTimeout(t); } catch {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conv?._flash_ts]);
   return (
     <div
       ref={rowRef}
@@ -590,7 +604,7 @@ const ConversationRow = memo(function Row({
         selected
           ? "bg-gray-900 text-white -mr-px rounded-l-xl rounded-r-none"
           : "bg-gray-800/60 hover:bg-gray-800 text-white/90 rounded-xl"
-      }`}
+      } ${flash ? "ring-2 ring-green-500/40 bg-green-500/10" : ""}`}
     >
       {/* Avatar */}
       <div className="relative shrink-0">

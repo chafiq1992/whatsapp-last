@@ -730,11 +730,33 @@ class ConnectionManager:
             _vlog(f"WS publish error: {exc}")
     
     async def broadcast_to_admins(self, message: dict, exclude_user: str = None):
-        """Broadcast message to all admin users"""
-        admin_users = await self.get_admin_users()
-        for admin_id in admin_users:
-            if admin_id != exclude_user:
+        """Broadcast message to inbox listeners.
+
+        Historically this looked up "admin users" from the DB (users.is_admin=1) and sent to those user_ids.
+        In production, DB hiccups/timeouts would silently prevent broadcasts and the UI would only update on hard refresh.
+
+        Fix: Always broadcast to the shared inbox channel "admin" (i.e. /ws/admin), regardless of DB health.
+        Then best-effort also send to any additional DB-flagged admin user_ids (if present).
+        """
+        # Always send to the shared inbox channel where all agents connect (/ws/admin).
+        try:
+            if exclude_user != "admin":
+                await self.send_to_user("admin", message)
+        except Exception:
+            pass
+
+        # Optional legacy path: also broadcast to any DB-flagged admin users.
+        try:
+            admin_users = await self.get_admin_users()
+        except Exception:
+            admin_users = []
+        for admin_id in admin_users or []:
+            if admin_id in (exclude_user, "admin"):
+                continue
+            try:
                 await self.send_to_user(admin_id, message)
+            except Exception:
+                pass
     
     def get_active_users(self) -> List[str]:
         """Get list of currently active users"""
@@ -5597,7 +5619,12 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     # Connect after auth so we can attach reliable agent identity
     await connection_manager.connect(websocket, user_id, client_info={"agent": agent_username})
     if user_id == "admin":
-        await db_manager.upsert_user(user_id, is_admin=1)
+        # Best-effort: mark the shared inbox channel in DB for legacy admin-user discovery.
+        # Do not let DB issues kill the WS connection (agents still need realtime).
+        try:
+            await db_manager.upsert_user(user_id, is_admin=1)
+        except Exception:
+            pass
     
     try:
         # Send recent messages on connection

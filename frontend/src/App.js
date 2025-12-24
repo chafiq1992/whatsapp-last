@@ -55,6 +55,8 @@ export default function App() {
   // WebSocket for chat and a separate one for admin updates
   const wsRef = useRef(null);
   const adminWsRef = useRef(null);
+  const convPollRef = useRef(null);
+  const adminPingRef = useRef(null);
 
   useEffect(() => {
     activeUserRef.current = activeUser;
@@ -220,6 +222,48 @@ export default function App() {
     // return () => clearInterval(interval);
   }, [authReady, isLoginPath]);
 
+  // Keep conversations fresh even if WebSocket messages are missed (multi-instance without Redis, tab sleep, brief disconnects).
+  // Strategy:
+  // - Whenever the admin WS connects, do an immediate sync.
+  // - When disconnected, poll periodically as a safety net.
+  // - When tab becomes visible again, do an immediate sync.
+  useEffect(() => {
+    if (!authReady) return;
+    if (isLoginPath) return;
+
+    const clearPoll = () => {
+      try { if (convPollRef.current) clearInterval(convPollRef.current); } catch {}
+      convPollRef.current = null;
+    };
+    const startPoll = () => {
+      if (convPollRef.current) return;
+      // Keep this light; backend also caches aggressively and we use cache-buster headers.
+      convPollRef.current = setInterval(() => {
+        try { fetchConversations(); } catch {}
+      }, 15000);
+    };
+
+    if (adminWsConnected) {
+      clearPoll();
+      // Catch-up sync on connect (covers missed messages during reconnect)
+      try { fetchConversations(); } catch {}
+    } else {
+      startPoll();
+    }
+
+    const onVis = () => {
+      try {
+        if (document.visibilityState === 'visible') fetchConversations();
+      } catch {}
+    };
+    try { document.addEventListener('visibilitychange', onVis); } catch {}
+
+    return () => {
+      clearPoll();
+      try { document.removeEventListener('visibilitychange', onVis); } catch {}
+    };
+  }, [authReady, isLoginPath, adminWsConnected]);
+
   // Read agent/channel from URL hash for deep links: #agent=alice&assigned=1 | #dm=alice | #team=sales
   useEffect(() => {
     const applyFromHash = () => {
@@ -316,19 +360,31 @@ export default function App() {
         retry = 0;
         setAdminWsConnected(true);
         try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
+        // Keepalive to prevent idle timeouts on proxies/load balancers
+        try {
+          if (adminPingRef.current) clearInterval(adminPingRef.current);
+          adminPingRef.current = setInterval(() => {
+            try { ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
+          }, 25000);
+        } catch {}
       });
       ws.addEventListener('close', () => {
         setAdminWsConnected(false);
+        try { if (adminPingRef.current) clearInterval(adminPingRef.current); } catch {}
+        adminPingRef.current = null;
         const delay = Math.min(30000, 1000 * Math.pow(2, retry++)) + Math.floor(Math.random() * 500);
         timer = setTimeout(connectAdmin, delay);
       });
       ws.addEventListener('error', () => {
         setAdminWsConnected(false);
+        try { if (adminPingRef.current) clearInterval(adminPingRef.current); } catch {}
+        adminPingRef.current = null;
         try { ws.close(); } catch {}
       });
       ws.addEventListener('message', (e) => {
         try {
           const data = JSON.parse(e.data);
+          if (data.type === 'pong') return;
           if (data.type === "message_received") {
             const msg = data.data || {};
             const userId = msg.user_id;
@@ -362,6 +418,7 @@ export default function App() {
                   })(),
                   // Always treat an incoming message as latest activity for ordering purposes
                   last_message_time: nowIso,
+                  _flash_ts: (!msg.from_me ? Date.now() : (current._flash_ts || 0)),
                   unread_count:
                     activeUserRef.current?.user_id === userId
                       ? current.unread_count
@@ -382,6 +439,7 @@ export default function App() {
                 last_message_from_me: Boolean(msg.from_me),
                 last_message_status: msg.from_me ? (msg.status || undefined) : undefined,
                 last_message_time: nowIso,
+                _flash_ts: (!msg.from_me ? Date.now() : 0),
                 unread_count:
                   activeUserRef.current?.user_id === userId ? 0 : 1,
                 tags: [],
@@ -399,6 +457,8 @@ export default function App() {
     return () => {
       clearTimeout(timer);
       if (adminWsRef.current) try { adminWsRef.current.close(); } catch {}
+      try { if (adminPingRef.current) clearInterval(adminPingRef.current); } catch {}
+      adminPingRef.current = null;
       setAdminWsConnected(false);
     };
   }, [authReady, isLoginPath]);

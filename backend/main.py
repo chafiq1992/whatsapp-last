@@ -1965,6 +1965,7 @@ class DatabaseManager:
                 script = script.replace("datetime(created_at)", "created_at")
                 script = script.replace("datetime(ts)", "ts")
                 script = script.replace("datetime(first_reply_ts)", "first_reply_ts")
+                script = script.replace("datetime(next_attempt_at)", "next_attempt_at")
 
                 def _strip_pg_dash_comments(sql: str) -> str:
                     """Remove SQL line comments (`-- ...`) including inline parts.

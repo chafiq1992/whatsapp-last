@@ -167,6 +167,23 @@ TRACK_IP_SALT = (os.getenv("TRACK_IP_SALT", "") or "").strip()
 TRACK_ALLOWED_ORIGINS_ENV = (os.getenv("TRACK_ALLOWED_ORIGINS", "") or "").strip()
 TRACK_ALLOWED_ORIGINS = [o.strip().lower() for o in TRACK_ALLOWED_ORIGINS_ENV.split(",") if o.strip()]
 
+def _safe_db_url_summary(url: str | None) -> dict:
+    """Return non-sensitive DB routing info (no passwords)."""
+    try:
+        if not url:
+            return {"configured": False}
+        p = urlparse(str(url))
+        return {
+            "configured": True,
+            "scheme": (p.scheme or "").lower(),
+            "host": p.hostname or None,
+            "port": p.port or None,
+            "dbname": (p.path or "").lstrip("/") or None,
+            "user": p.username or None,
+        }
+    except Exception:
+        return {"configured": bool(url), "unparseable": True}
+
 # ── Multi-workspace (two WhatsApp numbers) ────────────────────────
 # Goal: keep customers/messages/orders/analytics isolated per workspace (store),
 # while allowing the same agents/auth across workspaces.
@@ -5751,12 +5768,23 @@ async def startup():
     try:
         # 1) Shared auth/settings DB
         await asyncio.wait_for(auth_db_manager.init_db(), timeout=30.0)
-        # 2) Tenant DB(s)
+
+        # 2) Tenant DB(s) (log per-workspace failures explicitly so we can spot misconfigured NOVA DBs)
+        tenant_errors: list[tuple[str, str]] = []
         if ENABLE_MULTI_WORKSPACE:
             for ws in (WORKSPACES or [DEFAULT_WORKSPACE]):
-                tok = _CURRENT_WORKSPACE.set(_coerce_workspace(ws))
+                w = _coerce_workspace(ws)
+                tok = _CURRENT_WORKSPACE.set(w)
                 try:
                     await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
+                except Exception as exc:
+                    tenant_errors.append((w, str(exc)))
+                    logging.getLogger(__name__).exception(
+                        "Tenant DB init failed workspace=%s db=%s err=%s",
+                        w,
+                        _safe_db_url_summary((TENANT_DB_URLS or {}).get(w)),
+                        exc,
+                    )
                 finally:
                     try:
                         _CURRENT_WORKSPACE.reset(tok)
@@ -5764,6 +5792,9 @@ async def startup():
                         pass
         else:
             await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
+
+        if tenant_errors and BLOCK_STARTUP_ON_DB_FAILURE:
+            raise RuntimeError(f"Tenant DB init failures: {tenant_errors}")
     except Exception as exc:
         logging.getLogger(__name__).exception(
             "DB init failed during startup (%s): %s",
@@ -6079,6 +6110,11 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 user_id,
             )
             try:
+                # Avoid "need to call accept first" errors in some ASGI servers.
+                try:
+                    await websocket.accept()
+                except Exception:
+                    pass
                 await websocket.close(code=4401)
             except Exception:
                 pass
@@ -6978,6 +7014,11 @@ async def health_check():
         "status": "healthy",
         "redis": redis_status,
         "workspace": get_current_workspace(),
+        "multi_workspace": {
+            "enabled": bool(ENABLE_MULTI_WORKSPACE),
+            "workspaces": WORKSPACES,
+            "default": DEFAULT_WORKSPACE,
+        },
         "db": {
             "backend": db_backend,
             "ok": bool(db_ok),
@@ -6988,6 +7029,13 @@ async def health_check():
                 else None
             ),
             "auth_db_path": (AUTH_DB_PATH if db_backend == "sqlite" else None),
+            # safe summaries for Postgres routing (no passwords)
+            "tenant_db": _safe_db_url_summary(getattr(db_manager, "db_url", None)),
+            "auth_db": _safe_db_url_summary(getattr(auth_db_manager, "db_url", None)),
+        },
+        "whatsapp": {
+            "allowed_phone_number_ids": sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:20],
+            "phone_id_to_workspace": PHONE_ID_TO_WORKSPACE,
         },
         "webhook": {
             "backend": _webhook_backend_name(),
@@ -7162,6 +7210,54 @@ async def get_version():
         "build_id": APP_BUILD_ID,
         "started_at": APP_STARTED_AT,
         **({"commit": commit} if commit else {}),
+    }
+
+
+@app.post("/admin/db/init")
+async def admin_init_db(workspace: str | None = None, _: dict = Depends(require_admin)):
+    """Admin-only: (re)initialize DB schema for the selected workspace.
+
+    Useful when a new Supabase DB (e.g. NOVA) is added and needs tables created.
+    """
+    w = _coerce_workspace(workspace or get_current_workspace())
+    tok = _CURRENT_WORKSPACE.set(w)
+    try:
+        await asyncio.wait_for(db_manager.init_db(), timeout=60.0)
+        return {
+            "ok": True,
+            "workspace": w,
+            "db": {
+                "tenant_db": _safe_db_url_summary(getattr(db_manager, "db_url", None)),
+            },
+        }
+    finally:
+        try:
+            _CURRENT_WORKSPACE.reset(tok)
+        except Exception:
+            pass
+
+
+@app.get("/debug/workspace")
+async def debug_workspace(request: Request, _: dict = Depends(require_admin)):
+    """Admin-only: show resolved workspace + DB routing info (safe)."""
+    ws = get_current_workspace()
+    return {
+        "workspace": ws,
+        "multi_workspace": {"enabled": bool(ENABLE_MULTI_WORKSPACE), "workspaces": WORKSPACES, "default": DEFAULT_WORKSPACE},
+        "request": {
+            "x_workspace": (request.headers.get("x-workspace") or request.headers.get("X-Workspace")),
+            "workspace_qp": request.query_params.get("workspace"),
+        },
+        "db": {
+            "tenant_db": _safe_db_url_summary(getattr(db_manager, "db_url", None)),
+            "auth_db": _safe_db_url_summary(getattr(auth_db_manager, "db_url", None)),
+        },
+        "whatsapp": {
+            "allowed_phone_number_ids": sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:50],
+            "phone_id_to_workspace": PHONE_ID_TO_WORKSPACE,
+            "nova_phone_number_id_configured": bool((WHATSAPP_CONFIG_BY_WORKSPACE.get("irranova") or {}).get("phone_number_id")),
+            "kids_phone_number_id_configured": bool((WHATSAPP_CONFIG_BY_WORKSPACE.get("irrakids") or {}).get("phone_number_id")),
+        },
     }
 
 # After all routes: mount the static folder for any other assets under /static

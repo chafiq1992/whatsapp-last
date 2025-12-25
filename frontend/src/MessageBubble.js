@@ -87,7 +87,11 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
           return;
         }
         const p = (async () => {
-          const res = await fetch(`${API_BASE}/shopify-variant/${retailerId}`);
+          let ws = 'irranova';
+          try { ws = (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch {}
+          const res = await fetch(`${API_BASE}/shopify-variant/${retailerId}`, {
+            headers: { 'X-Workspace': ws },
+          });
           if (!res.ok) return null;
           const data = await res.json();
           try { variantCacheRef.current.set(retailerId, { ts: Date.now(), data }); } catch {}
@@ -228,7 +232,11 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
 
     setLinkPreviewError(false);
     const p = (async () => {
-      const res = await fetch(`${API_BASE}/link-preview?url=${encodeURIComponent(firstPageUrl)}`);
+      let ws = 'irranova';
+      try { ws = (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch {}
+      const res = await fetch(`${API_BASE}/link-preview?url=${encodeURIComponent(firstPageUrl)}`, {
+        headers: { 'X-Workspace': ws },
+      });
       if (!res.ok) throw new Error(String(res.status));
       const data = await res.json();
       try { previewCacheRef.current.set(firstPageUrl, { ts: Date.now(), data }); } catch {}

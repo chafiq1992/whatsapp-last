@@ -8,6 +8,19 @@ const STORE_CATALOG_SET_PRODUCTS = 'catalog_set_products';
 const STORE_CARTS = 'carts';
 const DB_VERSION = 4;
 
+function getWorkspace() {
+  try {
+    const w = (localStorage.getItem('workspace') || '').trim().toLowerCase();
+    return w || 'irranova';
+  } catch {
+    return 'irranova';
+  }
+}
+
+function wsKey(key) {
+  return `${getWorkspace()}:${String(key)}`;
+}
+
 async function getDB() {
   return openDB(DB_NAME, DB_VERSION, {
     upgrade(db, oldVersion) {
@@ -36,25 +49,25 @@ export async function saveMessages(userId, messageArray) {
   if (!userId) return;
   const db = await getDB();
   const msgs = Array.isArray(messageArray) ? messageArray.slice(-300) : [];
-  await db.put(STORE_MESSAGES, msgs, userId);
+  await db.put(STORE_MESSAGES, msgs, wsKey(userId));
 }
 
 export async function loadMessages(userId) {
   if (!userId) return [];
   const db = await getDB();
-  const msgs = await db.get(STORE_MESSAGES, userId);
+  const msgs = await db.get(STORE_MESSAGES, wsKey(userId));
   return Array.isArray(msgs) ? msgs : [];
 }
 
 export async function saveConversations(conversationArray) {
   const db = await getDB();
   const list = Array.isArray(conversationArray) ? conversationArray : [];
-  await db.put(STORE_CONVERSATIONS, list, 'list');
+  await db.put(STORE_CONVERSATIONS, list, wsKey('list'));
 }
 
 export async function loadConversations() {
   const db = await getDB();
-  const convs = await db.get(STORE_CONVERSATIONS, 'list');
+  const convs = await db.get(STORE_CONVERSATIONS, wsKey('list'));
   return Array.isArray(convs) ? convs : [];
 }
 
@@ -62,12 +75,12 @@ export async function loadConversations() {
 export async function saveCatalogSets(setsArray) {
   const db = await getDB();
   const list = Array.isArray(setsArray) ? setsArray : [];
-  await db.put(STORE_CATALOG_SETS, list, 'list');
+  await db.put(STORE_CATALOG_SETS, list, wsKey('list'));
 }
 
 export async function loadCatalogSets() {
   const db = await getDB();
-  const sets = await db.get(STORE_CATALOG_SETS, 'list');
+  const sets = await db.get(STORE_CATALOG_SETS, wsKey('list'));
   return Array.isArray(sets) ? sets : [];
 }
 
@@ -75,13 +88,13 @@ export async function saveCatalogSetProducts(setId, productsArray) {
   if (!setId) return;
   const db = await getDB();
   const list = Array.isArray(productsArray) ? productsArray : [];
-  await db.put(STORE_CATALOG_SET_PRODUCTS, list, String(setId));
+  await db.put(STORE_CATALOG_SET_PRODUCTS, list, wsKey(String(setId)));
 }
 
 export async function loadCatalogSetProducts(setId) {
   if (!setId) return [];
   const db = await getDB();
-  const products = await db.get(STORE_CATALOG_SET_PRODUCTS, String(setId));
+  const products = await db.get(STORE_CATALOG_SET_PRODUCTS, wsKey(String(setId)));
   return Array.isArray(products) ? products : [];
 }
 
@@ -95,17 +108,17 @@ export async function saveCart(userId, items) {
     items: Array.isArray(items) ? items : [],
     updatedAt: Date.now(),
   };
-  await db.put(STORE_CARTS, payload, String(userId));
+  await db.put(STORE_CARTS, payload, wsKey(String(userId)));
 }
 
 export async function loadCart(userId) {
   if (!userId) return [];
   const db = await getDB();
-  const entry = await db.get(STORE_CARTS, String(userId));
+  const entry = await db.get(STORE_CARTS, wsKey(String(userId)));
   if (!entry) return [];
   try {
     if (Date.now() - (entry.updatedAt || 0) > CART_TTL_MS) {
-      await db.delete(STORE_CARTS, String(userId));
+      await db.delete(STORE_CARTS, wsKey(String(userId)));
       return [];
     }
   } catch {}
@@ -115,5 +128,5 @@ export async function loadCart(userId) {
 export async function clearCart(userId) {
   if (!userId) return;
   const db = await getDB();
-  try { await db.delete(STORE_CARTS, String(userId)); } catch {}
+  try { await db.delete(STORE_CARTS, wsKey(String(userId))); } catch {}
 }

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import api from './api';
 const AnalyticsPanel = React.lazy(() => import('./AnalyticsPanel'));
 
-export default function AdminDashboard({ onClose, isAdmin = false, currentAgent = '' }) {
+export default function AdminDashboard({ onClose, isAdmin = false, currentAgent = '', workspace = 'irranova' }) {
   const [agents, setAgents] = useState([]);
   const [form, setForm] = useState({ username: '', name: '', password: '', is_admin: false });
   const [loading, setLoading] = useState(false);
@@ -19,7 +19,7 @@ export default function AdminDashboard({ onClose, isAdmin = false, currentAgent 
     } catch (e) {}
   };
 
-  useEffect(() => { loadAgents(); }, []);
+  useEffect(() => { loadAgents(); }, [workspace]);
 
   useEffect(() => {
     (async () => {
@@ -28,7 +28,7 @@ export default function AdminDashboard({ onClose, isAdmin = false, currentAgent 
         setTagOptions(Array.isArray(res.data) ? res.data : []);
       } catch (e) {}
     })();
-  }, []);
+  }, [workspace]);
 
   const createAgent = async (e) => {
     e.preventDefault();
@@ -171,7 +171,7 @@ export default function AdminDashboard({ onClose, isAdmin = false, currentAgent 
         {isAdmin && tab === 'analytics' && (
           <div className="mt-2">
             <React.Suspense fallback={<div className="p-3 text-sm text-gray-300">Loading analytics…</div>}>
-              <AnalyticsPanel />
+              <AnalyticsPanel key={String(workspace || 'irranova')} />
             </React.Suspense>
           </div>
         )}

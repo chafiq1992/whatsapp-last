@@ -13,9 +13,24 @@ const api = axios.create({
   withCredentials: true,
 });
 
+function getWorkspace() {
+  try {
+    const w = (localStorage.getItem('workspace') || '').trim().toLowerCase();
+    return w || 'irranova';
+  } catch {
+    return 'irranova';
+  }
+}
+
 // Avoid stale caches for GETs and attach auth token
 api.interceptors.request.use((config) => {
   try {
+    // Workspace routing header (tenant selection)
+    config.headers = {
+      ...(config.headers || {}),
+      'X-Workspace': getWorkspace(),
+    };
+
     // Fallback: attach Authorization header from sessionStorage if present
     // (used only when cookies are blocked/dropped by the client).
     try {

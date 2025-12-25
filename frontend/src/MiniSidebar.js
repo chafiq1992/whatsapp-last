@@ -13,6 +13,8 @@ export default function MiniSidebar({
   currentAgent = '',
   isAdmin = false,
   onStartNewChat,
+  workspace = 'irranova',
+  onSwitchWorkspace,
 }) {
 	const [showDropdown, setShowDropdown] = useState(false);
 	const [agents, setAgents] = useState([]);
@@ -55,6 +57,23 @@ export default function MiniSidebar({
 		<div className="w-16 bg-gray-900 border-r border-gray-800 h-full flex flex-col items-center justify-between py-3 relative">
 			{/* Upper section */}
 			<div className="flex flex-col items-center gap-3">
+        <button
+          type="button"
+          title={`Switch workspace (current: ${String(workspace || '').toUpperCase()})`}
+          onClick={() => {
+            try {
+              const next = String(workspace || '').toLowerCase() === 'irrakids' ? 'irranova' : 'irrakids';
+              if (typeof onSwitchWorkspace === 'function') onSwitchWorkspace(next);
+            } catch {}
+          }}
+          className={`w-12 h-10 rounded-xl flex items-center justify-center text-xs font-extrabold tracking-widest border transition-colors ${
+            String(workspace || '').toLowerCase() === 'irrakids'
+              ? 'bg-[#004AAD] text-white border-[#004AAD]'
+              : 'bg-green-700 text-white border-green-700'
+          }`}
+        >
+          {String(workspace || '').toLowerCase() === 'irrakids' ? 'KIDS' : 'NOVA'}
+        </button>
 				<button
 					type="button"
 					title="New chat"

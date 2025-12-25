@@ -17,6 +17,7 @@ import aiosqlite
 import aiofiles
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+from contextvars import ContextVar
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Response, UploadFile, File, Form, HTTPException, Body, Depends
 from starlette.requests import Request as _LimiterRequest
 from starlette.responses import Response as _LimiterResponse
@@ -71,6 +72,7 @@ BASE_URL = os.getenv("BASE_URL", f"http://localhost:{PORT}")
 REDIS_URL = os.getenv("REDIS_URL", "")
 DB_PATH = os.getenv("DB_PATH") or str(ROOT_DIR / "data" / "whatsapp_messages.db")
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional PostgreSQL URL
+DATABASE_URL_NOVA = os.getenv("DATABASE_URL_NOVA") or os.getenv("DATABASE_URL_IRRANOVA") or ""
 PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "1"))
 PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "4"))
 REQUIRE_POSTGRES = int(os.getenv("REQUIRE_POSTGRES", "1"))  # when 1 and DATABASE_URL is set, never fallback to SQLite
@@ -164,6 +166,85 @@ TRACK_CLICKS_PER_MIN = int(os.getenv("TRACK_CLICKS_PER_MIN", "240"))
 TRACK_IP_SALT = (os.getenv("TRACK_IP_SALT", "") or "").strip()
 TRACK_ALLOWED_ORIGINS_ENV = (os.getenv("TRACK_ALLOWED_ORIGINS", "") or "").strip()
 TRACK_ALLOWED_ORIGINS = [o.strip().lower() for o in TRACK_ALLOWED_ORIGINS_ENV.split(",") if o.strip()]
+
+# ── Multi-workspace (two WhatsApp numbers) ────────────────────────
+# Goal: keep customers/messages/orders/analytics isolated per workspace (store),
+# while allowing the same agents/auth across workspaces.
+ENABLE_MULTI_WORKSPACE = (os.getenv("ENABLE_MULTI_WORKSPACE", "0") or "0").strip() == "1"
+DEFAULT_WORKSPACE = (os.getenv("DEFAULT_WORKSPACE", "irranova") or "irranova").strip().lower()
+WORKSPACES = [w.strip().lower() for w in (os.getenv("WORKSPACES", "irranova,irrakids") or "").split(",") if w.strip()]
+if DEFAULT_WORKSPACE not in WORKSPACES:
+    WORKSPACES = [DEFAULT_WORKSPACE] + [w for w in WORKSPACES if w != DEFAULT_WORKSPACE]
+
+_CURRENT_WORKSPACE: ContextVar[str] = ContextVar("current_workspace", default=DEFAULT_WORKSPACE)
+
+def get_current_workspace() -> str:
+    try:
+        w = str(_CURRENT_WORKSPACE.get() or DEFAULT_WORKSPACE).strip().lower()
+        return w if w in WORKSPACES else DEFAULT_WORKSPACE
+    except Exception:
+        return DEFAULT_WORKSPACE
+
+def _coerce_workspace(value: str | None) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in WORKSPACES else DEFAULT_WORKSPACE
+
+def _workspace_from_request(request: Request) -> str:
+    # Header preferred, query param fallback
+    try:
+        hdr = (request.headers.get("x-workspace") or request.headers.get("X-Workspace") or "").strip()
+    except Exception:
+        hdr = ""
+    if hdr:
+        return _coerce_workspace(hdr)
+    try:
+        qp = (request.query_params.get("workspace") or "").strip()  # type: ignore[attr-defined]
+    except Exception:
+        qp = ""
+    return _coerce_workspace(qp)
+
+def _derive_tenant_db_path(base_path: str, workspace: str) -> str:
+    """Derive per-workspace SQLite DB paths from a base DB_PATH when not explicitly configured."""
+    try:
+        p = Path(str(base_path))
+        if p.suffix.lower() == ".db":
+            return str(p.with_name(f"{p.stem}_{workspace}{p.suffix}"))
+    except Exception:
+        pass
+    # fallback to standard location
+    return str(ROOT_DIR / "data" / f"whatsapp_messages_{workspace}.db")
+
+TENANT_DB_PATHS: Dict[str, str] = {}
+try:
+    TENANT_DB_PATHS = {
+        "irranova": os.getenv("DB_PATH_IRRANOVA") or _derive_tenant_db_path(DB_PATH, "irranova"),
+        "irrakids": os.getenv("DB_PATH_IRRAKIDS") or _derive_tenant_db_path(DB_PATH, "irrakids"),
+    }
+    # allow custom WORKSPACES without explicit vars (derive from DB_PATH)
+    for w in WORKSPACES:
+        if w not in TENANT_DB_PATHS:
+            TENANT_DB_PATHS[w] = os.getenv(f"DB_PATH_{w.upper()}") or _derive_tenant_db_path(DB_PATH, w)
+except Exception:
+    TENANT_DB_PATHS = {}
+
+# Auth/settings DB (shared across workspaces). Defaults to the legacy DB_PATH unless multi-workspace is enabled.
+AUTH_DB_PATH = os.getenv("AUTH_DB_PATH") or (str(ROOT_DIR / "data" / "whatsapp_auth.db") if ENABLE_MULTI_WORKSPACE else DB_PATH)
+
+# Tenant DB URLs (Postgres/Supabase): default DATABASE_URL is irrakids, DATABASE_URL_NOVA is irranova.
+# This matches the requested env setup: keep existing DATABASE_URL as-is, only add DATABASE_URL_NOVA.
+TENANT_DB_URLS: Dict[str, str] = {}
+try:
+    TENANT_DB_URLS = {
+        "irrakids": (DATABASE_URL or "").strip(),
+        "irranova": (DATABASE_URL_NOVA or "").strip() or (DATABASE_URL or "").strip(),
+    }
+    for w in WORKSPACES:
+        if w in TENANT_DB_URLS and TENANT_DB_URLS[w]:
+            continue
+        # Generic override: DATABASE_URL_<WORKSPACE>
+        TENANT_DB_URLS[w] = (os.getenv(f"DATABASE_URL_{w.upper()}", "") or "").strip() or (DATABASE_URL or "").strip()
+except Exception:
+    TENANT_DB_URLS = {}
 
 # Global semaphore to cap concurrent WhatsApp Graph API calls per instance
 wa_semaphore = asyncio.Semaphore(WA_MAX_CONCURRENCY)
@@ -425,12 +506,65 @@ META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", ACCESS_TOKEN)
 META_APP_ID = os.getenv("META_APP_ID", "") or os.getenv("FB_APP_ID", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "") or os.getenv("FB_APP_SECRET", "")
 
-# When set, only process webhooks for this phone number id.
-# Defaults to WHATSAPP_PHONE_NUMBER_ID if that env is set and not the placeholder value.
-ALLOWED_PHONE_NUMBER_ID = (
-    os.getenv("ALLOWED_PHONE_NUMBER_ID", "").strip()
-    or (PHONE_NUMBER_ID if PHONE_NUMBER_ID and PHONE_NUMBER_ID != "your_phone_number_id" else "")
+# Workspace-specific WhatsApp credentials (optional, for ENABLE_MULTI_WORKSPACE=1).
+# Requirement: keep irrakids envs unchanged (WHATSAPP_ACCESS_TOKEN/WHATSAPP_PHONE_NUMBER_ID),
+# and only add NOVA envs for irranova.
+# Back-compat: still accept *_IRRANOVA as aliases if already used somewhere.
+WHATSAPP_ACCESS_TOKEN_NOVA = (
+    os.getenv("WHATSAPP_ACCESS_TOKEN_NOVA", "")
+    or os.getenv("WA_ACCESS_TOKEN_NOVA", "")
+    or os.getenv("WHATSAPP_ACCESS_TOKEN_IRRANOVA", "")
+    or os.getenv("WA_ACCESS_TOKEN_IRRANOVA", "")
 )
+WHATSAPP_PHONE_NUMBER_ID_NOVA = (
+    os.getenv("WHATSAPP_PHONE_NUMBER_ID_NOVA", "")
+    or os.getenv("WA_PHONE_NUMBER_ID_NOVA", "")
+    or os.getenv("WHATSAPP_PHONE_NUMBER_ID_IRRANOVA", "")
+    or os.getenv("WA_PHONE_NUMBER_ID_IRRANOVA", "")
+)
+
+WHATSAPP_CONFIG_BY_WORKSPACE: Dict[str, dict] = {
+    # Default workspace uses legacy vars unless overridden.
+    "irranova": {
+        "access_token": (WHATSAPP_ACCESS_TOKEN_NOVA or ACCESS_TOKEN),
+        "phone_number_id": (WHATSAPP_PHONE_NUMBER_ID_NOVA or PHONE_NUMBER_ID),
+    },
+    "irrakids": {
+        # Keep irrakids envs unchanged: default to the legacy single vars.
+        "access_token": ACCESS_TOKEN,
+        "phone_number_id": PHONE_NUMBER_ID,
+    },
+}
+for w in WORKSPACES:
+    if w not in WHATSAPP_CONFIG_BY_WORKSPACE:
+        # Allow custom workspaces via generic env names WHATSAPP_ACCESS_TOKEN_<WS>, WHATSAPP_PHONE_NUMBER_ID_<WS>
+        WHATSAPP_CONFIG_BY_WORKSPACE[w] = {
+            "access_token": os.getenv(f"WHATSAPP_ACCESS_TOKEN_{w.upper()}", "") or ACCESS_TOKEN,
+            "phone_number_id": os.getenv(f"WHATSAPP_PHONE_NUMBER_ID_{w.upper()}", "") or PHONE_NUMBER_ID,
+        }
+
+PHONE_ID_TO_WORKSPACE: Dict[str, str] = {}
+try:
+    for w, cfg in (WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+        pid = str((cfg or {}).get("phone_number_id") or "").strip()
+        if pid and pid != "your_phone_number_id":
+            PHONE_ID_TO_WORKSPACE[pid] = str(w).strip().lower()
+except Exception:
+    PHONE_ID_TO_WORKSPACE = {}
+
+# When set, only process webhooks for these phone number ids (comma-separated).
+# Defaults to the configured phone_number_id(s) when available.
+_allowed_raw = (os.getenv("ALLOWED_PHONE_NUMBER_ID", "") or "").strip()
+ALLOWED_PHONE_NUMBER_IDS: Set[str] = set([x.strip() for x in _allowed_raw.split(",") if x.strip()])
+if not ALLOWED_PHONE_NUMBER_IDS:
+    try:
+        # Default allow all configured phone ids (multi) or the legacy single one.
+        for _w, cfg in (WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+            pid = str((cfg or {}).get("phone_number_id") or "").strip()
+            if pid and pid != "your_phone_number_id":
+                ALLOWED_PHONE_NUMBER_IDS.add(pid)
+    except Exception:
+        pass
 
 # Sync CATALOG_ID into compatibility shim, if present
 try:
@@ -652,53 +786,62 @@ class ConnectionManager:
         # Per-agent token buckets for backpressure
         self._ws_buckets: Dict[str, Dict[str, float]] = {}
     
-    async def connect(self, websocket: WebSocket, user_id: str, client_info: dict = None):
+    def _key(self, user_id: str, workspace: str | None = None) -> str:
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        return f"{ws}:{str(user_id)}"
+
+    async def connect(self, websocket: WebSocket, user_id: str, client_info: dict = None, workspace: str | None = None):
         """Connect a new WebSocket for a user"""
         await websocket.accept()
-        self.active_connections[user_id].add(websocket)
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        key = self._key(user_id, ws)
+        self.active_connections[key].add(websocket)
         self.connection_metadata[websocket] = {
             "user_id": user_id,
+            "workspace": ws,
+            "key": key,
             "connected_at": datetime.utcnow(),
             "client_info": client_info or {}
         }
         
         # Send queued messages to newly connected user
-        if user_id in self.message_queue:
-            for message in self.message_queue[user_id]:
+        if key in self.message_queue:
+            for message in self.message_queue[key]:
                 try:
                     await websocket.send_json(message)
                 except:
                     pass
-            del self.message_queue[user_id]
+            del self.message_queue[key]
         
         # Avoid print+emoji which gets promoted to ERROR by the smart_print wrapper.
         logging.getLogger(__name__).info(
             "WS connected user_id=%s connections_for_user=%s",
-            user_id,
-            len(self.active_connections.get(user_id) or []),
+            key,
+            len(self.active_connections.get(key) or []),
         )
     
     def disconnect(self, websocket: WebSocket):
         """Disconnect a WebSocket"""
         if websocket in self.connection_metadata:
-            user_id = self.connection_metadata[websocket]["user_id"]
-            self.active_connections[user_id].discard(websocket)
+            key = self.connection_metadata[websocket].get("key") or self.connection_metadata[websocket].get("user_id")
+            self.active_connections[str(key)].discard(websocket)
             del self.connection_metadata[websocket]
             
-            if not self.active_connections[user_id]:
-                del self.active_connections[user_id]
+            if key in self.active_connections and not self.active_connections[str(key)]:
+                del self.active_connections[str(key)]
             
             # Normal disconnects are expected (tab close, network change, idle timeout).
             # Keep this as INFO to reduce log noise/cost.
-            logging.getLogger(__name__).info("WS disconnected user_id=%s", user_id)
+            logging.getLogger(__name__).info("WS disconnected user_id=%s", key)
     
-    async def _send_local(self, user_id: str, message: dict):
+    async def _send_local(self, user_id: str, message: dict, workspace: str | None = None):
         _vlog(f"📤 Attempting to send to user {user_id}")
         _vlog("📤 Message content:", json.dumps(message, indent=2))
         """Send message to all connections of a specific user"""
-        if user_id in self.active_connections:
+        key = self._key(user_id, workspace)
+        if key in self.active_connections:
             disconnected = set()
-            for websocket in self.active_connections[user_id].copy():
+            for websocket in self.active_connections[key].copy():
                 try:
                     await websocket.send_json(message)
                 except:
@@ -708,9 +851,9 @@ class ConnectionManager:
                 self.disconnect(ws)
         else:
             # Queue message for offline user
-            self.message_queue[user_id].append(message)
-            if len(self.message_queue[user_id]) > 100:
-                self.message_queue[user_id] = self.message_queue[user_id][-50:]
+            self.message_queue[key].append(message)
+            if len(self.message_queue[key]) > 100:
+                self.message_queue[key] = self.message_queue[key][-50:]
 
     def _consume_ws_token(self, user_id: str, is_media: bool = False) -> bool:
         try:
@@ -731,12 +874,12 @@ class ConnectionManager:
         except Exception:
             return True
 
-    async def send_to_user(self, user_id: str, message: dict):
+    async def send_to_user(self, user_id: str, message: dict, workspace: str | None = None):
         """Send locally and, if enabled, publish to Redis for other instances."""
-        await self._send_local(user_id, message)
+        await self._send_local(user_id, message, workspace=workspace)
         try:
             if ENABLE_WS_PUBSUB and getattr(self, "redis_manager", None):
-                await self.redis_manager.publish_ws_event(user_id, message)
+                await self.redis_manager.publish_ws_event(user_id, message, workspace=workspace)
         except Exception as exc:
             _vlog(f"WS publish error: {exc}")
     
@@ -793,38 +936,41 @@ class RedisManager:
             print(f"❌ Redis connection failed: {e}")
             self.redis_client = None
     
-    async def cache_message(self, user_id: str, message: dict, ttl: int = 3600):
+    async def cache_message(self, user_id: str, message: dict, ttl: int = 3600, workspace: str | None = None):
         """Cache message with TTL"""
         if not self.redis_client:
             return
         
         try:
-            key = f"recent_messages:{user_id}"
+            ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+            key = f"recent_messages:{ws}:{user_id}"
             await self.redis_client.lpush(key, json.dumps(message))
             await self.redis_client.ltrim(key, 0, 49)  # Keep last 50 messages
             await self.redis_client.expire(key, ttl)
         except Exception as e:
             print(f"Redis cache error: {e}")
     
-    async def get_recent_messages(self, user_id: str, limit: int = 20) -> List[dict]:
+    async def get_recent_messages(self, user_id: str, limit: int = 20, workspace: str | None = None) -> List[dict]:
         """Get recent messages from cache"""
         if not self.redis_client:
             return []
         
         try:
-            key = f"recent_messages:{user_id}"
+            ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+            key = f"recent_messages:{ws}:{user_id}"
             messages = await self.redis_client.lrange(key, 0, limit - 1)
             return [json.loads(msg) for msg in messages]
         except Exception as e:
             print(f"Redis get error: {e}")
             return []
 
-    async def publish_ws_event(self, user_id: str, message: dict):
+    async def publish_ws_event(self, user_id: str, message: dict, workspace: str | None = None):
         """Publish a WebSocket event so other instances can deliver it."""
         if not self.redis_client:
             return
         try:
-            payload = json.dumps({"user_id": user_id, "message": message})
+            ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+            payload = json.dumps({"workspace": ws, "user_id": user_id, "message": message})
             await self.redis_client.publish("ws_events", payload)
         except Exception as exc:
             print(f"Redis publish error: {exc}")
@@ -914,9 +1060,10 @@ class RedisManager:
                     if msg and msg.get("type") == "message":
                         data = json.loads(msg.get("data"))
                         uid = data.get("user_id")
+                        ws = data.get("workspace")
                         payload = data.get("message")
                         if uid and payload:
-                            await connection_manager._send_local(uid, payload)
+                            await connection_manager._send_local(uid, payload, workspace=ws)
                 except Exception as inner_exc:
                     _vlog(f"WS subscribe handler error: {inner_exc}")
         except Exception as exc:
@@ -981,14 +1128,57 @@ class RedisManager:
 
 # WhatsApp API Client
 class WhatsAppMessenger:
-    def __init__(self):
-        self.access_token = ACCESS_TOKEN
-        self.phone_number_id = PHONE_NUMBER_ID
+    def __init__(self, access_token: str | None = None, phone_number_id: str | None = None):
+        self.access_token = (access_token or ACCESS_TOKEN or "").strip()
+        self.phone_number_id = (phone_number_id or PHONE_NUMBER_ID or "").strip()
+        self._rebuild()
+
+    def _rebuild(self) -> None:
         self.base_url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{self.phone_number_id}"
         self.headers = {
             "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
+
+
+class WorkspaceWhatsAppRouter:
+    """Routes WhatsApp Graph API calls to the correct phone_number_id/token for the current workspace."""
+
+    def __init__(self, configs: Dict[str, dict]):
+        self._configs = configs or {}
+        self._clients: Dict[str, WhatsAppMessenger] = {}
+        for ws, cfg in (self._configs or {}).items():
+            try:
+                self._clients[str(ws).strip().lower()] = WhatsAppMessenger(
+                    access_token=str((cfg or {}).get("access_token") or ""),
+                    phone_number_id=str((cfg or {}).get("phone_number_id") or ""),
+                )
+            except Exception:
+                continue
+
+    def _client(self, workspace: str | None = None) -> WhatsAppMessenger:
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        c = self._clients.get(ws)
+        if c:
+            return c
+        # Fallback to default workspace or legacy single client
+        c2 = self._clients.get(DEFAULT_WORKSPACE)
+        if c2:
+            return c2
+        # last resort
+        return WhatsAppMessenger()
+
+    @property
+    def phone_number_id(self) -> str:
+        return self._client().phone_number_id
+
+    @property
+    def access_token(self) -> str:
+        return self._client().access_token
+
+    def __getattr__(self, name: str):
+        # Delegate methods/attrs to the active workspace client.
+        return getattr(self._client(), name)
     
     async def send_text_message(self, to: str, message: str, context_message_id: str | None = None) -> dict:
         """Send text message via WhatsApp API"""
@@ -1313,7 +1503,7 @@ ORDER_STATUS_ARCHIVED = "archived"
 class DatabaseManager:
     """Database helper supporting SQLite and optional PostgreSQL."""
 
-    def __init__(self, db_path: str | None = None, db_url: str | None = None):
+    def __init__(self, db_path: str | None = None, db_url: str | None = None, *, force_single_sqlite: bool = False):
         # Normalize DB URL. Some platforms/tools provide SQLAlchemy-style URLs like
         # "postgresql+asyncpg://..." which asyncpg does NOT accept.
         raw_url = (db_url or DATABASE_URL or "").strip() or None
@@ -1338,6 +1528,8 @@ class DatabaseManager:
         self.db_url = raw_url
         self.db_path = db_path or DB_PATH
         self.use_postgres = bool(self.db_url)
+        # When True, never route SQLite connections via workspace mapping (used for shared auth DB).
+        self.force_single_sqlite = bool(force_single_sqlite)
         if not self.use_postgres:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._pool: Optional[asyncpg.pool.Pool] = None
@@ -1509,13 +1701,77 @@ class DatabaseManager:
         # For SQLite, keep lock waits bounded so requests don't hang indefinitely.
         # `timeout` is in seconds and controls how long SQLite waits to acquire locks.
         timeout_s = max(0.1, float(SQLITE_BUSY_TIMEOUT_MS) / 1000.0)
-        async with aiosqlite.connect(self.db_path, timeout=timeout_s) as db:
+        # Multi-workspace support (SQLite): route connections to the active workspace DB.
+        db_path = self.db_path
+        try:
+            if ENABLE_MULTI_WORKSPACE and not getattr(self, "force_single_sqlite", False):
+                ws = get_current_workspace()
+                db_path = (TENANT_DB_PATHS or {}).get(ws) or db_path
+        except Exception:
+            db_path = self.db_path
+        try:
+            Path(str(db_path)).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        async with aiosqlite.connect(db_path, timeout=timeout_s) as db:
             db.row_factory = aiosqlite.Row
             try:
                 await db.execute(f"PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_MS)}")
             except Exception:
                 pass
             yield db
+
+
+class WorkspaceDatabaseRouter:
+    """Route DB operations to the correct DatabaseManager based on current workspace.
+
+    - For Supabase: each workspace can have its own DATABASE_URL (e.g. DATABASE_URL + DATABASE_URL_NOVA).
+    - For SQLite fallback: each workspace can have its own DB_PATH_*.
+    """
+
+    def __init__(self, managers: Dict[str, DatabaseManager]):
+        self._managers = managers or {}
+
+    def _mgr(self, workspace: str | None = None) -> DatabaseManager:
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        m = self._managers.get(ws)
+        if m:
+            return m
+        m2 = self._managers.get(DEFAULT_WORKSPACE)
+        if m2:
+            return m2
+        # last resort: any manager
+        return next(iter(self._managers.values()))
+
+    @property
+    def use_postgres(self) -> bool:
+        try:
+            return bool(self._mgr().use_postgres)
+        except Exception:
+            return False
+
+    @property
+    def db_path(self) -> str:
+        try:
+            return str(self._mgr().db_path)
+        except Exception:
+            return DB_PATH
+
+    @property
+    def db_url(self) -> str | None:
+        try:
+            return self._mgr().db_url
+        except Exception:
+            return None
+
+    @asynccontextmanager
+    async def _conn(self):
+        async with self._mgr()._conn() as db:
+            yield db
+
+    def __getattr__(self, name: str):
+        # Delegate all DB methods to the current workspace manager.
+        return getattr(self._mgr(), name)
 
     async def ping(self) -> bool:
         """Lightweight DB connectivity check (used by /health)."""
@@ -3383,7 +3639,7 @@ class MessageProcessor:
         self.connection_manager = connection_manager
         self.redis_manager = redis_manager
         self.db_manager = db_manager
-        self.whatsapp_messenger = WhatsAppMessenger()
+        self.whatsapp_messenger = WorkspaceWhatsAppRouter(WHATSAPP_CONFIG_BY_WORKSPACE)
         self.media_dir = MEDIA_DIR
         self.media_dir.mkdir(exist_ok=True)
     
@@ -4221,30 +4477,41 @@ class MessageProcessor:
         _vlog("🚨 process_incoming_message CALLED")
         _vlog(json.dumps(webhook_data, indent=2))
         """Process incoming WhatsApp message"""
+        ws_token = None
         try:
             value = webhook_data['entry'][0]['changes'][0]['value']
-            # Filter by phone_number_id so this instance only processes its own inbox
+
+            # Derive workspace from payload metadata (preferred) or from an attached hint by /webhook ingress.
+            incoming_phone_id = ""
             try:
                 meta = value.get("metadata") or {}
                 incoming_phone_id = str(meta.get("phone_number_id") or "")
-                allowed_phone_id = str(ALLOWED_PHONE_NUMBER_ID or "")
-                if (
-                    allowed_phone_id
-                    and incoming_phone_id
-                    and incoming_phone_id != allowed_phone_id
-                ):
+            except Exception:
+                incoming_phone_id = ""
+
+            hinted_ws = None
+            try:
+                hinted_ws = webhook_data.get("_workspace")
+            except Exception:
+                hinted_ws = None
+
+            derived_ws = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else (PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or DEFAULT_WORKSPACE)
+            ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(derived_ws))
+
+            # Optional: Filter by phone_number_id allowlist (supports multiple IDs)
+            try:
+                if ALLOWED_PHONE_NUMBER_IDS and incoming_phone_id and (incoming_phone_id not in ALLOWED_PHONE_NUMBER_IDS):
                     _vlog(
-                        f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (allowed {allowed_phone_id})"
+                        f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (allowed {sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:10]})"
                     )
                     return
             except Exception:
-                # If metadata is missing or unexpected, proceed without filtering
                 pass
-            
+
             # Handle status updates
             if "statuses" in value:
                 await self._handle_status_updates(value["statuses"])
-            
+
             # Handle incoming messages
             if "messages" in value:
                 # Extract contacts info if available
@@ -4258,6 +4525,12 @@ class MessageProcessor:
 
         except Exception as e:
             print(f"Webhook processing error: {e}")
+        finally:
+            if ws_token is not None:
+                try:
+                    _CURRENT_WORKSPACE.reset(ws_token)
+                except Exception:
+                    pass
 
 
     async def _handle_status_updates(self, statuses: list):
@@ -4998,7 +5271,21 @@ async def lookup_phone(user_id: str) -> Optional[str]:
     return None
 
 # Initialize managers
-db_manager = DatabaseManager()
+if ENABLE_MULTI_WORKSPACE:
+    _tenant_managers: Dict[str, DatabaseManager] = {}
+    for _ws in (WORKSPACES or [DEFAULT_WORKSPACE]):
+        _w = _coerce_workspace(_ws)
+        # Prefer workspace Postgres URL (Supabase). Fallback to SQLite per-tenant path.
+        _url = (TENANT_DB_URLS or {}).get(_w) or None
+        _path = (TENANT_DB_PATHS or {}).get(_w) or DB_PATH
+        _tenant_managers[_w] = DatabaseManager(db_path=_path, db_url=_url)
+    db_manager = WorkspaceDatabaseRouter(_tenant_managers)
+else:
+    db_manager = DatabaseManager()
+
+# Shared auth/settings DB (agents, refresh tokens, tag options) lives on the default DATABASE_URL (irrakids)
+# as requested. Fallback to AUTH_DB_PATH/SQLite when DATABASE_URL is not configured.
+auth_db_manager = DatabaseManager(db_url=(DATABASE_URL or None), db_path=AUTH_DB_PATH, force_single_sqlite=True)
 connection_manager = ConnectionManager()
 redis_manager = RedisManager()
 message_processor = MessageProcessor(connection_manager, redis_manager, db_manager)
@@ -5414,6 +5701,25 @@ allowed_hosts = [h.strip() for h in _allowed_hosts_env.split(",") if h.strip()]
 if allowed_hosts and allowed_hosts != ["*"]:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
+# Workspace context middleware (must run for all tenant-scoped endpoints).
+# Frontend sends `X-Workspace: irranova|irrakids` on every request.
+@app.middleware("http")
+async def workspace_context_middleware(request: StarletteRequest, call_next):
+    ws = _workspace_from_request(request)  # type: ignore[arg-type]
+    token = _CURRENT_WORKSPACE.set(ws)
+    try:
+        resp: StarletteResponse = await call_next(request)
+        try:
+            resp.headers["X-Workspace"] = ws
+        except Exception:
+            pass
+        return resp
+    finally:
+        try:
+            _CURRENT_WORKSPACE.reset(token)
+        except Exception:
+            pass
+
 # Smart caching: no-cache HTML shell, long cache for static assets
 @app.middleware("http")
 async def no_cache_html(request: StarletteRequest, call_next):
@@ -5455,7 +5761,21 @@ async def startup():
     # - If Postgres is configured+required, we fail startup so Cloud Run won't route traffic to a broken revision.
     # - Otherwise (SQLite/dev), we allow startup to continue in "degraded" mode and endpoints will surface 503s as needed.
     try:
-        await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
+        # 1) Shared auth/settings DB
+        await asyncio.wait_for(auth_db_manager.init_db(), timeout=30.0)
+        # 2) Tenant DB(s)
+        if ENABLE_MULTI_WORKSPACE:
+            for ws in (WORKSPACES or [DEFAULT_WORKSPACE]):
+                tok = _CURRENT_WORKSPACE.set(_coerce_workspace(ws))
+                try:
+                    await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
+                finally:
+                    try:
+                        _CURRENT_WORKSPACE.reset(tok)
+                    except Exception:
+                        pass
+        else:
+            await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
     except Exception as exc:
         logging.getLogger(__name__).exception(
             "DB init failed during startup (%s): %s",
@@ -5473,8 +5793,8 @@ async def startup():
         bootstrap_name = (os.getenv("BOOTSTRAP_ADMIN_NAME", "") or "").strip() or bootstrap_user or "Admin"
         if bootstrap_user and bootstrap_pass:
             agent_count = 0
-            async with db_manager._conn() as db:
-                if db_manager.use_postgres:
+            async with auth_db_manager._conn() as db:
+                if auth_db_manager.use_postgres:
                     row = await db.fetchrow("SELECT COUNT(*) AS c FROM agents")
                     agent_count = int(row[0]) if row else 0
                 else:
@@ -5482,7 +5802,7 @@ async def startup():
                     row = await cur.fetchone()
                     agent_count = int(row[0]) if row else 0
             if agent_count == 0:
-                await db_manager.create_agent(
+                await auth_db_manager.create_agent(
                     username=bootstrap_user,
                     name=bootstrap_name,
                     password_hash=hash_password(bootstrap_pass),
@@ -5732,6 +6052,14 @@ async def _optional_rate_limit_track(request: _LimiterRequest, response: _Limite
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
     """WebSocket endpoint for real-time communication"""
+    # Workspace selection (query param). Frontend connects with ?workspace=irranova|irrakids
+    try:
+        ws_q = websocket.query_params.get("workspace")  # type: ignore[attr-defined]
+    except Exception:
+        ws_q = None
+    ws = _coerce_workspace(str(ws_q or DEFAULT_WORKSPACE))
+    ws_token = _CURRENT_WORKSPACE.set(ws)
+
     # Authenticate agent for WS. Browser sends cookies automatically for same-origin.
     ws_agent: Optional[dict] = None
     if DISABLE_AUTH:
@@ -5766,6 +6094,10 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 await websocket.close(code=4401)
             except Exception:
                 pass
+            try:
+                _CURRENT_WORKSPACE.reset(ws_token)
+            except Exception:
+                pass
             return
 
     agent_username = str(ws_agent.get("username") or "")
@@ -5775,7 +6107,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     # and thus can connect to /ws/admin and any /ws/{user_id}.
 
     # Connect after auth so we can attach reliable agent identity
-    await connection_manager.connect(websocket, user_id, client_info={"agent": agent_username})
+    await connection_manager.connect(websocket, user_id, client_info={"agent": agent_username}, workspace=ws)
     if user_id == "admin":
         # Best-effort: mark the shared inbox channel in DB for legacy admin-user discovery.
         # Do not let DB issues kill the WS connection (agents still need realtime).
@@ -5820,6 +6152,11 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     except Exception as e:
         print(f"WebSocket error: {e}")
         connection_manager.disconnect(websocket)
+    finally:
+        try:
+            _CURRENT_WORKSPACE.reset(ws_token)
+        except Exception:
+            pass
 
 async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dict):
     """Handle incoming WebSocket messages from client"""
@@ -5838,7 +6175,9 @@ async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dic
             pass
         # Enforce WS backpressure: token bucket per agent
         is_media = str(message_data.get("type", "text")) in ("image", "audio", "video", "document")
-        if not connection_manager._consume_ws_token(user_id, is_media=is_media):
+        # Ensure rate limits are per-workspace+conversation key
+        key = connection_manager._key(user_id)
+        if not connection_manager._consume_ws_token(key, is_media=is_media):
             try:
                 await websocket.send_json({
                     "type": "error",
@@ -5877,7 +6216,8 @@ async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dic
         }
 
         # Send to other connections of the same user (excluding sender)
-        for ws in connection_manager.active_connections.get(user_id, set()).copy():
+        key = connection_manager._key(user_id)
+        for ws in connection_manager.active_connections.get(key, set()).copy():
             if ws is not websocket:
                 try:
                     await ws.send_json(typing_event)
@@ -5990,19 +6330,19 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         _vlog("📥 Incoming Webhook Payload:")
         _vlog(json.dumps(data, indent=2))
 
-        # Early drop if the phone_number_id does not match the allowed one
+        # Attach workspace hint derived from the phone_number_id (lets async workers route to the correct tenant DB)
         try:
             value = data.get('entry', [{}])[0].get('changes', [{}])[0].get('value', {})
             meta = value.get("metadata") or {}
             incoming_phone_id = str(meta.get("phone_number_id") or "")
-            allowed_phone_id = str(ALLOWED_PHONE_NUMBER_ID or "")
-            if allowed_phone_id and incoming_phone_id and incoming_phone_id != allowed_phone_id:
+            if ALLOWED_PHONE_NUMBER_IDS and incoming_phone_id and (incoming_phone_id not in ALLOWED_PHONE_NUMBER_IDS):
                 _vlog(
-                    f"⏭️ Webhook ignored at ingress for phone_number_id {incoming_phone_id} (allowed {allowed_phone_id})"
+                    f"⏭️ Webhook ignored at ingress for phone_number_id {incoming_phone_id} (allowed {sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:10]})"
                 )
                 return {"ok": True}
+            ws = PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or DEFAULT_WORKSPACE
+            data["_workspace"] = _coerce_workspace(ws)
         except Exception:
-            # Non-fatal: fall through to normal processing
             pass
 
         # ACK fast: enqueue for background processing. If we're overloaded, return 503 so Meta retries.
@@ -6238,7 +6578,7 @@ async def get_conversations(
 # Public-for-agents: list available agents (for assignment dropdowns)
 @app.get("/agents")
 async def list_agents_public(_: dict = Depends(get_current_agent)):
-    agents = await db_manager.list_agents()
+    agents = await auth_db_manager.list_agents()
     # Do not expose password hash; list_agents() already omits it. Also omit created_at/is_admin for non-admin UI.
     return [{"username": a.get("username"), "name": a.get("name")} for a in (agents or [])]
 
@@ -6246,16 +6586,16 @@ async def list_agents_public(_: dict = Depends(get_current_agent)):
 
 @app.get("/admin/agents")
 async def list_agents_endpoint(_: dict = Depends(require_admin)):
-    return await db_manager.list_agents()
+    return await auth_db_manager.list_agents()
 
 # ---- Tags options management ----
 @app.get("/admin/tag-options")
 async def get_tag_options_endpoint(_: dict = Depends(get_current_agent)):
-    return await db_manager.get_tag_options()
+    return await auth_db_manager.get_tag_options()
 
 @app.get("/tag-options")
 async def get_tag_options_public(_: dict = Depends(get_current_agent)):
-    return await db_manager.get_tag_options()
+    return await auth_db_manager.get_tag_options()
 
 @app.post("/admin/tag-options")
 async def set_tag_options_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
@@ -6269,7 +6609,7 @@ async def set_tag_options_endpoint(payload: dict = Body(...), _: dict = Depends(
             norm.append({"label": str(item["label"]), "icon": str(item.get("icon", ""))})
         elif isinstance(item, str):
             norm.append({"label": item, "icon": ""})
-    await db_manager.set_tag_options(norm)
+    await auth_db_manager.set_tag_options(norm)
     return {"ok": True, "count": len(norm)}
 
 @app.post("/admin/agents")
@@ -6281,7 +6621,7 @@ async def create_agent_endpoint(payload: dict = Body(...), _: dict = Depends(req
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password are required")
     pw_hash = hash_password(password)
-    await db_manager.create_agent(username=username, name=name, password_hash=pw_hash, is_admin=is_admin)
+    await auth_db_manager.create_agent(username=username, name=name, password_hash=pw_hash, is_admin=is_admin)
     try:
         await redis_manager.set_agent_auth_record(username, pw_hash, is_admin)
     except Exception:
@@ -6290,7 +6630,7 @@ async def create_agent_endpoint(payload: dict = Body(...), _: dict = Depends(req
 
 @app.delete("/admin/agents/{username}")
 async def delete_agent_endpoint(username: str, _: dict = Depends(require_admin)):
-    await db_manager.delete_agent(username)
+    await auth_db_manager.delete_agent(username)
     try:
         await redis_manager.delete_agent_auth_record(username)
     except Exception:
@@ -6378,7 +6718,7 @@ async def _get_agent_auth_record_resilient(username: str) -> Optional[dict]:
         try:
             if not getattr(redis_manager, "redis_client", None):
                 return
-            records = await db_manager.list_agent_auth_records()
+            records = await auth_db_manager.list_agent_auth_records()
             for r in records or []:
                 u = (r.get("username") or "").strip()
                 ph = r.get("password_hash") or ""
@@ -6395,7 +6735,7 @@ async def _get_agent_auth_record_resilient(username: str) -> Optional[dict]:
 
     # 2) DB (short timeout) -> refresh Redis
     try:
-        rec = await asyncio.wait_for(db_manager.get_agent_auth_record(u), timeout=max(0.5, float(AUTH_LOGIN_DB_TIMEOUT_SECONDS)))
+        rec = await asyncio.wait_for(auth_db_manager.get_agent_auth_record(u), timeout=max(0.5, float(AUTH_LOGIN_DB_TIMEOUT_SECONDS)))
         if rec and rec.get("password_hash"):
             try:
                 await redis_manager.set_agent_auth_record(u, rec.get("password_hash") or "", int(rec.get("is_admin") or 0))
@@ -6436,7 +6776,7 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
             # However, when Postgres is timing out and Redis is empty, we should return 503 so clients can retry.
             try:
                 # Best-effort: if DB is reachable quickly, confirm non-existence.
-                quick = await asyncio.wait_for(db_manager.get_agent_auth_record(username), timeout=1.5)
+                quick = await asyncio.wait_for(auth_db_manager.get_agent_auth_record(username), timeout=1.5)
                 if not quick or not (quick.get("password_hash") or ""):
                     raise HTTPException(status_code=401, detail="Invalid credentials")
             except HTTPException:
@@ -6452,7 +6792,7 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
     refresh_hash = _hash_refresh_token(refresh_token)
     expires_at = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
     await _auth_db_call(
-        db_manager.store_refresh_token(refresh_hash, username, expires_at),
+        auth_db_manager.store_refresh_token(refresh_hash, username, expires_at),
         op=f"store_refresh_token({username})",
     )
 
@@ -6492,7 +6832,7 @@ async def auth_refresh(request: Request, response: Response):
     if not refresh:
         raise HTTPException(status_code=401, detail="Unauthorized")
     refresh_hash = _hash_refresh_token(refresh)
-    row = await _auth_db_call(db_manager.get_refresh_token(refresh_hash), op="get_refresh_token(hash)")
+    row = await _auth_db_call(auth_db_manager.get_refresh_token(refresh_hash), op="get_refresh_token(hash)")
     if not row:
         raise HTTPException(status_code=401, detail="Unauthorized")
     if row.get("revoked_at"):
@@ -6500,7 +6840,7 @@ async def auth_refresh(request: Request, response: Response):
     exp = _parse_dt_any(row.get("expires_at"))
     if not exp or exp < datetime.now(timezone.utc):
         try:
-            await db_manager.revoke_refresh_token(refresh_hash)
+            await auth_db_manager.revoke_refresh_token(refresh_hash)
         except Exception:
             pass
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -6508,7 +6848,7 @@ async def auth_refresh(request: Request, response: Response):
     username = str(row.get("agent_username") or "").strip()
     if not username:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    is_admin = bool(await _auth_db_call(db_manager.get_agent_is_admin(username), op=f"get_agent_is_admin({username})"))
+    is_admin = bool(await _auth_db_call(auth_db_manager.get_agent_is_admin(username), op=f"get_agent_is_admin({username})"))
 
     # Issue a new access token. By default we DO NOT rotate refresh tokens on every refresh
     # to avoid multi-tab/device race conditions that can log users out.
@@ -6518,8 +6858,8 @@ async def auth_refresh(request: Request, response: Response):
         new_refresh = secrets.token_urlsafe(48)
         new_refresh_hash = _hash_refresh_token(new_refresh)
         new_expires = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)).isoformat()
-        await _auth_db_call(db_manager.store_refresh_token(new_refresh_hash, username, new_expires), op=f"store_refresh_token({username})")
-        await _auth_db_call(db_manager.revoke_refresh_token(refresh_hash), op="revoke_refresh_token(hash)")
+        await _auth_db_call(auth_db_manager.store_refresh_token(new_refresh_hash, username, new_expires), op=f"store_refresh_token({username})")
+        await _auth_db_call(auth_db_manager.revoke_refresh_token(refresh_hash), op="revoke_refresh_token(hash)")
         _set_auth_cookies(response, request, access_token, new_refresh)
         out_refresh = new_refresh
     else:
@@ -6562,7 +6902,7 @@ async def auth_logout(request: Request, response: Response):
             refresh = ""
     if refresh:
         try:
-            await db_manager.revoke_refresh_token(_hash_refresh_token(refresh))
+            await auth_db_manager.revoke_refresh_token(_hash_refresh_token(refresh))
         except Exception:
             pass
     _clear_auth_cookies(response)
@@ -6583,17 +6923,17 @@ async def auth_change_password(payload: dict = Body(...), agent: dict = Depends(
     if not agent.get("is_admin"):
         if username != agent.get("username"):
             raise HTTPException(status_code=403, detail="Forbidden")
-        stored = await db_manager.get_agent_password_hash(username)
+        stored = await auth_db_manager.get_agent_password_hash(username)
         if not stored or not verify_password(old_password, stored):
             raise HTTPException(status_code=401, detail="Invalid credentials")
     # Admin changing someone else's password: allow without old_password
     new_hash = hash_password(new_password)
-    await db_manager.set_agent_password_hash(username, new_hash)
+    await auth_db_manager.set_agent_password_hash(username, new_hash)
     # Refresh Redis auth cache for robustness
     try:
         ia = 0
         try:
-            ia = int(await db_manager.get_agent_is_admin(username))
+            ia = int(await auth_db_manager.get_agent_is_admin(username))
         except Exception:
             # Best-effort: keep whatever Redis already had
             cached = await redis_manager.get_agent_auth_record(username)
@@ -6649,11 +6989,17 @@ async def health_check():
     return {
         "status": "healthy",
         "redis": redis_status,
+        "workspace": get_current_workspace(),
         "db": {
             "backend": db_backend,
             "ok": bool(db_ok),
             # expose path only for sqlite to aid debugging; avoid leaking connection strings
-            "db_path": DB_PATH if db_backend == "sqlite" else None,
+            "db_path": (
+                ((TENANT_DB_PATHS or {}).get(get_current_workspace()) or DB_PATH)
+                if (db_backend == "sqlite")
+                else None
+            ),
+            "auth_db_path": (AUTH_DB_PATH if db_backend == "sqlite" else None),
         },
         "webhook": {
             "backend": _webhook_backend_name(),
@@ -6853,7 +7199,20 @@ async def analytics_shopify_inbox(start: Optional[str] = None, end: Optional[str
 
 @app.get("/analytics/agents")
 async def get_agents_analytics(start: Optional[str] = None, end: Optional[str] = None, _: dict = Depends(require_admin)):
-    return await db_manager.get_all_agents_analytics(start=start, end=end)
+    agents = await auth_db_manager.list_agents()
+    results: List[dict] = []
+    for a in agents or []:
+        username = (a.get("username") or "").strip()
+        if not username:
+            continue
+        stats = await db_manager.get_agent_analytics(agent_username=username, start=start, end=end)
+        if a.get("name"):
+            try:
+                stats["name"] = a.get("name")
+            except Exception:
+                pass
+        results.append(stats)
+    return results
 
 @app.get("/analytics/agents/{username}")
 async def get_agent_analytics(username: str, start: Optional[str] = None, end: Optional[str] = None, agent: dict = Depends(get_current_agent)):

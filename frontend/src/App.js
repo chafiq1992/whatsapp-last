@@ -34,6 +34,13 @@ const toMsNormalized = (t) => {
 };
 
 export default function App() {
+  const [workspace, setWorkspace] = useState(() => {
+    try {
+      return (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova';
+    } catch {
+      return 'irranova';
+    }
+  });
   const [products, setProducts] = useState([]);
   const [catalogProducts, setCatalogProducts] = useState({});
   const [conversations, setConversations] = useState([]);
@@ -207,6 +214,7 @@ export default function App() {
   useEffect(() => {
     if (!authReady) return;
     if (isLoginPath) return;
+    try { localStorage.setItem('workspace', String(workspace || 'irranova')); } catch {}
     loadConversations().then(cached => {
       if (cached.length > 0) {
         setConversations(cached);
@@ -220,7 +228,7 @@ export default function App() {
     //   fetchCatalogProducts();
     // }, 5000);
     // return () => clearInterval(interval);
-  }, [authReady, isLoginPath]);
+  }, [authReady, isLoginPath, workspace]);
 
   // Keep conversations fresh even if WebSocket messages are missed (multi-instance without Redis, tab sleep, brief disconnects).
   // Strategy:
@@ -349,12 +357,13 @@ export default function App() {
       `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/`;
 
     const connectAdmin = () => {
-      let tokenQS = '';
+      const qs = new URLSearchParams();
       try {
         const t = sessionStorage.getItem('agent_access_token');
-        if (t) tokenQS = `?token=${encodeURIComponent(t)}`;
+        if (t) qs.set('token', t);
       } catch {}
-      const ws = new WebSocket(`${wsBase}admin${tokenQS}`);
+      qs.set('workspace', String(workspace || 'irranova'));
+      const ws = new WebSocket(`${wsBase}admin?${qs.toString()}`);
       adminWsRef.current = ws;
       ws.addEventListener('open', () => {
         retry = 0;
@@ -461,7 +470,7 @@ export default function App() {
       adminPingRef.current = null;
       setAdminWsConnected(false);
     };
-  }, [authReady, isLoginPath]);
+  }, [authReady, isLoginPath, workspace]);
 
   // --- Setup WebSocket for messages (with reconnection) ---
   useEffect(() => {
@@ -475,12 +484,13 @@ export default function App() {
       `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/`;
 
     const connectUser = () => {
-      let tokenQS = '';
+      const qs = new URLSearchParams();
       try {
         const t = sessionStorage.getItem('agent_access_token');
-        if (t) tokenQS = `?token=${encodeURIComponent(t)}`;
+        if (t) qs.set('token', t);
       } catch {}
-      const ws = new WebSocket(`${wsBase}${activeUserRef.current?.user_id}${tokenQS}`);
+      qs.set('workspace', String(workspace || 'irranova'));
+      const ws = new WebSocket(`${wsBase}${activeUserRef.current?.user_id}?${qs.toString()}`);
       wsRef.current = ws;
       ws.addEventListener('open', () => {
         retry = 0;
@@ -501,7 +511,7 @@ export default function App() {
       clearTimeout(timer);
       if (wsRef.current) try { wsRef.current.close(); } catch {}
     };
-  }, [activeUser?.user_id]);
+  }, [activeUser?.user_id, workspace]);
 
   // Helper to update tags on a conversation and keep activeUser in sync
   const handleUpdateConversationTags = (userId, tags) => {
@@ -536,6 +546,18 @@ export default function App() {
           onOpenAutomation={() => { window.open('/#/automation-studio', '_blank', 'noopener,noreferrer'); }}
           currentAgent={currentAgent}
           isAdmin={isAdmin}
+          workspace={workspace}
+          onSwitchWorkspace={(next) => {
+            try {
+              const w = String(next || 'irranova').trim().toLowerCase() || 'irranova';
+              try { localStorage.setItem('workspace', w); } catch {}
+              // Reset view state so we don't show mixed data while switching
+              setActiveUser(null);
+              activeUserRef.current = null;
+              setConversations([]);
+              setWorkspace(w);
+            } catch {}
+          }}
         onStartNewChat={(digits, display) => {
           try {
             const id = String(digits);
@@ -592,7 +614,7 @@ export default function App() {
       </div>
       {showAdmin && (
         <Suspense fallback={<div className="p-3 text-sm text-gray-300">Loading settings…</div>}>
-          <AdminDashboard onClose={() => setShowAdmin(false)} isAdmin={isAdmin} currentAgent={currentAgent} />
+          <AdminDashboard onClose={() => setShowAdmin(false)} isAdmin={isAdmin} currentAgent={currentAgent} workspace={workspace} />
         </Suspense>
       )}
     </div>

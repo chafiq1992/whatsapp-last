@@ -1720,59 +1720,6 @@ class DatabaseManager:
             except Exception:
                 pass
             yield db
-
-
-class WorkspaceDatabaseRouter:
-    """Route DB operations to the correct DatabaseManager based on current workspace.
-
-    - For Supabase: each workspace can have its own DATABASE_URL (e.g. DATABASE_URL + DATABASE_URL_NOVA).
-    - For SQLite fallback: each workspace can have its own DB_PATH_*.
-    """
-
-    def __init__(self, managers: Dict[str, DatabaseManager]):
-        self._managers = managers or {}
-
-    def _mgr(self, workspace: str | None = None) -> DatabaseManager:
-        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
-        m = self._managers.get(ws)
-        if m:
-            return m
-        m2 = self._managers.get(DEFAULT_WORKSPACE)
-        if m2:
-            return m2
-        # last resort: any manager
-        return next(iter(self._managers.values()))
-
-    @property
-    def use_postgres(self) -> bool:
-        try:
-            return bool(self._mgr().use_postgres)
-        except Exception:
-            return False
-
-    @property
-    def db_path(self) -> str:
-        try:
-            return str(self._mgr().db_path)
-        except Exception:
-            return DB_PATH
-
-    @property
-    def db_url(self) -> str | None:
-        try:
-            return self._mgr().db_url
-        except Exception:
-            return None
-
-    @asynccontextmanager
-    async def _conn(self):
-        async with self._mgr()._conn() as db:
-            yield db
-
-    def __getattr__(self, name: str):
-        # Delegate all DB methods to the current workspace manager.
-        return getattr(self._mgr(), name)
-
     async def ping(self) -> bool:
         """Lightweight DB connectivity check (used by /health)."""
         try:
@@ -3632,6 +3579,47 @@ class WorkspaceDatabaseRouter:
                 stats["name"] = a.get("name")
             results.append(stats)
         return results
+
+
+class WorkspaceDatabaseRouter:
+    """Route DB operations to the correct DatabaseManager based on current workspace.
+
+    This is a thin delegator: all real methods live on DatabaseManager.
+    """
+
+    def __init__(self, managers: Dict[str, DatabaseManager]):
+        self._managers = managers or {}
+
+    def _mgr(self, workspace: str | None = None) -> DatabaseManager:
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        m = self._managers.get(ws)
+        if m:
+            return m
+        m2 = self._managers.get(DEFAULT_WORKSPACE)
+        if m2:
+            return m2
+        # last resort: any manager
+        return next(iter(self._managers.values()))
+
+    @property
+    def use_postgres(self) -> bool:
+        return bool(getattr(self._mgr(), "use_postgres", False))
+
+    @property
+    def db_path(self) -> str:
+        return str(getattr(self._mgr(), "db_path", DB_PATH))
+
+    @property
+    def db_url(self) -> str | None:
+        return getattr(self._mgr(), "db_url", None)
+
+    @asynccontextmanager
+    async def _conn(self):
+        async with self._mgr()._conn() as db:
+            yield db
+
+    def __getattr__(self, name: str):
+        return getattr(self._mgr(), name)
 
 # Message Processor with Complete Optimistic UI
 class MessageProcessor:

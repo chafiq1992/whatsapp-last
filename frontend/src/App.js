@@ -506,7 +506,9 @@ export default function App() {
         if (t) qs.set('token', t);
       } catch {}
       qs.set('workspace', String(workspace || 'irranova'));
-      const uidEnc = encodeURIComponent(String(activeUserRef.current?.user_id || ''));
+      const uid = String(activeUserRef.current?.user_id || '').trim();
+      if (!uid) return; // avoid connecting to /ws/?... (invalid path)
+      const uidEnc = encodeURIComponent(uid);
       const ws = new WebSocket(`${wsBase}${uidEnc}?${qs.toString()}`);
       wsRef.current = ws;
       ws.addEventListener('open', () => {
@@ -514,6 +516,11 @@ export default function App() {
         try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
       });
       ws.addEventListener('close', () => {
+        // Only reconnect if we're still viewing the same conversation
+        try {
+          const current = String(activeUserRef.current?.user_id || '').trim();
+          if (!current || current !== uid) return;
+        } catch {}
         const delay = Math.min(30000, 1000 * Math.pow(2, retry++)) + Math.floor(Math.random() * 500);
         timer = setTimeout(connectUser, delay);
       });

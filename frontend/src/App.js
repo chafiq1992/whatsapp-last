@@ -375,7 +375,7 @@ export default function App() {
     const connectAdmin = () => {
       const qs = new URLSearchParams();
       try {
-        const t = sessionStorage.getItem('agent_access_token');
+        const t = sessionStorage.getItem('agent_access_token') || localStorage.getItem('agent_access_token');
         if (t) qs.set('token', t);
       } catch {}
       qs.set('workspace', String(workspace || 'irranova'));
@@ -502,7 +502,7 @@ export default function App() {
     const connectUser = () => {
       const qs = new URLSearchParams();
       try {
-        const t = sessionStorage.getItem('agent_access_token');
+        const t = sessionStorage.getItem('agent_access_token') || localStorage.getItem('agent_access_token');
         if (t) qs.set('token', t);
       } catch {}
       qs.set('workspace', String(workspace || 'irranova'));

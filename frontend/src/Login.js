@@ -33,9 +33,16 @@ export default function Login({ onSuccess }) {
       try {
         if (user) localStorage.setItem('agent_username', user);
         localStorage.setItem('agent_is_admin', isAdmin ? '1' : '0');
-        // Fallback token for environments that block cookies
-        if (accessToken) sessionStorage.setItem('agent_access_token', accessToken);
-        if (refreshToken) sessionStorage.setItem('agent_refresh_token', refreshToken);
+        // Fallback tokens for environments that block cookies (e.g., embedded/3P contexts).
+        // Prefer sessionStorage, but also mirror into localStorage as a durability fallback.
+        if (accessToken) {
+          sessionStorage.setItem('agent_access_token', accessToken);
+          localStorage.setItem('agent_access_token', accessToken);
+        }
+        if (refreshToken) {
+          sessionStorage.setItem('agent_refresh_token', refreshToken);
+          localStorage.setItem('agent_refresh_token', refreshToken);
+        }
       } catch {}
       if (typeof onSuccess === 'function') onSuccess(user, null, isAdmin);
     } catch (e) {

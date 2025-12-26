@@ -13,6 +13,31 @@ const api = axios.create({
   withCredentials: true,
 });
 
+function getStoredToken(key) {
+  // Prefer sessionStorage (tab-scoped). Fall back to localStorage for embedded/3P-cookie-blocked contexts.
+  // NOTE: localStorage tokens are less safe than HttpOnly cookies; we use this only as a fallback.
+  try {
+    const t = sessionStorage.getItem(key);
+    if (t) return t;
+  } catch {}
+  try {
+    const t = localStorage.getItem(key);
+    if (t) return t;
+  } catch {}
+  return null;
+}
+
+function setStoredToken(key, value) {
+  if (!value) return;
+  try { sessionStorage.setItem(key, value); } catch {}
+  try { localStorage.setItem(key, value); } catch {}
+}
+
+function clearStoredToken(key) {
+  try { sessionStorage.removeItem(key); } catch {}
+  try { localStorage.removeItem(key); } catch {}
+}
+
 function getWorkspace() {
   try {
     const w = (localStorage.getItem('workspace') || '').trim().toLowerCase();
@@ -34,7 +59,7 @@ api.interceptors.request.use((config) => {
     // Fallback: attach Authorization header from sessionStorage if present
     // (used only when cookies are blocked/dropped by the client).
     try {
-      const t = sessionStorage.getItem('agent_access_token');
+      const t = getStoredToken('agent_access_token');
       if (t) {
         config.headers = {
           ...(config.headers || {}),
@@ -66,25 +91,22 @@ let _refreshInFlight = null;
 async function refreshSession() {
   // Prefer header-based refresh token fallback if present (for cookie-blocked clients).
   let rt = null;
-  try { rt = sessionStorage.getItem('agent_refresh_token'); } catch {}
+  rt = getStoredToken('agent_refresh_token');
   if (rt) {
     const res = await api.post('/auth/refresh', null, { headers: { 'X-Refresh-Token': rt } });
     const at = res?.data?.access_token;
     const nrt = res?.data?.refresh_token;
-    try {
-      if (at) sessionStorage.setItem('agent_access_token', at);
-      if (nrt) sessionStorage.setItem('agent_refresh_token', nrt);
-    } catch {}
+    setStoredToken('agent_access_token', at);
+    // Refresh token may not be returned (depends on backend config)
+    if (nrt) setStoredToken('agent_refresh_token', nrt);
     return res;
   }
   // Cookie-based refresh (normal path)
   const res = await api.post('/auth/refresh');
   const at = res?.data?.access_token;
   const nrt = res?.data?.refresh_token;
-  try {
-    if (at) sessionStorage.setItem('agent_access_token', at);
-    if (nrt) sessionStorage.setItem('agent_refresh_token', nrt);
-  } catch {}
+  setStoredToken('agent_access_token', at);
+  if (nrt) setStoredToken('agent_refresh_token', nrt);
   return res;
 }
 
@@ -106,8 +128,8 @@ api.interceptors.response.use(
           return api(original);
         } catch (e) {
           // If refresh fails (e.g., cookies blocked), drop any header token and force re-login.
-          try { sessionStorage.removeItem('agent_access_token'); } catch {}
-          try { sessionStorage.removeItem('agent_refresh_token'); } catch {}
+          clearStoredToken('agent_access_token');
+          clearStoredToken('agent_refresh_token');
           try { window.location.replace('/login'); } catch {}
           throw e;
         }

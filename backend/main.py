@@ -78,6 +78,10 @@ PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "4"))
 REQUIRE_POSTGRES = int(os.getenv("REQUIRE_POSTGRES", "1"))  # when 1 and DATABASE_URL is set, never fallback to SQLite
 # SQLite lock/backoff tuning (ms). Keep small so endpoints don't hang for a long time under contention.
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "3000"))
+# Query timeouts to avoid Cloud Run 504s under load (seconds)
+CONVERSATIONS_DB_TIMEOUT_SECONDS = float(os.getenv("CONVERSATIONS_DB_TIMEOUT_SECONDS", "10"))
+WEBHOOK_ENQUEUE_TIMEOUT_SECONDS = float(os.getenv("WEBHOOK_ENQUEUE_TIMEOUT_SECONDS", "1.5"))
+TRACK_DB_TIMEOUT_SECONDS = float(os.getenv("TRACK_DB_TIMEOUT_SECONDS", "1.0"))
 # Auth DB operation timeout (seconds). Prevents Cloud Run from returning an upstream 504 on slow DB calls.
 # NOTE: 8s was too tight for cold pool creation / transient DB slowness and caused intermittent /auth/login 503s.
 AUTH_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_DB_TIMEOUT_SECONDS", "15"))
@@ -3128,45 +3132,61 @@ class DatabaseManager:
         async with self._conn() as db:
             # Postgres optimized path
             if self.use_postgres:
-                # Fetch a window of conversations ordered by last message time using LATERAL
+                # Heavier load: avoid correlated subqueries per conversation (which can time out under traffic).
+                # Use aggregate CTEs so Postgres can plan efficiently.
                 base = self._convert(
                     """
+                    WITH last_msg AS (
+                      SELECT DISTINCT ON (user_id)
+                        user_id,
+                        message,
+                        type,
+                        from_me,
+                        status,
+                        COALESCE(server_ts, timestamp) AS ts
+                      FROM messages
+                      ORDER BY user_id, COALESCE(server_ts, timestamp) DESC
+                    ),
+                    counts AS (
+                      SELECT
+                        user_id,
+                        COUNT(*) FILTER (WHERE from_me = 0 AND status <> 'read') AS unread_count,
+                        MAX(COALESCE(server_ts, timestamp)) FILTER (WHERE from_me = 1) AS last_agent_ts
+                      FROM messages
+                      GROUP BY user_id
+                    ),
+                    unresponded AS (
+                      SELECT
+                        m.user_id,
+                        COUNT(*) FILTER (
+                          WHERE m.from_me = 0
+                            AND m.status = 'read'
+                            AND COALESCE(m.server_ts, m.timestamp) > COALESCE(c.last_agent_ts, '1970-01-01')
+                        ) AS unresponded_count
+                      FROM messages m
+                      JOIN counts c ON c.user_id = m.user_id
+                      GROUP BY m.user_id, c.last_agent_ts
+                    )
                     SELECT
-                      m.user_id,
+                      c.user_id,
                       u.name,
                       u.phone,
-                      last_msg.message       AS last_message,
-                      last_msg.type          AS last_message_type,
-                      last_msg.from_me       AS last_message_from_me,
-                      last_msg.status        AS last_message_status,
-                      last_msg.ts            AS last_message_time,
-                      (SELECT COUNT(*) FROM messages mu WHERE mu.user_id = m.user_id AND mu.from_me = 0 AND mu.status != 'read') AS unread_count,
-                      (
-                        SELECT COUNT(*)
-                        FROM messages mx
-                        WHERE mx.user_id = m.user_id
-                          AND mx.from_me = 0
-                          AND mx.status = 'read'
-                          AND COALESCE(mx.server_ts, mx.timestamp) > (
-                            SELECT COALESCE(MAX(COALESCE(server_ts, timestamp)), '1970-01-01')
-                            FROM messages ma
-                            WHERE ma.user_id = m.user_id AND ma.from_me = 1
-                          )
-                      ) AS unresponded_count,
+                      lm.message AS last_message,
+                      lm.type AS last_message_type,
+                      lm.from_me AS last_message_from_me,
+                      lm.status AS last_message_status,
+                      lm.ts AS last_message_time,
+                      COALESCE(c.unread_count, 0) AS unread_count,
+                      COALESCE(ur.unresponded_count, 0) AS unresponded_count,
                       cm.assigned_agent,
                       cm.tags,
                       cm.avatar_url AS avatar
-                    FROM (SELECT DISTINCT user_id FROM messages) m
-                    LEFT JOIN users u ON u.user_id = m.user_id
-                    LEFT JOIN LATERAL (
-                      SELECT message, type, from_me, status, COALESCE(server_ts, timestamp) AS ts
-                      FROM messages mm
-                      WHERE mm.user_id = m.user_id
-                      ORDER BY COALESCE(server_ts, timestamp) DESC
-                      LIMIT 1
-                    ) last_msg ON TRUE
-                    LEFT JOIN conversation_meta cm ON cm.user_id = m.user_id
-                    ORDER BY last_msg.ts DESC NULLS LAST
+                    FROM counts c
+                    LEFT JOIN users u ON u.user_id = c.user_id
+                    LEFT JOIN last_msg lm ON lm.user_id = c.user_id
+                    LEFT JOIN unresponded ur ON ur.user_id = c.user_id
+                    LEFT JOIN conversation_meta cm ON cm.user_id = c.user_id
+                    ORDER BY lm.ts DESC NULLS LAST
                     LIMIT ? OFFSET ?
                     """
                 )
@@ -6375,13 +6395,21 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         except Exception:
             pass
 
-        # ACK fast: enqueue for background processing. If we're overloaded, return 503 so Meta retries.
+        # ACK fast: enqueue for background processing. Avoid slow DB calls here to prevent Cloud Run 504s.
         try:
             # Best practice: persist the event durably before returning 200.
             if getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE:
                 # If schema isn't ready, fall back to Redis/in-memory instead of 503-ing every time.
                 if await _ensure_webhook_events_table():
-                    await _db_enqueue_webhook(data)
+                    try:
+                        await asyncio.wait_for(_db_enqueue_webhook(data), timeout=max(0.2, float(WEBHOOK_ENQUEUE_TIMEOUT_SECONDS)))
+                    except Exception:
+                        # DB enqueue is best-effort; fallback to Redis/in-memory to keep webhook fast.
+                        r = getattr(redis_manager, "redis_client", None)
+                        if r and WEBHOOK_USE_REDIS_STREAM:
+                            await r.xadd(WEBHOOK_STREAM_KEY, {"payload": json.dumps(data)})
+                        else:
+                            WEBHOOK_QUEUE.put_nowait(data)
                 else:
                     r = getattr(redis_manager, "redis_client", None)
                     if r and WEBHOOK_USE_REDIS_STREAM:
@@ -6612,15 +6640,19 @@ async def get_conversations(
         except Exception:
             cache_key = None
 
-        conversations = await db_manager.get_conversations_with_stats(
-            q=q,
-            unread_only=unread_only,
-            assigned=assigned,
-            tags=tag_list,
-            limit=max(1, min(limit, 1000)),
-            offset=max(0, offset),
-            viewer_agent=None,
-        )
+        async def _fetch():
+            return await db_manager.get_conversations_with_stats(
+                q=q,
+                unread_only=unread_only,
+                assigned=assigned,
+                tags=tag_list,
+                limit=max(1, min(limit, 1000)),
+                offset=max(0, offset),
+                viewer_agent=None,
+            )
+
+        # Hard timeout so Cloud Run doesn't return 504 under load.
+        conversations = await asyncio.wait_for(_fetch(), timeout=max(1.0, float(CONVERSATIONS_DB_TIMEOUT_SECONDS)))
         if unresponded_only:
             conversations = [c for c in conversations if (c.get("unresponded_count") or 0) > 0]
 
@@ -6631,6 +6663,16 @@ async def get_conversations(
         except Exception:
             pass
         return conversations
+    except asyncio.TimeoutError:
+        # Best-effort: serve stale cache if present, otherwise degrade gracefully.
+        try:
+            if cache_key:
+                cached = await redis_manager.get_json(cache_key)
+                if isinstance(cached, list):
+                    return cached
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="Inbox temporarily busy, please retry")
     except Exception as e:
         print(f"Error fetching conversations: {e}")
         return []
@@ -7195,15 +7237,22 @@ async def track_whatsapp_click(
         else:
             click_id = uuid.uuid4().hex
         ts = datetime.utcnow().isoformat()
-        await db_manager.log_whatsapp_click(
-            click_id=click_id,
-            ts=ts,
-            page_url=page_url,
-            product_id=product_id,
-            shop_domain=shop_domain,
-            ua=ua,
-            ip_hash=ip_hash,
-        )
+        try:
+            await asyncio.wait_for(
+                db_manager.log_whatsapp_click(
+                    click_id=click_id,
+                    ts=ts,
+                    page_url=page_url,
+                    product_id=product_id,
+                    shop_domain=shop_domain,
+                    ua=ua,
+                    ip_hash=ip_hash,
+                ),
+                timeout=max(0.2, float(TRACK_DB_TIMEOUT_SECONDS)),
+            )
+        except Exception:
+            # Best-effort only; never block the user from opening WhatsApp.
+            pass
         return {"ok": True, "click_id": click_id, "ts": ts}
     except HTTPException:
         raise

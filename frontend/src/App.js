@@ -56,6 +56,7 @@ export default function App() {
   const [loadingConversations, setLoadingConversations] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const activeUserRef = useRef(activeUser);
+  const convFetchInFlightRef = useRef(null);
 
   const isLoginPath = typeof window !== 'undefined' && window.location && window.location.pathname === '/login';
 
@@ -165,22 +166,37 @@ export default function App() {
   }, [activeUser?.user_id]);
 
   // Fetch all conversations for chat list
-  const fetchConversations = async () => {
-    try {
-      setLoadingConversations(true);
-      const res = await api.get(`${API_BASE}/conversations`);
-      setConversations(res.data);
-      saveConversations(res.data);
-    } catch (err) {
-      console.error('Failed to fetch conversations:', err);
-      const cached = await loadConversations();
-      if (cached.length > 0) {
-        setConversations(cached);
+  const fetchConversations = async ({ showSpinner = false } = {}) => {
+    // Avoid overlapping fetches (helps prevent 504s under load + UI flicker)
+    if (convFetchInFlightRef.current) return convFetchInFlightRef.current;
+    const p = (async () => {
+      try {
+        if (showSpinner) setLoadingConversations(true);
+        const res = await api.get(`${API_BASE}/conversations`);
+        const data = res?.data;
+        if (Array.isArray(data)) {
+          setConversations(data);
+          // Best-effort cache; don't block UI on IndexedDB
+          try { saveConversations(data); } catch {}
+        } else {
+          // Unexpected payload shape: fall back to cached list
+          const cached = await loadConversations();
+          if (cached.length > 0) setConversations(cached);
+        }
+      } catch (err) {
+        console.error('Failed to fetch conversations:', err);
+        const cached = await loadConversations();
+        if (cached.length > 0) {
+          setConversations(cached);
+        }
+      } finally {
+        convFetchInFlightRef.current = null;
+        // Always clear spinner if it was shown
+        if (showSpinner) setLoadingConversations(false);
       }
-    }
-    finally {
-      setLoadingConversations(false);
-    }
+    })();
+    convFetchInFlightRef.current = p;
+    return p;
   };
 
   // Fetch ALL products in catalog and build a lookup for order message rendering
@@ -220,7 +236,7 @@ export default function App() {
         setConversations(cached);
       }
     });
-    fetchConversations();
+    fetchConversations({ showSpinner: true });
     fetchCatalogProducts();
     // You can remove the interval now if using WebSocket for chat!
     // const interval = setInterval(() => {
@@ -247,21 +263,21 @@ export default function App() {
       if (convPollRef.current) return;
       // Keep this light; backend also caches aggressively and we use cache-buster headers.
       convPollRef.current = setInterval(() => {
-        try { fetchConversations(); } catch {}
+        try { fetchConversations({ showSpinner: false }); } catch {}
       }, 15000);
     };
 
     if (adminWsConnected) {
       clearPoll();
       // Catch-up sync on connect (covers missed messages during reconnect)
-      try { fetchConversations(); } catch {}
+      try { fetchConversations({ showSpinner: false }); } catch {}
     } else {
       startPoll();
     }
 
     const onVis = () => {
       try {
-        if (document.visibilityState === 'visible') fetchConversations();
+        if (document.visibilityState === 'visible') fetchConversations({ showSpinner: false });
       } catch {}
     };
     try { document.addEventListener('visibilitychange', onVis); } catch {}
@@ -490,7 +506,8 @@ export default function App() {
         if (t) qs.set('token', t);
       } catch {}
       qs.set('workspace', String(workspace || 'irranova'));
-      const ws = new WebSocket(`${wsBase}${activeUserRef.current?.user_id}?${qs.toString()}`);
+      const uidEnc = encodeURIComponent(String(activeUserRef.current?.user_id || ''));
+      const ws = new WebSocket(`${wsBase}${uidEnc}?${qs.toString()}`);
       wsRef.current = ws;
       ws.addEventListener('open', () => {
         retry = 0;

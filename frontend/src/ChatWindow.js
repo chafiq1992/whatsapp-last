@@ -163,7 +163,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     if (!uid) { setNotesCount(0); return; }
     (async () => {
       try {
-        const res = await api.get(`/conversations/${uid}/notes`);
+        const res = await api.get(`/conversations/${encodeURIComponent(String(uid))}/notes`);
         setNotesCount(Array.isArray(res.data) ? res.data.length : 0);
       } catch {
         setNotesCount(0);
@@ -541,7 +541,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     if (!uid) return;
     try {
       // Fire-and-forget HTTP call to mark conversation as read
-      api.post(`${API_BASE}/conversations/${uid}/mark-read`)
+      api.post(`${API_BASE}/conversations/${encodeURIComponent(String(uid))}/mark-read`)
         .catch(() => {});
     } catch {}
   }, [activeUser?.user_id]);
@@ -656,19 +656,16 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
       const newest = (!append && current.length > 0) ? current[current.length - 1]?.timestamp : null;
       const params = new URLSearchParams();
       const initialLoad = !append && current.length === 0;
-      if (!append && newest) params.set('since', newest);
-      // On first load for a conversation, force-fetch recent history via 'since' to bypass any caches
-      if (initialLoad && !newest) {
-        const sinceMs = Date.now() - (48 * 60 * 60 * 1000); // last 48 hours
-        params.set('since', new Date(sinceMs).toISOString());
-      }
+      // Fast path on first open: use offset=0 so the backend can serve Redis-cached recent messages.
+      // After the initial window is loaded, incremental refresh uses `since=newest`.
+      if (!initialLoad && !append && newest) params.set('since', newest);
       if (append && oldest) params.set('before', oldest);
       // Always pass limit; if neither since/before present, backend will use legacy offset
       const limitForRequest = initialLoad ? Math.max(200, MESSAGE_LIMIT) : MESSAGE_LIMIT;
       params.set('limit', String(limitForRequest));
       // If we didn't set since/before, include offset explicitly
       if (!params.has('since') && !params.has('before')) params.set('offset', String(off));
-      const url = `${API_BASE}/messages/${uid}?${params.toString()}`;
+      const url = `${API_BASE}/messages/${encodeURIComponent(String(uid))}?${params.toString()}`;
       let res = await api.get(url, { signal });
       let data = res.data;
       // Fallback: if initial since-based request returned nothing, try legacy offset=0 to load older history
@@ -678,7 +675,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
           const legacy = new URLSearchParams();
           legacy.set('offset', String(0));
           legacy.set('limit', String(Math.max(200, MESSAGE_LIMIT)));
-          const legacyUrl = `${API_BASE}/messages/${uid}?${legacy.toString()}`;
+          const legacyUrl = `${API_BASE}/messages/${encodeURIComponent(String(uid))}?${legacy.toString()}`;
           res = await api.get(legacyUrl, { signal });
           data = res.data;
         } catch {}

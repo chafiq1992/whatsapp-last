@@ -171,6 +171,19 @@ function ChatList({
   // Optionally fetch filtered conversations from backend for scalability (debounced)
   useEffect(() => {
     const controller = new AbortController();
+    const shouldFetchFromServer =
+      !!search ||
+      !!showUnreadOnly ||
+      !!needsReplyOnly ||
+      !!showArchive ||
+      (assignedFilter && assignedFilter !== 'all') ||
+      (Array.isArray(tagFilters) && tagFilters.length > 0);
+
+    // If no server-side filters are active, rely on App's conversation list.
+    if (!shouldFetchFromServer) {
+      return () => { try { controller.abort(); } catch {} };
+    }
+
     const run = () => {
       const params = new URLSearchParams();
       if (search) params.set('q', search);
@@ -725,7 +738,7 @@ const ConversationRow = memo(function Row({
                   <div className="mb-2">
                     <label className="text-xs text-gray-400">Assign to</label>
                     <div className="flex gap-2 mt-1">
-                      <select className="flex-1 bg-gray-800 text-white p-2 rounded" value={selectedAgent} onChange={(e)=>{ const v = e.target.value; setSelectedAgent(v); (async ()=>{ try { await api.post(`/conversations/${conv.user_id}/assign`, { agent: v || null }); } catch(e) {} })(); setAssignOpen(false); }}>
+                      <select className="flex-1 bg-gray-800 text-white p-2 rounded" value={selectedAgent} onChange={(e)=>{ const v = e.target.value; setSelectedAgent(v); (async ()=>{ try { await api.post(`/conversations/${encodeURIComponent(String(conv.user_id))}/assign`, { agent: v || null }); } catch(e) {} })(); setAssignOpen(false); }}>
                         <option value="">Unassigned</option>
                         {agents.map(a => (
                           <option key={a.username} value={a.username}>{a.name || a.username}</option>
@@ -748,7 +761,7 @@ const ConversationRow = memo(function Row({
                             setTagsInput('');
                             (async ()=>{
                               try {
-                                await api.post(`/conversations/${conv.user_id}/tags`, { tags: newTags });
+                                await api.post(`/conversations/${encodeURIComponent(String(conv.user_id))}/tags`, { tags: newTags });
                                 try { typeof onUpdateConversationTags === 'function' && onUpdateConversationTags(conv.user_id, newTags); } catch {}
                               } catch(e) {}
                             })();
@@ -778,7 +791,7 @@ const ConversationRow = memo(function Row({
                             setTags(newTags);
                             (async ()=>{
                               try {
-                                await api.post(`/conversations/${conv.user_id}/tags`, { tags: newTags });
+                                await api.post(`/conversations/${encodeURIComponent(String(conv.user_id))}/tags`, { tags: newTags });
                                 try { typeof onUpdateConversationTags === 'function' && onUpdateConversationTags(conv.user_id, newTags); } catch {}
                               } catch(e) {}
                             })();

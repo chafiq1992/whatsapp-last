@@ -6589,6 +6589,29 @@ async def get_conversations(
     """Get conversations with optional filters: q, unread_only, assigned, tags (csv), unresponded_only."""
     try:
         tag_list = [t.strip() for t in tags.split(",")] if tags else None
+        # Short-lived cache to prevent expensive fan-out queries from timing out (Cloud Run 504s).
+        # Safe because the result is workspace-scoped and not personalized per-agent (viewer_agent=None).
+        try:
+            ws = get_current_workspace()
+            cache_payload = {
+                "q": q or "",
+                "unread_only": bool(unread_only),
+                "assigned": assigned or "",
+                "tags": tag_list or [],
+                "unresponded_only": bool(unresponded_only),
+                "limit": int(max(1, min(limit, 1000))),
+                "offset": int(max(0, offset)),
+            }
+            cache_key = "conversations:%s:%s" % (
+                ws,
+                hashlib.sha1(json.dumps(cache_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
+            )
+            cached = await redis_manager.get_json(cache_key)
+            if isinstance(cached, list):
+                return cached
+        except Exception:
+            cache_key = None
+
         conversations = await db_manager.get_conversations_with_stats(
             q=q,
             unread_only=unread_only,
@@ -6600,6 +6623,13 @@ async def get_conversations(
         )
         if unresponded_only:
             conversations = [c for c in conversations if (c.get("unresponded_count") or 0) > 0]
+
+        # Cache result briefly (best-effort).
+        try:
+            if cache_key and isinstance(conversations, list):
+                await redis_manager.set_json(cache_key, conversations, ttl=5)
+        except Exception:
+            pass
         return conversations
     except Exception as e:
         print(f"Error fetching conversations: {e}")

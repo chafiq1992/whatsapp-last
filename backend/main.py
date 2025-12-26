@@ -39,6 +39,15 @@ from .google_cloud_storage import upload_file_to_gcs, download_file_from_gcs, ma
 from prometheus_fastapi_instrumentator import Instrumentator
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
+from .observability.context import (
+    get_request_id as _get_request_id,
+    set_request_id as _set_request_id,
+    reset_request_id as _reset_request_id,
+    get_agent_username as _get_agent_username,
+    set_agent_username as _set_agent_username,
+    reset_agent_username as _reset_agent_username,
+)
+from .observability.logging import configure_logging as _configure_logging
 
 from fastapi.staticfiles import StaticFiles
 try:
@@ -127,12 +136,8 @@ WEBHOOK_DB_READY: bool = False
 # Anything that **must not** be baked in the image (tokens, IDs …) is
 # already picked up with os.getenv() further below. Keep it that way.
 
-# Configure logging early
+# Configure logging level (handlers/format wired up after workspace helpers exist).
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
 
 # Configuration is sourced from environment variables below. Removed duplicate static Config.
 CATALOG_CACHE_FILE = "catalog_cache.json"
@@ -171,6 +176,9 @@ TRACK_IP_SALT = (os.getenv("TRACK_IP_SALT", "") or "").strip()
 TRACK_ALLOWED_ORIGINS_ENV = (os.getenv("TRACK_ALLOWED_ORIGINS", "") or "").strip()
 TRACK_ALLOWED_ORIGINS = [o.strip().lower() for o in TRACK_ALLOWED_ORIGINS_ENV.split(",") if o.strip()]
 
+# Safety: don't leak internal filesystem paths in /health unless explicitly enabled.
+HEALTH_EXPOSE_INTERNALS = (os.getenv("HEALTH_EXPOSE_INTERNALS", "0") or "0").strip() == "1"
+
 def _safe_db_url_summary(url: str | None) -> dict:
     """Return non-sensitive DB routing info (no passwords)."""
     try:
@@ -205,6 +213,22 @@ def get_current_workspace() -> str:
         return w if w in WORKSPACES else DEFAULT_WORKSPACE
     except Exception:
         return DEFAULT_WORKSPACE
+
+
+# Configure logging once the workspace helper exists (inject request/workspace/agent into log records).
+try:
+    _configure_logging(
+        level=LOG_LEVEL,
+        workspace_getter=get_current_workspace,
+        request_id_getter=_get_request_id,
+        agent_getter=_get_agent_username,
+    )
+except Exception:
+    # Fallback to minimal logging if something goes wrong during import.
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 def _coerce_workspace(value: str | None) -> str:
     v = str(value or "").strip().lower()
@@ -5675,6 +5699,24 @@ messenger = message_processor.whatsapp_messenger
 # FastAPI app
 app = FastAPI(default_response_class=(ORJSONResponse if _ORJSON_AVAILABLE else JSONResponse))
 
+# ── Request context: request_id (for tracing) ──────────────────────
+@app.middleware("http")
+async def request_id_middleware(request: StarletteRequest, call_next):
+    incoming = (request.headers.get("x-request-id") or request.headers.get("X-Request-Id") or "").strip()
+    rid, tok = _set_request_id(incoming or None)
+    try:
+        resp: StarletteResponse = await call_next(request)
+        try:
+            resp.headers["X-Request-Id"] = rid
+        except Exception:
+            pass
+        return resp
+    finally:
+        try:
+            _reset_request_id(tok)
+        except Exception:
+            pass
+
 # ── Auth middleware: protect API routes by default ─────────────────
 @app.middleware("http")
 async def _auth_middleware(request: StarletteRequest, call_next):
@@ -5692,7 +5734,19 @@ async def _auth_middleware(request: StarletteRequest, call_next):
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
         request.state.agent = agent  # type: ignore[attr-defined]
-        return await call_next(request)
+        tok = None
+        try:
+            tok = _set_agent_username(str(agent.get("username") or "") if isinstance(agent, dict) else None)
+        except Exception:
+            tok = None
+        try:
+            return await call_next(request)
+        finally:
+            if tok is not None:
+                try:
+                    _reset_agent_username(tok)
+                except Exception:
+                    pass
     except Exception:
         # Fail closed with a generic 401
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
@@ -7094,6 +7148,7 @@ async def health_check():
         db_ok = await asyncio.wait_for(db_manager.ping(), timeout=HEALTH_DB_TIMEOUT_SECONDS)
     except Exception:
         db_ok = False
+    expose_internals = bool(HEALTH_EXPOSE_INTERNALS or LOG_VERBOSE)
     return {
         "status": "healthy",
         "redis": redis_status,
@@ -7109,10 +7164,10 @@ async def health_check():
             # expose path only for sqlite to aid debugging; avoid leaking connection strings
             "db_path": (
                 ((TENANT_DB_PATHS or {}).get(get_current_workspace()) or DB_PATH)
-                if (db_backend == "sqlite")
+                if (db_backend == "sqlite" and expose_internals)
                 else None
             ),
-            "auth_db_path": (AUTH_DB_PATH if db_backend == "sqlite" else None),
+            "auth_db_path": (AUTH_DB_PATH if (db_backend == "sqlite" and expose_internals) else None),
             # safe summaries for Postgres routing (no passwords)
             "tenant_db": _safe_db_url_summary(getattr(db_manager, "db_url", None)),
             "auth_db": _safe_db_url_summary(getattr(auth_db_manager, "db_url", None)),

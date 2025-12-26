@@ -2481,7 +2481,7 @@ class DatabaseManager:
                 ON CONFLICT(user_id) DO UPDATE SET
                     source=EXCLUDED.source,
                     click_id=EXCLUDED.click_id,
-                    source_first_inbound_ts=COALESCE(source_first_inbound_ts, EXCLUDED.source_first_inbound_ts)
+                    source_first_inbound_ts=COALESCE(conversation_meta.source_first_inbound_ts, EXCLUDED.source_first_inbound_ts)
                 """
             )
             params = (user_id, source, click_id, first_inbound_ts)
@@ -6267,7 +6267,13 @@ async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dic
 
         # Send to other connections of the same user (excluding sender)
         key = connection_manager._key(user_id)
-        for ws in connection_manager.active_connections.get(key, set()).copy():
+        # Back-compat: some callers/tests may still store connections under the raw user_id.
+        conns = (
+            connection_manager.active_connections.get(key)
+            or connection_manager.active_connections.get(user_id)
+            or set()
+        )
+        for ws in conns.copy():
             if ws is not websocket:
                 try:
                     await ws.send_json(typing_event)

@@ -91,7 +91,10 @@ export default function AnalyticsPanel() {
         setShopify(r2?.data || null);
       } catch (e) {
         setShopify(null);
-        setShopifyError('Failed to load website WhatsApp analytics');
+        const status = e?.response?.status;
+        if (status === 401) setShopifyError('Website WhatsApp analytics: Unauthorized (please login again)');
+        else if (status === 403) setShopifyError('Website WhatsApp analytics: Admin required');
+        else setShopifyError('Failed to load website WhatsApp analytics');
       }
     } catch (e) {
       setError('Failed to load analytics');

@@ -2084,6 +2084,18 @@ class DatabaseManager:
             # Add index on server_ts for ordering by receive time
             if self.use_postgres:
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_msg_user_server_ts ON messages (user_id, server_ts)")
+                # Speed up inbox queries on large Postgres datasets (used by /conversations).
+                # Expression/partial indexes are safe and idempotent.
+                try:
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_msg_user_ts_coalesce ON messages (user_id, (COALESCE(server_ts, timestamp)) DESC)"
+                    )
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_msg_unread_user ON messages (user_id) WHERE from_me = 0 AND status <> 'read'"
+                    )
+                except Exception:
+                    # Best-effort: do not fail init if index creation is not permitted.
+                    pass
             else:
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_msg_user_server_ts ON messages (user_id, server_ts)")
                 await db.commit()
@@ -3156,8 +3168,9 @@ class DatabaseManager:
         async with self._conn() as db:
             # Postgres optimized path
             if self.use_postgres:
-                # Heavier load: avoid correlated subqueries per conversation (which can time out under traffic).
-                # Use aggregate CTEs so Postgres can plan efficiently.
+                # Important: keep this fast on large datasets.
+                # We compute the "page" of conversations first (last message per user),
+                # then compute unread/unresponded stats ONLY for those users.
                 base = self._convert(
                     """
                     WITH last_msg AS (
@@ -3171,12 +3184,19 @@ class DatabaseManager:
                       FROM messages
                       ORDER BY user_id, COALESCE(server_ts, timestamp) DESC
                     ),
+                    page AS (
+                      SELECT *
+                      FROM last_msg
+                      ORDER BY ts DESC NULLS LAST
+                      LIMIT ? OFFSET ?
+                    ),
                     counts AS (
                       SELECT
                         user_id,
                         COUNT(*) FILTER (WHERE from_me = 0 AND status <> 'read') AS unread_count,
                         MAX(COALESCE(server_ts, timestamp)) FILTER (WHERE from_me = 1) AS last_agent_ts
                       FROM messages
+                      WHERE user_id IN (SELECT user_id FROM page)
                       GROUP BY user_id
                     ),
                     unresponded AS (
@@ -3189,29 +3209,29 @@ class DatabaseManager:
                         ) AS unresponded_count
                       FROM messages m
                       JOIN counts c ON c.user_id = m.user_id
+                      WHERE m.user_id IN (SELECT user_id FROM page)
                       GROUP BY m.user_id, c.last_agent_ts
                     )
                     SELECT
-                      c.user_id,
+                      p.user_id,
                       u.name,
                       u.phone,
-                      lm.message AS last_message,
-                      lm.type AS last_message_type,
-                      lm.from_me AS last_message_from_me,
-                      lm.status AS last_message_status,
-                      lm.ts AS last_message_time,
+                      p.message AS last_message,
+                      p.type AS last_message_type,
+                      p.from_me AS last_message_from_me,
+                      p.status AS last_message_status,
+                      p.ts AS last_message_time,
                       COALESCE(c.unread_count, 0) AS unread_count,
                       COALESCE(ur.unresponded_count, 0) AS unresponded_count,
                       cm.assigned_agent,
                       cm.tags,
                       cm.avatar_url AS avatar
-                    FROM counts c
-                    LEFT JOIN users u ON u.user_id = c.user_id
-                    LEFT JOIN last_msg lm ON lm.user_id = c.user_id
-                    LEFT JOIN unresponded ur ON ur.user_id = c.user_id
-                    LEFT JOIN conversation_meta cm ON cm.user_id = c.user_id
-                    ORDER BY lm.ts DESC NULLS LAST
-                    LIMIT ? OFFSET ?
+                    FROM page p
+                    LEFT JOIN users u ON u.user_id = p.user_id
+                    LEFT JOIN counts c ON c.user_id = p.user_id
+                    LEFT JOIN unresponded ur ON ur.user_id = p.user_id
+                    LEFT JOIN conversation_meta cm ON cm.user_id = p.user_id
+                    ORDER BY p.ts DESC NULLS LAST
                     """
                 )
                 rows = await db.fetch(base, limit, offset)

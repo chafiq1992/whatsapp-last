@@ -7473,7 +7473,26 @@ async def analytics_shopify_inbox(start: Optional[str] = None, end: Optional[str
             b = "hour" if span <= (3 * 86400) else "day"
         except Exception:
             b = "day"
-    return await db_manager.get_shopify_inbox_analytics(start=start, end=end, bucket=b)
+    # Compute analytics. If the tenant DB hasn't been initialized yet (tables missing),
+    # do a one-time init_db() and retry (admin endpoint; safe).
+    try:
+        return await db_manager.get_shopify_inbox_analytics(start=start, end=end, bucket=b)
+    except Exception as exc:
+        # Best-effort schema init (covers "relation does not exist" on fresh Postgres workspaces)
+        try:
+            await db_manager.init_db()
+            return await db_manager.get_shopify_inbox_analytics(start=start, end=end, bucket=b)
+        except Exception as exc2:
+            logging.getLogger(__name__).exception("Shopify inbox analytics failed (workspace=%s)", get_current_workspace())
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": "Shopify inbox analytics failed",
+                    "workspace": get_current_workspace(),
+                    "error": str(exc2) or str(exc) or "unknown_error",
+                    "hint": "If this persists, open /debug/workspace (admin) to verify DB routing and run /admin/init-db.",
+                },
+            )
 
 @app.get("/analytics/agents")
 async def get_agents_analytics(start: Optional[str] = None, end: Optional[str] = None, _: dict = Depends(require_admin)):

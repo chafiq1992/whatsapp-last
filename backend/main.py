@@ -352,6 +352,10 @@ ACCESS_TOKEN_TTL_SECONDS = max(
     24 * 3600,
 )
 REFRESH_TOKEN_TTL_SECONDS = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(30 * 24 * 3600)))  # 30 days
+# Auto-logout / online presence (activity-based)
+INACTIVITY_TIMEOUT_SECONDS = int(os.getenv("INACTIVITY_TIMEOUT_SECONDS", str(30 * 60)))  # 30 minutes
+# Keep last_seen cached long enough that we can still enforce inactivity even after long idle periods.
+AGENT_ACTIVITY_CACHE_TTL_SECONDS = int(os.getenv("AGENT_ACTIVITY_CACHE_TTL_SECONDS", str(7 * 24 * 3600)))  # 7 days
 AUTH_COOKIE_DOMAIN = (os.getenv("AUTH_COOKIE_DOMAIN", "") or "").strip() or None
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "").strip()  # "", "0", "1" (auto if empty)
 AUTH_COOKIE_SAMESITE = (os.getenv("AUTH_COOKIE_SAMESITE", "") or "").strip().lower() or "none"  # none|lax|strict
@@ -998,6 +1002,58 @@ class RedisManager:
     def __init__(self, redis_url: str | None = None):
         self.redis_url = redis_url or REDIS_URL
         self.redis_client: Optional[redis.Redis] = None
+
+    # -------- agent presence / activity (online) --------
+    def _agent_last_seen_key(self, workspace: str, username: str) -> str:
+        ws = _coerce_workspace(workspace or DEFAULT_WORKSPACE)
+        u = str(username or "").strip().lower()
+        return f"agent_last_seen:{ws}:{u}"
+
+    async def touch_agent_last_seen(self, username: str, workspace: str | None = None) -> None:
+        """Update last activity timestamp for an agent (best-effort)."""
+        if not self.redis_client:
+            return
+        u = str(username or "").strip()
+        if not u:
+            return
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        key = self._agent_last_seen_key(ws, u)
+        try:
+            now = str(time.time())
+            await self.redis_client.setex(key, int(AGENT_ACTIVITY_CACHE_TTL_SECONDS), now)
+        except Exception:
+            return
+
+    async def get_agent_last_seen(self, username: str, workspace: str | None = None) -> Optional[float]:
+        if not self.redis_client:
+            return None
+        u = str(username or "").strip()
+        if not u:
+            return None
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        key = self._agent_last_seen_key(ws, u)
+        try:
+            raw = await self.redis_client.get(key)
+            if not raw:
+                return None
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", "ignore")
+            return float(raw)
+        except Exception:
+            return None
+
+    async def clear_agent_last_seen(self, username: str, workspace: str | None = None) -> None:
+        if not self.redis_client:
+            return
+        u = str(username or "").strip()
+        if not u:
+            return
+        ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+        key = self._agent_last_seen_key(ws, u)
+        try:
+            await self.redis_client.delete(key)
+        except Exception:
+            return
     
     async def connect(self):
         """Connect to Redis"""
@@ -5490,6 +5546,34 @@ async def _auth_middleware(request: StarletteRequest, call_next):
             agent = await get_current_agent(request)  # type: ignore[arg-type]
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+        # Enforce inactivity auto-logout (best-effort, Redis-backed).
+        # If agent hasn't been active in > INACTIVITY_TIMEOUT_SECONDS, force re-login.
+        try:
+            ws = get_current_workspace()
+            uname = str((agent or {}).get("username") or "")
+            if uname and getattr(redis_manager, "redis_client", None):
+                last = await redis_manager.get_agent_last_seen(uname, workspace=ws)
+                if last is not None and (time.time() - float(last)) > float(INACTIVITY_TIMEOUT_SECONDS):
+                    try:
+                        await auth_db_manager.revoke_all_refresh_tokens_for_agent(uname)
+                    except Exception:
+                        pass
+                    try:
+                        # Clear presence for all configured workspaces (so admin view updates immediately)
+                        for _w in (WORKSPACES or [DEFAULT_WORKSPACE]):
+                            try:
+                                await redis_manager.clear_agent_last_seen(uname, workspace=_w)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    return JSONResponse(status_code=401, content={"detail": "Session expired due to inactivity"})
+                # Touch activity on every authenticated request
+                await redis_manager.touch_agent_last_seen(uname, workspace=ws)
+        except Exception:
+            pass
+
         request.state.agent = agent  # type: ignore[attr-defined]
         tok = None
         try:
@@ -6552,34 +6636,14 @@ async def list_agents_public(_: dict = Depends(get_current_agent)):
 
 @app.get("/agents/online")
 async def list_online_agents(_: dict = Depends(get_current_agent)):
-    """Return agents that are considered 'online' from login until logout.
+    """Return agents that are currently online (active within the last INACTIVITY_TIMEOUT_SECONDS).
 
-    Definition: agent has at least one active refresh token (unrevoked + unexpired).
-    This matches the product requirement and is robust across multiple server instances.
+    We treat "online" as "recent activity", not "has a refresh token". This prevents agents from
+    appearing online forever if they forget to logout.
     """
+    ws = get_current_workspace()
+    now = time.time()
     online_usernames: set[str] = set()
-    now = datetime.now(timezone.utc)
-    try:
-        async with auth_db_manager._conn() as db:
-            query = auth_db_manager._convert(
-                "SELECT agent_username, expires_at, revoked_at FROM agent_refresh_tokens WHERE revoked_at IS NULL"
-            )
-            if auth_db_manager.use_postgres:
-                rows = await db.fetch(query)
-                rows = [dict(r) for r in (rows or [])]
-            else:
-                cur = await db.execute(query, ())
-                rows = await cur.fetchall()
-                rows = [dict(r) for r in (rows or [])]
-        for r in rows or []:
-            u = str((r or {}).get("agent_username") or "").strip()
-            if not u:
-                continue
-            exp = _parse_dt_any((r or {}).get("expires_at"))
-            if exp and exp >= now:
-                online_usernames.add(u)
-    except Exception:
-        online_usernames = set()
 
     # Attach friendly names (best-effort).
     name_by_username: dict[str, str] = {}
@@ -6592,6 +6656,13 @@ async def list_online_agents(_: dict = Depends(get_current_agent)):
             n = str((a or {}).get("name") or "").strip()
             if n:
                 name_by_username[u] = n
+            # Determine online/offline by last_seen
+            try:
+                last = await redis_manager.get_agent_last_seen(u, workspace=ws) if getattr(redis_manager, "redis_client", None) else None
+                if last is not None and (now - float(last)) <= float(INACTIVITY_TIMEOUT_SECONDS):
+                    online_usernames.add(u)
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -6816,6 +6887,11 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
 
     # Set cookies (request/response are always injected by FastAPI)
     _set_auth_cookies(response, request, access_token, refresh_token)
+    # Mark agent as active immediately on login (best-effort; used for online presence + inactivity).
+    try:
+        await redis_manager.touch_agent_last_seen(username, workspace=get_current_workspace())
+    except Exception:
+        pass
     # Also return access token so clients can fall back to Authorization header
     # if their environment blocks cookies (some browsers/settings/extensions).
     out = {"ok": True, "username": username, "is_admin": bool(is_admin), "access_token": access_token, "token_type": "bearer"}
@@ -6918,11 +6994,47 @@ async def auth_logout(request: Request, response: Response):
             refresh = (request.headers.get("x-refresh-token") or request.headers.get("X-Refresh-Token") or "").strip()
         except Exception:
             refresh = ""
+
+    # We revoke ALL refresh tokens for this agent on logout so they disappear from "online" immediately
+    # and we don't leave other sessions hanging around (multi-tab / old devices).
+    username: str | None = None
     if refresh:
         try:
-            await auth_db_manager.revoke_refresh_token(_hash_refresh_token(refresh))
+            row = await auth_db_manager.get_refresh_token(_hash_refresh_token(refresh))
+            username = str((row or {}).get("agent_username") or "").strip() or None
+        except Exception:
+            username = None
+
+    if not username:
+        # Fallback: use access token cookie/header if present
+        try:
+            token = _extract_access_token_from_request(request)
+            parsed = parse_access_token(token or "")
+            username = str((parsed or {}).get("username") or "").strip() or None
+        except Exception:
+            username = None
+
+    if username:
+        try:
+            await auth_db_manager.revoke_all_refresh_tokens_for_agent(username)
         except Exception:
             pass
+        # Clear presence/activity for all workspaces so admin view updates even after hard refresh
+        try:
+            for _w in (WORKSPACES or [DEFAULT_WORKSPACE]):
+                try:
+                    await redis_manager.clear_agent_last_seen(username, workspace=_w)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    else:
+        # Best-effort: revoke the presented refresh token only
+        if refresh:
+            try:
+                await auth_db_manager.revoke_refresh_token(_hash_refresh_token(refresh))
+            except Exception:
+                pass
     _clear_auth_cookies(response)
     return {"ok": True}
 

@@ -382,6 +382,46 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Auto logout after inactivity (30 minutes).
+  // This is a client-side safety net; the backend also enforces inactivity expiry.
+  useEffect(() => {
+    if (!authReady) return;
+    if (isLoginPath) return;
+
+    const INACT_MS = 30 * 60 * 1000;
+    let timer = null;
+
+    const doLogout = async () => {
+      try { await api.post('/auth/logout'); } catch {}
+      try { sessionStorage.removeItem('agent_access_token'); } catch {}
+      try { sessionStorage.removeItem('agent_refresh_token'); } catch {}
+      try { localStorage.removeItem('agent_access_token'); } catch {}
+      try { localStorage.removeItem('agent_refresh_token'); } catch {}
+      try { localStorage.removeItem('agent_is_admin'); } catch {}
+      try { window.location.replace('/login'); } catch {}
+    };
+
+    const reset = () => {
+      try { if (timer) clearTimeout(timer); } catch {}
+      timer = setTimeout(doLogout, INACT_MS);
+    };
+
+    const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'];
+    events.forEach((ev) => {
+      try { window.addEventListener(ev, reset, { passive: true }); } catch {}
+    });
+    try { document.addEventListener('visibilitychange', reset); } catch {}
+    reset();
+
+    return () => {
+      try { if (timer) clearTimeout(timer); } catch {}
+      events.forEach((ev) => {
+        try { window.removeEventListener(ev, reset); } catch {}
+      });
+      try { document.removeEventListener('visibilitychange', reset); } catch {}
+    };
+  }, [authReady, isLoginPath]);
+
   // Open a persistent WebSocket for admin notifications (with reconnection)
   useEffect(() => {
     if (!authReady) return;

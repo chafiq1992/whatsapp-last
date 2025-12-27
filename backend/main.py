@@ -48,6 +48,7 @@ from .observability.context import (
     reset_agent_username as _reset_agent_username,
 )
 from .observability.logging import configure_logging as _configure_logging
+from .webhook import WebhookRuntime, WebhookState, create_webhook_router, start_webhook_workers
 
 from fastapi.staticfiles import StaticFiles
 try:
@@ -83,14 +84,22 @@ DB_PATH = os.getenv("DB_PATH") or str(ROOT_DIR / "data" / "whatsapp_messages.db"
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional PostgreSQL URL
 DATABASE_URL_NOVA = os.getenv("DATABASE_URL_NOVA") or os.getenv("DATABASE_URL_IRRANOVA") or ""
 PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "1"))
-PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "4"))
+# Cloud Run can run with high request concurrency; a pool of 4 can easily bottleneck and cause
+# cascading timeouts (503/504). Keep this modest by default; override via env for your DB tier.
+PG_POOL_MAX = int(os.getenv("PG_POOL_MAX", "10"))
 REQUIRE_POSTGRES = int(os.getenv("REQUIRE_POSTGRES", "1"))  # when 1 and DATABASE_URL is set, never fallback to SQLite
 # SQLite lock/backoff tuning (ms). Keep small so endpoints don't hang for a long time under contention.
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "3000"))
 # Query timeouts to avoid Cloud Run 504s under load (seconds)
 CONVERSATIONS_DB_TIMEOUT_SECONDS = float(os.getenv("CONVERSATIONS_DB_TIMEOUT_SECONDS", "10"))
+MESSAGES_DB_TIMEOUT_SECONDS = float(os.getenv("MESSAGES_DB_TIMEOUT_SECONDS", "12"))
+NOTES_DB_TIMEOUT_SECONDS = float(os.getenv("NOTES_DB_TIMEOUT_SECONDS", "8"))
+MARK_READ_DB_TIMEOUT_SECONDS = float(os.getenv("MARK_READ_DB_TIMEOUT_SECONDS", "6"))
 WEBHOOK_ENQUEUE_TIMEOUT_SECONDS = float(os.getenv("WEBHOOK_ENQUEUE_TIMEOUT_SECONDS", "1.5"))
 TRACK_DB_TIMEOUT_SECONDS = float(os.getenv("TRACK_DB_TIMEOUT_SECONDS", "1.0"))
+# WhatsApp Cloud API timeouts (seconds) - prevents mark-read from hanging and producing 504s.
+WHATSAPP_HTTP_TIMEOUT_SECONDS = float(os.getenv("WHATSAPP_HTTP_TIMEOUT_SECONDS", "12"))
+WHATSAPP_HTTP_CONNECT_TIMEOUT_SECONDS = float(os.getenv("WHATSAPP_HTTP_CONNECT_TIMEOUT_SECONDS", "5"))
 # Auth DB operation timeout (seconds). Prevents Cloud Run from returning an upstream 504 on slow DB calls.
 # NOTE: 8s was too tight for cold pool creation / transient DB slowness and caused intermittent /auth/login 503s.
 AUTH_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_DB_TIMEOUT_SECONDS", "15"))
@@ -1488,9 +1497,17 @@ class WorkspaceWhatsAppRouter:
             payload["context"] = {"message_id": context_message_id}
         
         print(f"🚀 Sending WhatsApp media to {to}: {media_type} - {media_id_or_url}")
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(
+            float(WHATSAPP_HTTP_TIMEOUT_SECONDS),
+            connect=float(WHATSAPP_HTTP_CONNECT_TIMEOUT_SECONDS),
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, json=payload, headers=self.headers)
-            result = response.json()
+            # Best-effort parse; WhatsApp may return non-JSON on errors.
+            try:
+                result = response.json()
+            except Exception:
+                result = {"status_code": response.status_code, "text": response.text}
             print(f"📱 WhatsApp Media API Response: {result}")
             return result
 
@@ -1502,9 +1519,16 @@ class WorkspaceWhatsAppRouter:
             "status": "read",
             "message_id": message_id,
         }
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(
+            float(WHATSAPP_HTTP_TIMEOUT_SECONDS),
+            connect=float(WHATSAPP_HTTP_CONNECT_TIMEOUT_SECONDS),
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, json=payload, headers=self.headers)
-            return response.json()
+            try:
+                return response.json()
+            except Exception:
+                return {"status_code": response.status_code, "text": response.text}
     
     async def download_media(self, media_id: str) -> tuple[bytes, str]:
         """Download media from WhatsApp.
@@ -1515,7 +1539,11 @@ class WorkspaceWhatsAppRouter:
         """
         url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
 
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(
+            float(WHATSAPP_HTTP_TIMEOUT_SECONDS),
+            connect=float(WHATSAPP_HTTP_CONNECT_TIMEOUT_SECONDS),
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.get(url, headers=self.headers)
             if response.status_code != 200:
                 raise Exception(f"Failed to get media info: {response.text}")
@@ -5369,355 +5397,38 @@ message_processor = MessageProcessor(connection_manager, redis_manager, db_manag
 # Webhook ingress: ACK fast, process async
 # ────────────────────────────────────────────────────────────
 WEBHOOK_QUEUE: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=max(1, int(WEBHOOK_QUEUE_MAXSIZE)))
-
-def _webhook_backend_name() -> str:
-    if getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE and WEBHOOK_DB_READY:
-        return "db"
-    if WEBHOOK_USE_REDIS_STREAM and bool(getattr(redis_manager, "redis_client", None)):
-        return "redis_stream"
-    return "memory"
-
-async def _db_enqueue_webhook(payload: dict) -> None:
-    """Persist webhook payload into Postgres-backed queue before ACKing."""
-    async with db_manager._conn() as db:
-        if not db_manager.use_postgres:
-            raise RuntimeError("DB queue requires Postgres")
-        # Store as JSONB
-        await db.execute(
-            "INSERT INTO webhook_events (payload, status, next_attempt_at) VALUES ($1::jsonb, 'pending', NOW())",
-            json.dumps(payload),
-        )
-
-_webhook_db_ready_last_log_ts: float = 0.0
-
-async def _ensure_webhook_events_table() -> bool:
-    """Best-effort: ensure Postgres webhook_events table exists before using DB queue.
-
-    Returns True when the table appears ready, False otherwise.
-    """
-    global WEBHOOK_DB_READY, _webhook_db_ready_last_log_ts
-    if not (getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE):
-        WEBHOOK_DB_READY = False
-        return False
-    try:
-        async with db_manager._conn() as db:
-            if not db_manager.use_postgres:
-                WEBHOOK_DB_READY = False
-                return False
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS webhook_events (
-                    id BIGSERIAL PRIMARY KEY,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    payload JSONB NOT NULL,
-                    last_error TEXT,
-                    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    locked_at TIMESTAMPTZ,
-                    lock_owner TEXT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_webhook_events_due ON webhook_events (status, next_attempt_at, id)"
-            )
-        WEBHOOK_DB_READY = True
-        return True
-    except Exception as exc:
-        WEBHOOK_DB_READY = False
-        # Avoid log spam if DB isn't ready yet.
-        now = time.time()
-        if now - float(_webhook_db_ready_last_log_ts) > 60.0:
-            _webhook_db_ready_last_log_ts = now
-            logging.getLogger(__name__).warning("Webhook DB queue not ready (will fallback): %s", exc)
-        return False
-
-async def _db_claim_webhook_events(batch_size: int, lock_owner: str) -> list[dict]:
-    """Claim a batch of due webhook events (Postgres) using SKIP LOCKED."""
-    async with db_manager._conn() as db:
-        if not db_manager.use_postgres:
-            return []
-        try:
-            rows = await db.fetch(
-                """
-                WITH cte AS (
-                  SELECT id
-                  FROM webhook_events
-                  WHERE status IN ('pending','retry')
-                    AND next_attempt_at <= NOW()
-                  ORDER BY id
-                  FOR UPDATE SKIP LOCKED
-                  LIMIT $1
-                )
-                UPDATE webhook_events e
-                SET status='processing',
-                    locked_at=NOW(),
-                    lock_owner=$2,
-                    attempts=e.attempts+1,
-                    updated_at=NOW()
-                FROM cte
-                WHERE e.id = cte.id
-                RETURNING e.id, e.payload, e.attempts
-                """,
-                int(batch_size),
-                str(lock_owner),
-            )
-        except Exception as exc:
-            # Most common production failure mode: table missing because init didn't run / timed out.
-            # Ensure table and return empty batch (worker will back off via poll sleep).
-            if "webhook_events" in str(exc).lower() or "undefinedtable" in str(exc).lower():
-                await _ensure_webhook_events_table()
-                return []
-            raise
-        out: list[dict] = []
-        for r in rows or []:
-            try:
-                payload = r["payload"]
-                if isinstance(payload, str):
-                    payload = json.loads(payload)
-            except Exception:
-                payload = {}
-            out.append({"id": int(r["id"]), "payload": payload, "attempts": int(r["attempts"] or 0)})
-        return out
-
-async def _db_mark_webhook_done(event_id: int) -> None:
-    async with db_manager._conn() as db:
-        if not db_manager.use_postgres:
-            return
-        await db.execute(
-            "UPDATE webhook_events SET status='done', last_error=NULL, locked_at=NULL, lock_owner=NULL, updated_at=NOW() WHERE id=$1",
-            int(event_id),
-        )
-
-async def _db_reschedule_webhook(event_id: int, *, attempts: int, error: str) -> None:
-    """Reschedule with backoff; mark dead after WEBHOOK_MAX_ATTEMPTS."""
-    async with db_manager._conn() as db:
-        if not db_manager.use_postgres:
-            return
-        dead = int(attempts) >= int(WEBHOOK_MAX_ATTEMPTS)
-        # Exponential backoff with cap (seconds)
-        delay = min(300, max(1, int(2 ** min(int(attempts), 8))))
-        if dead:
-            await db.execute(
-                "UPDATE webhook_events SET status='dead', last_error=$2, locked_at=NULL, lock_owner=NULL, updated_at=NOW() WHERE id=$1",
-                int(event_id),
-                str(error)[:4000],
-            )
-        else:
-            await db.execute(
-                """
-                UPDATE webhook_events
-                SET status='retry',
-                    last_error=$2,
-                    next_attempt_at=NOW() + ($3 * INTERVAL '1 second'),
-                    locked_at=NULL,
-                    lock_owner=NULL,
-                    updated_at=NOW()
-                WHERE id=$1
-                """,
-                int(event_id),
-                str(error)[:4000],
-                int(delay),
-            )
-
-async def _ensure_webhook_stream_group() -> bool:
-    """Ensure Redis Stream + consumer group exists (durable webhook queue)."""
-    try:
-        r = getattr(redis_manager, "redis_client", None)
-        if not r or not WEBHOOK_USE_REDIS_STREAM:
-            return False
-        try:
-            # mkstream=True creates stream if missing; "0-0" so we can claim pending reliably.
-            await r.xgroup_create(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, id="0-0", mkstream=True)
-        except Exception as exc:
-            # BUSYGROUP is fine (already exists)
-            if "BUSYGROUP" not in str(exc).upper():
-                raise
-        return True
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Failed to ensure webhook redis stream group: %s", exc)
-        return False
-
-async def _webhook_worker(worker_id: int):
-    log = logging.getLogger(__name__)
-    # Unique consumer name so multiple Cloud Run instances can safely share a group.
-    consumer = f"w{worker_id}-{uuid.uuid4().hex[:10]}"
-    last_claim = 0.0
-
-    async def process_one(payload: dict, *, source_id: str | None = None):
-        await asyncio.wait_for(
-            message_processor.process_incoming_message(payload),
-            timeout=max(1.0, float(WEBHOOK_PROCESSING_TIMEOUT_SECONDS)),
-        )
-
-    while True:
-        r = getattr(redis_manager, "redis_client", None)
-        use_stream = bool(r and WEBHOOK_USE_REDIS_STREAM)
-
-        # Preferred: Redis Streams (durable)
-        if use_stream:
-            now = time.time()
-            try:
-                # Periodically reclaim stale pending entries (e.g., crashed worker).
-                if now - last_claim > 15:
-                    last_claim = now
-                    try:
-                        res = await r.xautoclaim(
-                            WEBHOOK_STREAM_KEY,
-                            WEBHOOK_STREAM_GROUP,
-                            consumer,
-                            min_idle_time=max(1, int(WEBHOOK_CLAIM_MIN_IDLE_MS)),
-                            start_id="0-0",
-                            count=25,
-                        )
-                        # redis-py returns (next_start_id, messages, deleted_ids)
-                        claimed = res[1] if isinstance(res, (list, tuple)) and len(res) >= 2 else []
-                    except Exception:
-                        claimed = []
-
-                    for msg_id, fields in claimed or []:
-                        try:
-                            raw = fields.get("payload") if isinstance(fields, dict) else None
-                            if raw is None and isinstance(fields, dict):
-                                raw = fields.get(b"payload")
-                            payload = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else None
-                            if isinstance(payload, (bytes, bytearray)):
-                                payload = json.loads(payload.decode("utf-8"))
-                            if not isinstance(payload, dict):
-                                raise ValueError("bad payload")
-                            await process_one(payload, source_id=str(msg_id))
-                            await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
-                            try:
-                                await r.hdel("wa:webhooks:attempts", str(msg_id))
-                            except Exception:
-                                pass
-                        except Exception as exc:
-                            # Track attempts and send to DLQ if poisoned.
-                            try:
-                                attempts = await r.hincrby("wa:webhooks:attempts", str(msg_id), 1)
-                            except Exception:
-                                attempts = 1
-                            if int(attempts) >= int(WEBHOOK_MAX_ATTEMPTS):
-                                try:
-                                    await r.xadd(WEBHOOK_STREAM_DLQ_KEY, {"id": str(msg_id), "error": str(exc), "payload": raw if isinstance(raw, str) else (raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else "")})
-                                except Exception:
-                                    pass
-                                await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
-                            log.exception("Webhook worker %s: redis-stream claimed msg failed: %s", worker_id, exc)
-
-                # Read new messages (">")
-                resp = await r.xreadgroup(
-                    WEBHOOK_STREAM_GROUP,
-                    consumer,
-                    streams={WEBHOOK_STREAM_KEY: ">"},
-                    count=25,
-                    block=5000,
-                )
-                if resp:
-                    for _stream, messages in resp:
-                        for msg_id, fields in messages:
-                            raw = None
-                            try:
-                                raw = fields.get("payload") if isinstance(fields, dict) else None
-                                if raw is None and isinstance(fields, dict):
-                                    raw = fields.get(b"payload")
-                                payload = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else None
-                                if isinstance(payload, (bytes, bytearray)):
-                                    payload = json.loads(payload.decode("utf-8"))
-                                if not isinstance(payload, dict):
-                                    raise ValueError("bad payload")
-                                await process_one(payload, source_id=str(msg_id))
-                                await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
-                                try:
-                                    await r.hdel("wa:webhooks:attempts", str(msg_id))
-                                except Exception:
-                                    pass
-                            except asyncio.TimeoutError:
-                                log.error("Webhook worker %s: msg %s timed out after %ss", worker_id, msg_id, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
-                                try:
-                                    attempts = await r.hincrby("wa:webhooks:attempts", str(msg_id), 1)
-                                except Exception:
-                                    attempts = 1
-                                if int(attempts) >= int(WEBHOOK_MAX_ATTEMPTS):
-                                    try:
-                                        await r.xadd(WEBHOOK_STREAM_DLQ_KEY, {"id": str(msg_id), "error": "timeout", "payload": raw if isinstance(raw, str) else (raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else "")})
-                                    except Exception:
-                                        pass
-                                    await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
-                            except Exception as exc:
-                                try:
-                                    attempts = await r.hincrby("wa:webhooks:attempts", str(msg_id), 1)
-                                except Exception:
-                                    attempts = 1
-                                if int(attempts) >= int(WEBHOOK_MAX_ATTEMPTS):
-                                    try:
-                                        await r.xadd(WEBHOOK_STREAM_DLQ_KEY, {"id": str(msg_id), "error": str(exc), "payload": raw if isinstance(raw, str) else (raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else "")})
-                                    except Exception:
-                                        pass
-                                    await r.xack(WEBHOOK_STREAM_KEY, WEBHOOK_STREAM_GROUP, msg_id)
-                                log.exception("Webhook worker %s: msg %s failed: %s", worker_id, msg_id, exc)
-                continue
-            except Exception as exc:
-                # If Redis stream read fails, fall back to in-memory queue (best-effort)
-                log.warning("Webhook worker %s: redis stream read failed, falling back to in-memory: %s", worker_id, exc)
-
-        # Fallback: in-memory queue (not durable)
-        data = await WEBHOOK_QUEUE.get()
-        try:
-            await process_one(data)
-        except asyncio.TimeoutError:
-            log.error("Webhook worker %s: in-memory processing timed out after %ss", worker_id, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
-        except Exception as exc:
-            log.exception("Webhook worker %s: in-memory processing failed: %s", worker_id, exc)
-        finally:
-            try:
-                WEBHOOK_QUEUE.task_done()
-            except Exception:
-                pass
-
-async def _webhook_db_worker(worker_id: int):
-    """Postgres-backed webhook worker (no Redis required)."""
-    log = logging.getLogger(__name__)
-    lock_owner = f"dbw{worker_id}-{uuid.uuid4().hex[:10]}"
-    batch = max(1, int(WEBHOOK_DB_BATCH_SIZE))
-    poll = max(0.1, float(WEBHOOK_DB_POLL_INTERVAL_SEC))
-    while True:
-        try:
-            events = await _db_claim_webhook_events(batch, lock_owner)
-            if not events:
-                await asyncio.sleep(poll)
-                continue
-            for ev in events:
-                eid = int(ev.get("id") or 0)
-                payload = ev.get("payload") or {}
-                attempts = int(ev.get("attempts") or 0)
-                try:
-                    await asyncio.wait_for(
-                        message_processor.process_incoming_message(payload),
-                        timeout=max(1.0, float(WEBHOOK_PROCESSING_TIMEOUT_SECONDS)),
-                    )
-                    await _db_mark_webhook_done(eid)
-                except asyncio.TimeoutError:
-                    log.error("DB webhook worker %s: event %s timed out after %ss", worker_id, eid, WEBHOOK_PROCESSING_TIMEOUT_SECONDS)
-                    await _db_reschedule_webhook(eid, attempts=attempts, error="timeout")
-                except Exception as exc:
-                    log.exception("DB webhook worker %s: event %s failed: %s", worker_id, eid, exc)
-                    await _db_reschedule_webhook(eid, attempts=attempts, error=str(exc))
-        except Exception as outer:
-            # Avoid tight error loops if DB schema isn't ready.
-            if "webhook_events" in str(outer).lower() or "undefinedtable" in str(outer).lower():
-                await _ensure_webhook_events_table()
-                log.warning("DB webhook worker %s: webhook_events missing/unready; backing off: %s", worker_id, outer)
-                await asyncio.sleep(max(5.0, poll))
-                continue
-            log.exception("DB webhook worker %s: loop error: %s", worker_id, outer)
-            await asyncio.sleep(poll)
+WEBHOOK_STATE = WebhookState(db_ready=False)
+webhook_runtime = WebhookRuntime(
+    db_manager=db_manager,
+    redis_manager=redis_manager,
+    message_processor=message_processor,
+    webhook_queue=WEBHOOK_QUEUE,
+    coerce_workspace=_coerce_workspace,
+    vlog=_vlog,
+    verify_token=VERIFY_TOKEN,
+    meta_app_secret=META_APP_SECRET,
+    allowed_phone_number_ids=set(ALLOWED_PHONE_NUMBER_IDS or set()),
+    phone_id_to_workspace=dict(PHONE_ID_TO_WORKSPACE or {}),
+    default_workspace=DEFAULT_WORKSPACE,
+    use_redis_stream=bool(WEBHOOK_USE_REDIS_STREAM),
+    stream_key=WEBHOOK_STREAM_KEY,
+    stream_group=WEBHOOK_STREAM_GROUP,
+    stream_dlq_key=WEBHOOK_STREAM_DLQ_KEY,
+    max_attempts=int(WEBHOOK_MAX_ATTEMPTS),
+    claim_min_idle_ms=int(WEBHOOK_CLAIM_MIN_IDLE_MS),
+    use_db_queue=bool(WEBHOOK_USE_DB_QUEUE),
+    db_batch_size=int(WEBHOOK_DB_BATCH_SIZE),
+    db_poll_interval_sec=float(WEBHOOK_DB_POLL_INTERVAL_SEC),
+    enqueue_timeout_seconds=float(WEBHOOK_ENQUEUE_TIMEOUT_SECONDS),
+    workers=int(WEBHOOK_WORKERS),
+    processing_timeout_seconds=float(WEBHOOK_PROCESSING_TIMEOUT_SECONDS),
+    state=WEBHOOK_STATE,
+)
 messenger = message_processor.whatsapp_messenger
 
 # FastAPI app
 app = FastAPI(default_response_class=(ORJSONResponse if _ORJSON_AVAILABLE else JSONResponse))
+app.include_router(create_webhook_router(webhook_runtime))
 
 # ── Request context: request_id (for tracing) ──────────────────────
 @app.middleware("http")
@@ -5786,6 +5497,22 @@ except Exception as exc:
     print(f"⚠️ Shopify integration disabled: {exc}")
     SHOPIFY_ROUTES_ENABLED = False
     SHOPIFY_ROUTES_ERROR = str(exc)
+
+if not SHOPIFY_ROUTES_ENABLED:
+    # Provide stable endpoints so the frontend doesn't hard-fail with 404 when Shopify is misconfigured.
+    @app.get("/search-customer")
+    async def _search_customer_disabled(phone_number: str):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Shopify integration disabled: {SHOPIFY_ROUTES_ERROR or 'not configured'}",
+        )
+
+    @app.get("/search-customers-all")
+    async def _search_customers_all_disabled(phone_number: str):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Shopify integration disabled: {SHOPIFY_ROUTES_ERROR or 'not configured'}",
+        )
 
 @app.get("/debug/shopify")
 async def debug_shopify(_: dict = Depends(require_admin)):
@@ -6014,19 +5741,12 @@ async def startup():
 
     # Start webhook background workers so /webhook can ACK quickly.
     try:
-        # Best effort: ensure the DB queue table exists before starting DB workers.
-        if getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE:
-            await _ensure_webhook_events_table()
-        if getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE and WEBHOOK_DB_READY:
-            for i in range(max(1, int(WEBHOOK_WORKERS))):
-                asyncio.create_task(_webhook_db_worker(i + 1))
-            print(f"Webhook DB workers started: {max(1, int(WEBHOOK_WORKERS))} (batch={WEBHOOK_DB_BATCH_SIZE})")
-        else:
-            # Prefer durable Redis stream queue when Redis is available.
-            await _ensure_webhook_stream_group()
-            for i in range(max(1, int(WEBHOOK_WORKERS))):
-                asyncio.create_task(_webhook_worker(i + 1))
-            print(f"Webhook workers started: {max(1, int(WEBHOOK_WORKERS))} (queue maxsize={WEBHOOK_QUEUE_MAXSIZE})")
+        await start_webhook_workers(webhook_runtime)
+        # Mirror runtime flag into legacy global for any old helper callers.
+        try:
+            globals()["WEBHOOK_DB_READY"] = bool(webhook_runtime.state.db_ready)
+        except Exception:
+            pass
     except Exception as exc:
         print(f"Webhook worker startup failed: {exc}")
     # Catalog cache: avoid blocking startup in production
@@ -6442,98 +6162,6 @@ async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dic
         except Exception:
             pass
 
-@app.api_route("/webhook", methods=["GET", "POST"])
-async def webhook(request: Request, background_tasks: BackgroundTasks):
-    """WhatsApp webhook endpoint"""
-    if request.method == "GET":
-        # --- Meta verification logic ---
-        params = dict(request.query_params)
-        mode = params.get("hub.mode")
-        token = params.get("hub.verify_token")
-        challenge = params.get("hub.challenge")
-        
-        _vlog(f"🔐 Webhook verification: mode={mode}, token={token}, challenge={challenge}")
-        
-        if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
-            _vlog("✅ Webhook verified successfully")
-            return PlainTextResponse(challenge)
-        _vlog("❌ Webhook verification failed")
-        return PlainTextResponse("Verification failed", status_code=403)
-        
-    elif request.method == "POST":
-        # Optional: verify Meta webhook signature when META_APP_SECRET is set
-        try:
-            if META_APP_SECRET:
-                body_bytes = await request.body()
-                sig_header = request.headers.get("X-Hub-Signature-256", "")
-                expected = hmac.new(META_APP_SECRET.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
-                # Header format: sha256=<hexdigest>
-                presented = sig_header.split("=", 1)[1] if "=" in sig_header else sig_header
-                if not presented or not hmac.compare_digest(presented, expected):
-                    _vlog("❌ Invalid webhook signature")
-                    return PlainTextResponse("Invalid signature", status_code=401)
-                data = json.loads(body_bytes.decode("utf-8") or "{}")
-            else:
-                data = await request.json()
-        except Exception:
-            return PlainTextResponse("Bad Request", status_code=400)
-        _vlog("📥 Incoming Webhook Payload:")
-        _vlog(json.dumps(data, indent=2))
-
-        # Attach workspace hint derived from the phone_number_id (lets async workers route to the correct tenant DB)
-        try:
-            value = data.get('entry', [{}])[0].get('changes', [{}])[0].get('value', {})
-            meta = value.get("metadata") or {}
-            incoming_phone_id = str(meta.get("phone_number_id") or "")
-            if ALLOWED_PHONE_NUMBER_IDS and incoming_phone_id and (incoming_phone_id not in ALLOWED_PHONE_NUMBER_IDS):
-                _vlog(
-                    f"⏭️ Webhook ignored at ingress for phone_number_id {incoming_phone_id} (allowed {sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:10]})"
-                )
-                return {"ok": True}
-            ws = PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or DEFAULT_WORKSPACE
-            data["_workspace"] = _coerce_workspace(ws)
-        except Exception:
-            pass
-
-        # ACK fast: enqueue for background processing. Avoid slow DB calls here to prevent Cloud Run 504s.
-        try:
-            # Best practice: persist the event durably before returning 200.
-            if getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE:
-                # If schema isn't ready, fall back to Redis/in-memory instead of 503-ing every time.
-                if await _ensure_webhook_events_table():
-                    try:
-                        await asyncio.wait_for(_db_enqueue_webhook(data), timeout=max(0.2, float(WEBHOOK_ENQUEUE_TIMEOUT_SECONDS)))
-                    except Exception:
-                        # DB enqueue is best-effort; fallback to Redis/in-memory to keep webhook fast.
-                        r = getattr(redis_manager, "redis_client", None)
-                        if r and WEBHOOK_USE_REDIS_STREAM:
-                            await r.xadd(WEBHOOK_STREAM_KEY, {"payload": json.dumps(data)})
-                        else:
-                            WEBHOOK_QUEUE.put_nowait(data)
-                else:
-                    r = getattr(redis_manager, "redis_client", None)
-                    if r and WEBHOOK_USE_REDIS_STREAM:
-                        await r.xadd(WEBHOOK_STREAM_KEY, {"payload": json.dumps(data)})
-                    else:
-                        WEBHOOK_QUEUE.put_nowait(data)
-            else:
-                # Otherwise, use Redis Streams if available; else fallback to in-memory.
-                r = getattr(redis_manager, "redis_client", None)
-                if r and WEBHOOK_USE_REDIS_STREAM:
-                    await r.xadd(WEBHOOK_STREAM_KEY, {"payload": json.dumps(data)})
-                else:
-                    WEBHOOK_QUEUE.put_nowait(data)
-        except asyncio.QueueFull:
-            return PlainTextResponse("Webhook queue full", status_code=503)
-        except Exception:
-            # If we couldn't persist/enqueue, fail fast so Meta retries.
-            return PlainTextResponse("Webhook enqueue failed", status_code=503)
-
-        # Also attach a no-op background task to keep FastAPI from optimizing away background infrastructure
-        # and to make it explicit that this endpoint is async-by-design.
-        background_tasks.add_task(lambda: None)
-        return {"ok": True}
-
 @app.post("/test-media-upload")
 async def test_media_upload(file: UploadFile = File(...)):
     """Test endpoint to debug media upload issues"""
@@ -6677,22 +6305,65 @@ async def get_online_users():
 async def mark_conversation_read(user_id: str, message_ids: List[str] = Body(None)):
     """Mark messages as read"""
     try:
+        ids: List[str] | None = None
         if message_ids:
-            message_ids = list(set(message_ids))
-        print(f"Marking messages as read: {message_ids}")
-        await db_manager.mark_messages_as_read(user_id, message_ids)
-        if message_ids:
-            for mid in message_ids:
-                try:
-                    await messenger.mark_message_as_read(mid)
-                except Exception as e:
-                    print(f"Failed to send read receipt for {mid}: {e}")
+            try:
+                # Dedupe but keep stable order
+                seen = set()
+                ids = []
+                for mid in message_ids:
+                    mid = str(mid)
+                    if not mid or mid in seen:
+                        continue
+                    seen.add(mid)
+                    ids.append(mid)
+            except Exception:
+                ids = list(set([str(x) for x in message_ids if x]))
 
-        await connection_manager.send_to_user(user_id, {
-            "type": "messages_marked_read",
-            "data": {"user_id": user_id, "message_ids": message_ids}
-        })
-        
+        # Safety cap: mark-read should be cheap; client can retry if needed.
+        if ids and len(ids) > 500:
+            ids = ids[:500]
+
+        print(f"Marking messages as read: {ids}")
+
+        # DB write must not hang long enough to produce Cloud Run 504.
+        await asyncio.wait_for(
+            db_manager.mark_messages_as_read(user_id, ids),
+            timeout=max(0.2, float(MARK_READ_DB_TIMEOUT_SECONDS)),
+        )
+
+        # Fire-and-forget WhatsApp read receipts; never block the HTTP response on them.
+        if ids:
+            async def _send_receipts(_ids: list[str]):
+                # Small concurrency limit to avoid stampeding the WhatsApp API.
+                sem = asyncio.Semaphore(int(os.getenv("MARK_READ_WA_MAX_CONCURRENCY", "5")))
+
+                async def _one(mid: str):
+                    async with sem:
+                        try:
+                            await messenger.mark_message_as_read(mid)
+                        except Exception as exc:
+                            print(f"Failed to send read receipt for {mid}: {exc}")
+
+                try:
+                    await asyncio.gather(*[_one(mid) for mid in _ids])
+                except Exception:
+                    pass
+
+            try:
+                asyncio.create_task(_send_receipts(ids))
+            except Exception:
+                pass
+
+        # Best-effort notify active chat UI (if connected).
+        try:
+            await connection_manager.send_to_user(user_id, {
+                "type": "messages_marked_read",
+                "data": {"user_id": user_id, "message_ids": ids}
+            })
+        except Exception:
+            pass
+
         return {"status": "success"}
     except Exception as e:
         print(f"Error marking messages as read: {e}")
@@ -6706,6 +6377,8 @@ async def get_active_users(_: dict = Depends(require_admin)):
 # In-process fallback cache for /conversations (only used when Redis is unavailable and DB is temporarily slow).
 _CONVERSATIONS_FALLBACK_CACHE: dict[str, tuple[float, list]] = {}
 _CONVERSATIONS_FALLBACK_TTL_SECONDS = 60.0
+# Prevent stampedes: only allow a small number of expensive inbox queries concurrently per instance.
+_CONVERSATIONS_INFLIGHT_SEM = asyncio.Semaphore(int(os.getenv("CONVERSATIONS_MAX_INFLIGHT", "2")))
 
 @app.get("/conversations")
 async def get_conversations(
@@ -6745,15 +6418,16 @@ async def get_conversations(
             cache_key = None
 
         async def _fetch():
-            return await db_manager.get_conversations_with_stats(
-                q=q,
-                unread_only=unread_only,
-                assigned=assigned,
-                tags=tag_list,
-                limit=max(1, min(limit, 500)),
-                offset=max(0, offset),
-                viewer_agent=None,
-            )
+            async with _CONVERSATIONS_INFLIGHT_SEM:
+                return await db_manager.get_conversations_with_stats(
+                    q=q,
+                    unread_only=unread_only,
+                    assigned=assigned,
+                    tags=tag_list,
+                    limit=max(1, min(limit, 500)),
+                    offset=max(0, offset),
+                    viewer_agent=None,
+                )
 
         # Hard timeout so Cloud Run doesn't return 504 under load.
         conversations = await asyncio.wait_for(_fetch(), timeout=max(1.0, float(CONVERSATIONS_DB_TIMEOUT_SECONDS)))
@@ -7246,15 +6920,15 @@ async def health_check():
             "phone_id_to_workspace": PHONE_ID_TO_WORKSPACE,
         },
         "webhook": {
-            "backend": _webhook_backend_name(),
+            "backend": webhook_runtime.backend_name(),
             "queue_size": getattr(WEBHOOK_QUEUE, "qsize", lambda: None)(),
             "queue_maxsize": int(WEBHOOK_QUEUE_MAXSIZE),
             "workers": int(max(1, int(WEBHOOK_WORKERS))),
             "use_redis_stream": bool(WEBHOOK_USE_REDIS_STREAM and bool(redis_manager.redis_client)),
             "stream_key": WEBHOOK_STREAM_KEY if (WEBHOOK_USE_REDIS_STREAM and redis_manager.redis_client) else None,
             "dlq_key": WEBHOOK_STREAM_DLQ_KEY if (WEBHOOK_USE_REDIS_STREAM and redis_manager.redis_client) else None,
-            "use_db_queue": bool(getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE and WEBHOOK_DB_READY),
-            "db_queue_ready": bool(WEBHOOK_DB_READY),
+            "use_db_queue": bool(getattr(db_manager, "use_postgres", False) and WEBHOOK_USE_DB_QUEUE and bool(webhook_runtime.state.db_ready)),
+            "db_queue_ready": bool(webhook_runtime.state.db_ready),
         },
         "active_connections": len(connection_manager.active_connections),
         "timestamp": datetime.utcnow().isoformat(),
@@ -7401,16 +7075,34 @@ async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, 
     """
     try:
         if since:
-            return await db_manager.get_messages_since(user_id, since, limit=max(1, min(limit, 500)))
+            return await asyncio.wait_for(
+                db_manager.get_messages_since(user_id, since, limit=max(1, min(limit, 500))),
+                timeout=max(0.5, float(MESSAGES_DB_TIMEOUT_SECONDS)),
+            )
         if before:
-            return await db_manager.get_messages_before(user_id, before, limit=max(1, min(limit, 200)))
+            return await asyncio.wait_for(
+                db_manager.get_messages_before(user_id, before, limit=max(1, min(limit, 200))),
+                timeout=max(0.5, float(MESSAGES_DB_TIMEOUT_SECONDS)),
+            )
         # First try to get from cache for the newest window
         if offset == 0:
             cached_messages = await redis_manager.get_recent_messages(user_id, limit)
             if cached_messages:
                 return cached_messages
-        messages = await db_manager.get_messages(user_id, offset, limit)
+        messages = await asyncio.wait_for(
+            db_manager.get_messages(user_id, offset, limit),
+            timeout=max(0.5, float(MESSAGES_DB_TIMEOUT_SECONDS)),
+        )
         return messages
+    except asyncio.TimeoutError:
+        # Degrade gracefully: serve cached recent window if available, else return empty quickly.
+        try:
+            cached_messages = await redis_manager.get_recent_messages(user_id, max(1, min(limit, 200)))
+            if cached_messages:
+                return cached_messages
+        except Exception:
+            pass
+        return []
     except Exception as e:
         print(f"Error fetching messages: {e}")
         return []
@@ -8808,7 +8500,10 @@ async def cashin(
 @app.get("/conversations/{user_id}/notes")
 async def get_conversation_notes(user_id: str):
     try:
-        notes = await db_manager.list_notes(user_id)
+        notes = await asyncio.wait_for(
+            db_manager.list_notes(user_id),
+            timeout=max(0.5, float(NOTES_DB_TIMEOUT_SECONDS)),
+        )
         # Attach signed URLs for any GCS-backed media so browser can access
         enriched = []
         for n in notes:
@@ -8821,6 +8516,9 @@ async def get_conversation_notes(user_id: str):
                 pass
             enriched.append(n)
         return enriched
+    except asyncio.TimeoutError:
+        # Notes are non-critical; avoid blocking the UI under DB load.
+        return []
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list notes: {exc}")
 
@@ -8844,7 +8542,10 @@ async def create_conversation_note(
         }
         if payload["type"] not in ("text", "audio"):
             payload["type"] = "text"
-        stored = await db_manager.add_note(payload)
+        stored = await asyncio.wait_for(
+            db_manager.add_note(payload),
+            timeout=max(0.5, float(NOTES_DB_TIMEOUT_SECONDS)),
+        )
         # Include signed_url in the response for immediate playback
         try:
             media_url = stored.get("url")
@@ -8856,6 +8557,8 @@ async def create_conversation_note(
         return stored
     except HTTPException:
         raise
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Notes temporarily busy, please retry")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to add note: {exc}")
 
@@ -8863,7 +8566,12 @@ async def create_conversation_note(
 @app.delete("/conversations/notes/{note_id}")
 async def delete_conversation_note(note_id: int):
     try:
-        await db_manager.delete_note(note_id)
+        await asyncio.wait_for(
+            db_manager.delete_note(note_id),
+            timeout=max(0.5, float(NOTES_DB_TIMEOUT_SECONDS)),
+        )
         return {"ok": True}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Notes temporarily busy, please retry")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to delete note: {exc}")

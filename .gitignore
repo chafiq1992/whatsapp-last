@@ -15,6 +15,7 @@ Thumbs.db
 # Runtime
 backend/uploads/
 backend/media/
+media/
 *.db
 backend/catalog_cache.json
 catalog_cache.json

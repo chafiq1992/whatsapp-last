@@ -5525,21 +5525,56 @@ except Exception as exc:
     SHOPIFY_ROUTES_ENABLED = False
     SHOPIFY_ROUTES_ERROR = str(exc)
 
-if not SHOPIFY_ROUTES_ENABLED:
-    # Provide stable endpoints so the frontend doesn't hard-fail with 404 when Shopify is misconfigured.
-    @app.get("/search-customer")
-    async def _search_customer_disabled(phone_number: str):
-        raise HTTPException(
-            status_code=503,
-            detail=f"Shopify integration disabled: {SHOPIFY_ROUTES_ERROR or 'not configured'}",
-        )
+def _has_route(path: str, method: str) -> bool:
+    try:
+        m = str(method or "").upper()
+        for r in getattr(app, "routes", []) or []:
+            try:
+                if getattr(r, "path", None) != path:
+                    continue
+                methods = getattr(r, "methods", None) or set()
+                if m in methods:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
 
+# Ensure these endpoints exist even if the Shopify router fails to mount (prevents 404s in the UI).
+if not _has_route("/search-customer", "GET"):
+    @app.get("/search-customer")
+    async def search_customer_endpoint(phone_number: str):
+        try:
+            from .shopify_integration import fetch_customer_by_phone  # type: ignore
+            data = await fetch_customer_by_phone(phone_number)
+            if not data:
+                raise HTTPException(status_code=404, detail="Customer not found")
+            if isinstance(data, dict) and data.get("status") == 403:
+                raise HTTPException(status_code=403, detail=data.get("detail") or "Forbidden")
+            if isinstance(data, dict) and data.get("error"):
+                raise HTTPException(status_code=int(data.get("status", 500)), detail=data.get("detail") or data.get("error"))
+            return data
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Config/import errors show as 503 (not 404) so the frontend can handle it.
+            raise HTTPException(status_code=503, detail=f"Shopify integration disabled: {SHOPIFY_ROUTES_ERROR or str(exc) or 'not configured'}")
+
+if not _has_route("/search-customers-all", "GET"):
     @app.get("/search-customers-all")
-    async def _search_customers_all_disabled(phone_number: str):
-        raise HTTPException(
-            status_code=503,
-            detail=f"Shopify integration disabled: {SHOPIFY_ROUTES_ERROR or 'not configured'}",
-        )
+    async def search_customers_all_endpoint(phone_number: str):
+        try:
+            # Reuse the existing implementation inside the integration module if available.
+            from . import shopify_integration as si  # type: ignore
+            fn = getattr(si, "search_customers_all", None)
+            if callable(fn):
+                return await fn(phone_number=phone_number)
+            raise RuntimeError("search_customers_all not available")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Shopify integration disabled: {SHOPIFY_ROUTES_ERROR or str(exc) or 'not configured'}")
 
 @app.get("/debug/shopify")
 async def debug_shopify(_: dict = Depends(require_admin)):
@@ -7244,6 +7279,33 @@ async def debug_workspace(request: Request, _: dict = Depends(require_admin)):
             "kids_phone_number_id_configured": bool((WHATSAPP_CONFIG_BY_WORKSPACE.get("irrakids") or {}).get("phone_number_id")),
         },
     }
+
+
+@app.get("/debug/routes")
+async def debug_routes(_: dict = Depends(require_admin)):
+    """Admin-only: list registered routes (useful to confirm deployed revision exposes expected endpoints)."""
+    try:
+        routes = []
+        for r in getattr(app, "routes", []) or []:
+            try:
+                path = getattr(r, "path", None)
+                methods = sorted(list(getattr(r, "methods", []) or []))
+                name = getattr(r, "name", None)
+                if path:
+                    routes.append({"path": str(path), "methods": methods, "name": str(name or "")})
+            except Exception:
+                continue
+        routes.sort(key=lambda x: x["path"])
+        return {
+            "build_id": APP_BUILD_ID,
+            "started_at": APP_STARTED_AT,
+            "shopify_routes_enabled": bool(SHOPIFY_ROUTES_ENABLED),
+            "shopify_error": SHOPIFY_ROUTES_ERROR,
+            "count": len(routes),
+            "routes": routes,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list routes: {exc}")
 
 # After all routes: mount the static folder for any other assets under /static
 try:

@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { HiChatBubbleLeftRight, HiInboxArrowDown, HiArchiveBox, HiCog6Tooth, HiUserCircle, HiPlus } from 'react-icons/hi2';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { HiChatBubbleLeftRight, HiInboxArrowDown, HiArchiveBox, HiCog6Tooth, HiUserCircle, HiPlus, HiArrowLeftOnRectangle } from 'react-icons/hi2';
 import { FaRobot } from 'react-icons/fa';
 import api from './api';
 
@@ -18,6 +18,7 @@ export default function MiniSidebar({
 }) {
 	const [showDropdown, setShowDropdown] = useState(false);
 	const [agents, setAgents] = useState([]);
+  const [onlineAgents, setOnlineAgents] = useState([]);
 	const buttonRef = useRef(null);
 	const dropdownRef = useRef(null);
   const [showNewChat, setShowNewChat] = useState(false);
@@ -31,6 +32,37 @@ export default function MiniSidebar({
 			} catch {}
 		})();
 	}, []);
+
+  useEffect(() => {
+    let alive = true;
+
+    const normalize = (data) => {
+      if (!data) return [];
+      const arr = Array.isArray(data) ? data : (Array.isArray(data?.online_agents) ? data.online_agents : []);
+      return arr
+        .map((x) => (typeof x === 'string' ? x : (x?.username || '')))
+        .map((x) => String(x || '').trim())
+        .filter(Boolean);
+    };
+
+    const load = async () => {
+      try {
+        const res = await api.get('/agents/online');
+        if (!alive) return;
+        setOnlineAgents(normalize(res?.data));
+      } catch {
+        if (!alive) return;
+        setOnlineAgents([]);
+      }
+    };
+
+    load();
+    const t = setInterval(load, 10000);
+    return () => {
+      alive = false;
+      try { clearInterval(t); } catch {}
+    };
+  }, [workspace]);
 
 	useEffect(() => {
 		const handler = (e) => {
@@ -52,6 +84,22 @@ export default function MiniSidebar({
 			return (a?.name || currentAgent || '').toString();
 		} catch { return currentAgent || ''; }
 	})();
+
+  const onlineSet = useMemo(() => {
+    try {
+      return new Set((onlineAgents || []).map((x) => String(x || '').toLowerCase()));
+    } catch {
+      return new Set();
+    }
+  }, [onlineAgents]);
+
+  const onlineList = useMemo(() => {
+    try {
+      return (agents || []).filter((a) => onlineSet.has(String(a?.username || '').toLowerCase()));
+    } catch {
+      return [];
+    }
+  }, [agents, onlineSet]);
 
 	return (
 		<div className="w-16 bg-gray-900 border-r border-gray-800 h-full flex flex-col items-center justify-between py-3 relative">
@@ -131,6 +179,7 @@ export default function MiniSidebar({
 				>
 					<HiArchiveBox />
 				</button>
+        <div className="relative">
 				<button
 					type="button"
 					title="Internal chats"
@@ -143,10 +192,43 @@ export default function MiniSidebar({
 				>
 					<HiChatBubbleLeftRight />
 				</button>
+          {onlineList.length > 0 && (
+            <div
+              className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center border border-gray-900"
+              title={`${onlineList.length} agent(s) online`}
+            >
+              {onlineList.length}
+            </div>
+          )}
+        </div>
 				{showDropdown && (
 					<div ref={dropdownRef} className="absolute left-16 top-16 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 w-64 max-h-72 overflow-auto">
 						<div className="p-2 text-sm text-gray-300 border-b border-gray-800 sticky top-0 bg-gray-900">Internal chats</div>
 						<div className="p-1">
+              {/* Online agents (green) */}
+              <div className="px-2 pt-2 pb-1 text-xs text-gray-400">Online agents</div>
+              {onlineList.map((a) => (
+                <button
+                  key={`online:${a.username}`}
+                  type="button"
+                  onClick={() => {
+                    if (onSelectInternalAgent) onSelectInternalAgent(a.username);
+                    setShowDropdown(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-2 py-2 hover:bg-gray-800 rounded text-left"
+                  title={`DM @${a.name || a.username}`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                  <HiUserCircle className="text-2xl text-emerald-400" />
+                  <span className="truncate text-emerald-300">@{a.name || a.username}</span>
+                </button>
+              ))}
+              {onlineList.length === 0 && (
+                <div className="text-sm text-gray-500 px-2 py-2">No agents online</div>
+              )}
+
+              <div className="my-1 border-t border-gray-800" />
+              <div className="px-2 pt-1 pb-1 text-xs text-gray-400">All agents</div>
 							{agents.map(a => (
 								<button
 									key={a.username}
@@ -158,7 +240,12 @@ export default function MiniSidebar({
 									className="w-full flex items-center gap-2 px-2 py-2 hover:bg-gray-800 rounded text-left"
 									title={`DM @${a.name || a.username}`}
 								>
-									<HiUserCircle className="text-2xl" />
+									{onlineSet.has(String(a.username || '').toLowerCase()) ? (
+                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                  ) : (
+                    <span className="w-2 h-2 rounded-full bg-gray-600" />
+                  )}
+									<HiUserCircle className={`text-2xl ${onlineSet.has(String(a.username || '').toLowerCase()) ? 'text-emerald-400' : ''}`} />
 									<span className="truncate">@{a.name || a.username}</span>
 								</button>
 							))}
@@ -204,6 +291,22 @@ export default function MiniSidebar({
 					<FaRobot />
 				</button>
 				)}
+        <button
+          type="button"
+          title="Logout"
+          onClick={async () => {
+            try { await api.post('/auth/logout'); } catch {}
+            try { sessionStorage.removeItem('agent_access_token'); } catch {}
+            try { sessionStorage.removeItem('agent_refresh_token'); } catch {}
+            try { localStorage.removeItem('agent_access_token'); } catch {}
+            try { localStorage.removeItem('agent_refresh_token'); } catch {}
+            try { localStorage.removeItem('agent_is_admin'); } catch {}
+            try { window.location.replace('/login'); } catch {}
+          }}
+          className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-gray-800 text-gray-300 hover:bg-gray-700"
+        >
+          <HiArrowLeftOnRectangle />
+        </button>
 				<button
 					type="button"
 					title="Settings"

@@ -491,8 +491,27 @@ async def get_current_agent(request: Request) -> dict:
     """Return the authenticated agent (username/is_admin) or raise 401."""
     if DISABLE_AUTH:
         return {"username": "admin", "is_admin": True}
-    token = _extract_access_token_from_request(request)
-    parsed = parse_access_token(token or "")
+    # IMPORTANT: Browsers may carry both an HttpOnly cookie token and a fallback Authorization header token.
+    # If the header token is stale/expired but the cookie is fresh (after /auth/refresh), preferring the header
+    # causes intermittent 401s (e.g., analytics calls showing "Unauthorized"). So: try header first, then cookie.
+    header_token: Optional[str] = None
+    cookie_token: Optional[str] = None
+    try:
+        auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+        if auth_header:
+            parts = auth_header.split()
+            if len(parts) >= 2 and parts[0].lower() == "bearer":
+                header_token = parts[1].strip()
+    except Exception:
+        header_token = None
+    try:
+        cookie_token = request.cookies.get(ACCESS_COOKIE_NAME)  # type: ignore[arg-type]
+    except Exception:
+        cookie_token = None
+
+    parsed = parse_access_token(header_token or "")
+    if not parsed or not parsed.get("username"):
+        parsed = parse_access_token(cookie_token or "")
     if not parsed or not parsed.get("username"):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return {"username": parsed["username"], "is_admin": bool(parsed.get("is_admin"))}
@@ -6486,6 +6505,57 @@ async def list_agents_public(_: dict = Depends(get_current_agent)):
     agents = await auth_db_manager.list_agents()
     # Do not expose password hash; list_agents() already omits it. Also omit created_at/is_admin for non-admin UI.
     return [{"username": a.get("username"), "name": a.get("name")} for a in (agents or [])]
+
+
+@app.get("/agents/online")
+async def list_online_agents(_: dict = Depends(get_current_agent)):
+    """Return agents that are considered 'online' from login until logout.
+
+    Definition: agent has at least one active refresh token (unrevoked + unexpired).
+    This matches the product requirement and is robust across multiple server instances.
+    """
+    online_usernames: set[str] = set()
+    now = datetime.now(timezone.utc)
+    try:
+        async with auth_db_manager._conn() as db:
+            query = auth_db_manager._convert(
+                "SELECT agent_username, expires_at, revoked_at FROM agent_refresh_tokens WHERE revoked_at IS NULL"
+            )
+            if auth_db_manager.use_postgres:
+                rows = await db.fetch(query)
+                rows = [dict(r) for r in (rows or [])]
+            else:
+                cur = await db.execute(query, ())
+                rows = await cur.fetchall()
+                rows = [dict(r) for r in (rows or [])]
+        for r in rows or []:
+            u = str((r or {}).get("agent_username") or "").strip()
+            if not u:
+                continue
+            exp = _parse_dt_any((r or {}).get("expires_at"))
+            if exp and exp >= now:
+                online_usernames.add(u)
+    except Exception:
+        online_usernames = set()
+
+    # Attach friendly names (best-effort).
+    name_by_username: dict[str, str] = {}
+    try:
+        agents = await auth_db_manager.list_agents()
+        for a in agents or []:
+            u = str((a or {}).get("username") or "").strip()
+            if not u:
+                continue
+            n = str((a or {}).get("name") or "").strip()
+            if n:
+                name_by_username[u] = n
+    except Exception:
+        pass
+
+    out: list[dict] = []
+    for u in sorted(list(online_usernames), key=lambda x: x.lower()):
+        out.append({"username": u, "name": name_by_username.get(u) or u, "online": True})
+    return out
 
 # ----- Agents & assignments management -----
 

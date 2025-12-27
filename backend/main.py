@@ -2646,6 +2646,24 @@ class DatabaseManager:
         if bucket not in ("hour", "day"):
             bucket = "day"
 
+        # Normalize incoming ISO timestamps so Postgres CAST(... AS TIMESTAMP) won't choke on timezone suffixes like "Z".
+        # We compare all timestamps after truncating to the first 19 chars ("YYYY-MM-DDTHH:MM:SS"), so do the same here.
+        def _iso19(s: str) -> str:
+            try:
+                dt = _parse_dt_any(s)
+                if not dt:
+                    raise ValueError("invalid datetime")
+                dt = dt.astimezone(timezone.utc)
+                return dt.strftime("%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                # Best-effort fallback: strip to 19 chars, replace space with T, drop trailing Z
+                ss = str(s or "").replace("Z", "").replace("z", "")
+                ss = ss.replace(" ", "T")
+                return ss[:19]
+
+        start_iso19 = _iso19(start_iso)
+        end_iso19 = _iso19(end_iso)
+
         def _bucket_expr_sqlite(col: str) -> str:
             # Normalize to "YYYY-MM-DDTHH:00:00" or "YYYY-MM-DDT00:00:00" text
             if bucket == "hour":
@@ -2674,7 +2692,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                rows = await db.fetch(q_clicks, start_iso, end_iso)
+                rows = await db.fetch(q_clicks, start_iso19, end_iso19)
                 clicks = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
             else:
                 b_click = _bucket_expr_sqlite("ts")
@@ -2688,7 +2706,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                cur = await db.execute(q_clicks, (start_iso, end_iso))
+                cur = await db.execute(q_clicks, (start_iso19, end_iso19))
                 rows = await cur.fetchall()
                 clicks = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
 
@@ -2707,7 +2725,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                rows = await db.fetch(q_init, src, start_iso, end_iso)
+                rows = await db.fetch(q_init, src, start_iso19, end_iso19)
                 initiated = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
             else:
                 b_init = _bucket_expr_sqlite("source_first_inbound_ts")
@@ -2723,7 +2741,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                cur = await db.execute(q_init, (src, start_iso, end_iso))
+                cur = await db.execute(q_init, (src, start_iso19, end_iso19))
                 rows = await cur.fetchall()
                 initiated = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
 
@@ -2742,7 +2760,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                rows = await db.fetch(q_msgs, src, start_iso, end_iso)
+                rows = await db.fetch(q_msgs, src, start_iso19, end_iso19)
                 inbound_msgs = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
             else:
                 b_msg = _bucket_expr_sqlite("COALESCE(server_ts, timestamp)")
@@ -2758,7 +2776,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                cur = await db.execute(q_msgs, (src, start_iso, end_iso))
+                cur = await db.execute(q_msgs, (src, start_iso19, end_iso19))
                 rows = await cur.fetchall()
                 inbound_msgs = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
 
@@ -2777,7 +2795,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                rows = await db.fetch(q_ord, src, start_iso, end_iso)
+                rows = await db.fetch(q_ord, src, start_iso19, end_iso19)
                 orders = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
             else:
                 b_ord = _bucket_expr_sqlite("oc.created_at")
@@ -2793,7 +2811,7 @@ class DatabaseManager:
                     ORDER BY bucket
                     """
                 )
-                cur = await db.execute(q_ord, (src, start_iso, end_iso))
+                cur = await db.execute(q_ord, (src, start_iso19, end_iso19))
                 rows = await cur.fetchall()
                 orders = {str(r["bucket"]): int(r["c"] or 0) for r in rows}
 

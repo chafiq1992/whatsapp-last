@@ -92,9 +92,17 @@ export default function AnalyticsPanel() {
       } catch (e) {
         setShopify(null);
         const status = e?.response?.status;
+        const payload = e?.response?.data;
         if (status === 401) setShopifyError('Website WhatsApp analytics: Unauthorized (please login again)');
         else if (status === 403) setShopifyError('Website WhatsApp analytics: Admin required');
-        else setShopifyError('Failed to load website WhatsApp analytics');
+        else if (status === 500) {
+          // Backend returns a structured payload with more detail.
+          const detail = (payload && (payload.detail || payload.error)) ? String(payload.detail || payload.error) : '';
+          const hint = (payload && payload.hint) ? String(payload.hint) : '';
+          const ws = (payload && payload.workspace) ? String(payload.workspace) : '';
+          const extra = [detail, ws ? `workspace=${ws}` : '', hint].filter(Boolean).join(' • ');
+          setShopifyError(extra ? `Failed to load website WhatsApp analytics • ${extra}` : 'Failed to load website WhatsApp analytics');
+        } else setShopifyError('Failed to load website WhatsApp analytics');
       }
     } catch (e) {
       setError('Failed to load analytics');

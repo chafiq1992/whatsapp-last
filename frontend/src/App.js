@@ -169,10 +169,19 @@ export default function App() {
   const fetchConversations = async ({ showSpinner = false } = {}) => {
     // Avoid overlapping fetches (helps prevent 504s under load + UI flicker)
     if (convFetchInFlightRef.current) return convFetchInFlightRef.current;
+    // Backoff on transient 503s so we don't stampede the backend during DB slowness
+    if (!fetchConversations._backoff) fetchConversations._backoff = { until: 0, ms: 0 };
+    try {
+      const now = Date.now();
+      if (fetchConversations._backoff.until && now < fetchConversations._backoff.until) {
+        return Promise.resolve();
+      }
+    } catch {}
     const p = (async () => {
       try {
         if (showSpinner) setLoadingConversations(true);
-        const res = await api.get(`${API_BASE}/conversations`);
+        // Keep the initial inbox fetch light; server defaults are also capped.
+        const res = await api.get(`${API_BASE}/conversations?limit=200&offset=0`);
         const data = res?.data;
         if (Array.isArray(data)) {
           setConversations(data);
@@ -183,8 +192,19 @@ export default function App() {
           const cached = await loadConversations();
           if (cached.length > 0) setConversations(cached);
         }
+        // Reset backoff on success
+        try { fetchConversations._backoff = { until: 0, ms: 0 }; } catch {}
       } catch (err) {
         console.error('Failed to fetch conversations:', err);
+        // If backend is temporarily busy, back off progressively (max ~30s).
+        try {
+          const status = err?.response?.status;
+          if (status === 503) {
+            const prev = fetchConversations._backoff?.ms || 0;
+            const next = Math.min(30000, prev ? Math.round(prev * 1.8) : 4000);
+            fetchConversations._backoff = { ms: next, until: Date.now() + next };
+          }
+        } catch {}
         const cached = await loadConversations();
         if (cached.length > 0) {
           setConversations(cached);

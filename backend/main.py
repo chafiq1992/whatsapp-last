@@ -5775,12 +5775,32 @@ async def _auth_middleware(request: StarletteRequest, call_next):
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 # Enable Shopify integration only if it can be imported/configured.
+SHOPIFY_ROUTES_ENABLED: bool = False
+SHOPIFY_ROUTES_ERROR: str | None = None
 try:
     from .shopify_integration import router as shopify_router  # type: ignore
     app.include_router(shopify_router)
     print("✅ Shopify integration routes enabled")
+    SHOPIFY_ROUTES_ENABLED = True
 except Exception as exc:
     print(f"⚠️ Shopify integration disabled: {exc}")
+    SHOPIFY_ROUTES_ENABLED = False
+    SHOPIFY_ROUTES_ERROR = str(exc)
+
+@app.get("/debug/shopify")
+async def debug_shopify(_: dict = Depends(require_admin)):
+    """Admin-only: confirm whether Shopify routes were mounted + basic config state."""
+    info: dict = {"enabled": bool(SHOPIFY_ROUTES_ENABLED), "error": SHOPIFY_ROUTES_ERROR}
+    try:
+        # Import lazily; this should not raise in our integration module, but keep it defensive.
+        from . import shopify_integration as si  # type: ignore
+        # Avoid leaking secrets; only report whether config appears present.
+        info["configured"] = bool(getattr(si, "STORE_URL", None)) and bool(getattr(si, "API_KEY", None))
+        info["store_url"] = str(getattr(si, "STORE_URL", "") or "")
+    except Exception as exc:
+        info["configured"] = False
+        info["import_error"] = str(exc)
+    return info
 
 
 # Mount the media directory to serve uploaded files
@@ -6683,6 +6703,10 @@ async def get_active_users(_: dict = Depends(require_admin)):
     """Get currently active users"""
     return {"active_users": connection_manager.get_active_users()}
 
+# In-process fallback cache for /conversations (only used when Redis is unavailable and DB is temporarily slow).
+_CONVERSATIONS_FALLBACK_CACHE: dict[str, tuple[float, list]] = {}
+_CONVERSATIONS_FALLBACK_TTL_SECONDS = 60.0
+
 @app.get("/conversations")
 async def get_conversations(
     q: Optional[str] = None,
@@ -6690,7 +6714,7 @@ async def get_conversations(
     assigned: Optional[str] = None,
     tags: Optional[str] = None,
     unresponded_only: bool = False,
-    limit: int = 1000,
+    limit: int = 200,
     offset: int = 0,
     agent: dict = Depends(get_current_agent),
 ):
@@ -6707,7 +6731,7 @@ async def get_conversations(
                 "assigned": assigned or "",
                 "tags": tag_list or [],
                 "unresponded_only": bool(unresponded_only),
-                "limit": int(max(1, min(limit, 1000))),
+                "limit": int(max(1, min(limit, 500))),
                 "offset": int(max(0, offset)),
             }
             cache_key = "conversations:%s:%s" % (
@@ -6726,7 +6750,7 @@ async def get_conversations(
                 unread_only=unread_only,
                 assigned=assigned,
                 tags=tag_list,
-                limit=max(1, min(limit, 1000)),
+                limit=max(1, min(limit, 500)),
                 offset=max(0, offset),
                 viewer_agent=None,
             )
@@ -6740,6 +6764,8 @@ async def get_conversations(
         try:
             if cache_key and isinstance(conversations, list):
                 await redis_manager.set_json(cache_key, conversations, ttl=5)
+                # Also keep a slightly longer in-process copy as a fallback for transient DB/Redis issues.
+                _CONVERSATIONS_FALLBACK_CACHE[cache_key] = (time.time(), conversations)
         except Exception:
             pass
         return conversations
@@ -6752,8 +6778,31 @@ async def get_conversations(
                     return cached
         except Exception:
             pass
+        # Fallback: in-process stale cache (covers Redis outage + transient DB slowness).
+        try:
+            if cache_key and cache_key in _CONVERSATIONS_FALLBACK_CACHE:
+                ts0, data = _CONVERSATIONS_FALLBACK_CACHE.get(cache_key) or (0.0, [])
+                if isinstance(data, list) and (time.time() - float(ts0)) <= float(_CONVERSATIONS_FALLBACK_TTL_SECONDS):
+                    return data
+        except Exception:
+            pass
         raise HTTPException(status_code=503, detail="Inbox temporarily busy, please retry")
     except Exception as e:
+        # If the DB is flaky, prefer returning a stale list instead of hard-failing the UI.
+        try:
+            if cache_key:
+                cached = await redis_manager.get_json(cache_key)
+                if isinstance(cached, list):
+                    return cached
+        except Exception:
+            pass
+        try:
+            if cache_key and cache_key in _CONVERSATIONS_FALLBACK_CACHE:
+                ts0, data = _CONVERSATIONS_FALLBACK_CACHE.get(cache_key) or (0.0, [])
+                if isinstance(data, list) and (time.time() - float(ts0)) <= float(_CONVERSATIONS_FALLBACK_TTL_SECONDS):
+                    return data
+        except Exception:
+            pass
         print(f"Error fetching conversations: {e}")
         return []
 

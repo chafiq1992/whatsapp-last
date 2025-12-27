@@ -1773,7 +1773,14 @@ class DatabaseManager:
             idx += 1
             return rep
 
-        query = re.sub(r"\?|:\w+", repl, query)
+        # IMPORTANT:
+        # - We support SQLite-style positional placeholders "?".
+        # - We support named placeholders like ":id" (used by some internal helpers).
+        #
+        # Do NOT treat time literals like "00:00:00" (":00") as placeholders.
+        # The old pattern (:\w+) matched ":00" and would rewrite SQL literals into "$1$2",
+        # breaking queries (e.g., analytics bucket formatting).
+        query = re.sub(r"\?|:[A-Za-z_]\w*", repl, query)
         return query
 
     # ── basic connection helper ──
@@ -5498,8 +5505,9 @@ async def _auth_middleware(request: StarletteRequest, call_next):
                 except Exception:
                     pass
     except Exception:
-        # Fail closed with a generic 401
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        # Do not mask unexpected server bugs as "Unauthorized" — it makes debugging impossible.
+        logging.getLogger(__name__).exception("Unhandled error in auth middleware")
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 # Expose Prometheus metrics
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")

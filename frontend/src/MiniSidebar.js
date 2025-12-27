@@ -101,6 +101,18 @@ export default function MiniSidebar({
     }
   }, [agents, onlineSet]);
 
+  const initialsOf = (name) => {
+    try {
+      const s = String(name || '').trim();
+      if (!s) return '?';
+      const parts = s.split(/\s+/).filter(Boolean);
+      if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    } catch {
+      return '?';
+    }
+  };
+
 	return (
 		<div className="w-16 bg-gray-900 border-r border-gray-800 h-full flex flex-col items-center justify-between py-3 relative">
 			{/* Upper section */}
@@ -179,7 +191,7 @@ export default function MiniSidebar({
 				>
 					<HiArchiveBox />
 				</button>
-        <div className="relative">
+        <div className="relative flex flex-col items-center">
 				<button
 					type="button"
 					title="Internal chats"
@@ -200,34 +212,43 @@ export default function MiniSidebar({
               {onlineList.length}
             </div>
           )}
+
+          {/* Online agents visible under the internal chats icon */}
+          {onlineList.length > 0 && (
+            <div className="mt-2 flex flex-col items-center gap-2">
+              {onlineList.slice(0, 4).map((a) => (
+                <button
+                  key={`online-pill:${a.username}`}
+                  type="button"
+                  onClick={() => {
+                    try {
+                      if (onSelectInternalAgent) onSelectInternalAgent(a.username);
+                    } catch {}
+                  }}
+                  title={`@${a.name || a.username} • online`}
+                  className="w-12 h-12 rounded-xl flex items-center justify-center bg-gray-800 border border-emerald-600 text-emerald-300 hover:bg-gray-700"
+                >
+                  <div className="relative w-full h-full flex items-center justify-center">
+                    <span className="text-xs font-bold tracking-wide">{initialsOf(a.name || a.username)}</span>
+                    <span className="absolute -bottom-1 -right-1 w-3 h-3 rounded-full bg-emerald-500 border border-gray-900" />
+                  </div>
+                </button>
+              ))}
+              {onlineList.length > 4 && (
+                <div
+                  className="w-12 h-8 rounded-xl flex items-center justify-center bg-gray-800 border border-emerald-700 text-emerald-300 text-xs"
+                  title={`${onlineList.length - 4} more online`}
+                >
+                  +{onlineList.length - 4}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 				{showDropdown && (
 					<div ref={dropdownRef} className="absolute left-16 top-16 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 w-64 max-h-72 overflow-auto">
 						<div className="p-2 text-sm text-gray-300 border-b border-gray-800 sticky top-0 bg-gray-900">Internal chats</div>
 						<div className="p-1">
-              {/* Online agents (green) */}
-              <div className="px-2 pt-2 pb-1 text-xs text-gray-400">Online agents</div>
-              {onlineList.map((a) => (
-                <button
-                  key={`online:${a.username}`}
-                  type="button"
-                  onClick={() => {
-                    if (onSelectInternalAgent) onSelectInternalAgent(a.username);
-                    setShowDropdown(false);
-                  }}
-                  className="w-full flex items-center gap-2 px-2 py-2 hover:bg-gray-800 rounded text-left"
-                  title={`DM @${a.name || a.username}`}
-                >
-                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                  <HiUserCircle className="text-2xl text-emerald-400" />
-                  <span className="truncate text-emerald-300">@{a.name || a.username}</span>
-                </button>
-              ))}
-              {onlineList.length === 0 && (
-                <div className="text-sm text-gray-500 px-2 py-2">No agents online</div>
-              )}
-
-              <div className="my-1 border-t border-gray-800" />
               <div className="px-2 pt-1 pb-1 text-xs text-gray-400">All agents</div>
 							{agents.map(a => (
 								<button

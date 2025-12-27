@@ -6118,6 +6118,12 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 
     # Connect after auth so we can attach reliable agent identity
     await connection_manager.connect(websocket, user_id, client_info={"agent": agent_username}, workspace=ws)
+    # Mark activity on WS connect (presence should work even if the agent only has WS open).
+    try:
+        if agent_username:
+            await redis_manager.touch_agent_last_seen(agent_username, workspace=ws)
+    except Exception:
+        pass
     if user_id == "admin":
         # Best-effort: mark the shared inbox channel in DB for legacy admin-user discovery.
         # Do not let DB issues kill the WS connection (agents still need realtime).
@@ -6171,6 +6177,17 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dict):
     """Handle incoming WebSocket messages from client"""
     message_type = data.get("type")
+
+    # Any WS message counts as activity for the connected agent (best-effort).
+    try:
+        meta0 = connection_manager.connection_metadata.get(websocket) or {}
+        ws0 = meta0.get("workspace") or get_current_workspace()
+        agent0 = ((meta0.get("client_info") or {}) or {}).get("agent")
+        agent0 = str(agent0 or "").strip()
+        if agent0:
+            await redis_manager.touch_agent_last_seen(agent0, workspace=str(ws0))
+    except Exception:
+        pass
     
     if message_type == "send_message":
         message_data = data.get("data", {})
@@ -6656,13 +6673,31 @@ async def list_online_agents(_: dict = Depends(get_current_agent)):
             n = str((a or {}).get("name") or "").strip()
             if n:
                 name_by_username[u] = n
-            # Determine online/offline by last_seen
+
+            # Preferred: Redis-backed last_seen
             try:
-                last = await redis_manager.get_agent_last_seen(u, workspace=ws) if getattr(redis_manager, "redis_client", None) else None
-                if last is not None and (now - float(last)) <= float(INACTIVITY_TIMEOUT_SECONDS):
-                    online_usernames.add(u)
+                if getattr(redis_manager, "redis_client", None):
+                    last = await redis_manager.get_agent_last_seen(u, workspace=ws)
+                    if last is not None and (now - float(last)) <= float(INACTIVITY_TIMEOUT_SECONDS):
+                        online_usernames.add(u)
             except Exception:
-                continue
+                pass
+
+        # Fallback: if Redis is not connected, use active WebSocket connections as a best-effort online signal.
+        if not getattr(redis_manager, "redis_client", None):
+            try:
+                for meta in (connection_manager.connection_metadata or {}).values():
+                    try:
+                        if (meta.get("workspace") or "") != ws:
+                            continue
+                        agent_username = ((meta.get("client_info") or {}) or {}).get("agent")
+                        agent_username = str(agent_username or "").strip()
+                        if agent_username:
+                            online_usernames.add(agent_username)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
     except Exception:
         pass
 

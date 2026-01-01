@@ -2063,6 +2063,15 @@ class DatabaseManager:
                     value TEXT
                 );
 
+                -- Automation rule stats (durable counters; avoids reliance on Redis)
+                CREATE TABLE IF NOT EXISTS automation_rule_stats (
+                    rule_id         TEXT PRIMARY KEY,
+                    triggers        INTEGER NOT NULL DEFAULT 0,
+                    messages_sent   INTEGER NOT NULL DEFAULT 0,
+                    tags_added      INTEGER NOT NULL DEFAULT 0,
+                    last_trigger_ts TEXT
+                );
+
                 -- Website (Shopify) WhatsApp click tracking (public, append-only)
                 CREATE TABLE IF NOT EXISTS whatsapp_clicks (
                     click_id    TEXT PRIMARY KEY,
@@ -3527,6 +3536,115 @@ class DatabaseManager:
             else:
                 await db.execute(query, params)
                 await db.commit()
+
+    # ── Automation stats (durable) ────────────────────────────────
+    async def _ensure_automation_stats_table(self) -> None:
+        """Ensure automation_rule_stats table exists (best-effort)."""
+        async with self._conn() as db:
+            stmt = self._convert(
+                """
+                CREATE TABLE IF NOT EXISTS automation_rule_stats (
+                    rule_id         TEXT PRIMARY KEY,
+                    triggers        INTEGER NOT NULL DEFAULT 0,
+                    messages_sent   INTEGER NOT NULL DEFAULT 0,
+                    tags_added      INTEGER NOT NULL DEFAULT 0,
+                    last_trigger_ts TEXT
+                )
+                """
+            )
+            try:
+                if self.use_postgres:
+                    await db.execute(stmt)
+                else:
+                    await db.execute(stmt)
+                    await db.commit()
+            except Exception:
+                return
+
+    async def inc_automation_rule_stat(self, rule_id: str, field: str, inc: int = 1, *, last_trigger_ts: str | None = None) -> None:
+        rid = str(rule_id or "").strip()
+        if not rid:
+            return
+        col = str(field or "").strip().lower()
+        if col not in ("triggers", "messages_sent", "tags_added"):
+            return
+        inc_n = int(inc or 0)
+        if inc_n == 0:
+            return
+        try:
+            await self._ensure_automation_stats_table()
+        except Exception:
+            pass
+        async with self._conn() as db:
+            # Upsert and increment the desired column; update last_trigger_ts when provided.
+            if self.use_postgres:
+                stmt = f"""
+                INSERT INTO automation_rule_stats (rule_id, {col}, last_trigger_ts)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (rule_id) DO UPDATE
+                  SET {col} = automation_rule_stats.{col} + EXCLUDED.{col},
+                      last_trigger_ts = COALESCE(EXCLUDED.last_trigger_ts, automation_rule_stats.last_trigger_ts)
+                """
+                await db.execute(stmt, rid, inc_n, last_trigger_ts)
+            else:
+                stmt = f"""
+                INSERT INTO automation_rule_stats (rule_id, {col}, last_trigger_ts)
+                VALUES (?, ?, ?)
+                ON CONFLICT(rule_id) DO UPDATE SET
+                  {col} = {col} + excluded.{col},
+                  last_trigger_ts = COALESCE(excluded.last_trigger_ts, last_trigger_ts)
+                """
+                await db.execute(self._convert(stmt), (rid, inc_n, last_trigger_ts))
+                await db.commit()
+
+    async def get_automation_rule_stats(self, rule_ids: list[str]) -> dict[str, dict]:
+        ids = [str(x or "").strip() for x in (rule_ids or []) if str(x or "").strip()]
+        if not ids:
+            return {}
+        try:
+            await self._ensure_automation_stats_table()
+        except Exception:
+            pass
+        async with self._conn() as db:
+            if self.use_postgres:
+                # Use ANY($1) for array membership
+                rows = await db.fetch(
+                    "SELECT rule_id, triggers, messages_sent, tags_added, last_trigger_ts FROM automation_rule_stats WHERE rule_id = ANY($1)",
+                    ids,
+                )
+            else:
+                qmarks = ",".join(["?"] * len(ids))
+                cur = await db.execute(
+                    self._convert(
+                        f"SELECT rule_id, triggers, messages_sent, tags_added, last_trigger_ts FROM automation_rule_stats WHERE rule_id IN ({qmarks})"
+                    ),
+                    tuple(ids),
+                )
+                rows = await cur.fetchall()
+            out: dict[str, dict] = {}
+            for r in rows or []:
+                try:
+                    d = dict(r) if not self.use_postgres else {
+                        "rule_id": r["rule_id"],
+                        "triggers": r["triggers"],
+                        "messages_sent": r["messages_sent"],
+                        "tags_added": r["tags_added"],
+                        "last_trigger_ts": r["last_trigger_ts"],
+                    }
+                except Exception:
+                    try:
+                        d = dict(r)
+                    except Exception:
+                        continue
+                rid = str(d.get("rule_id") or "").strip()
+                if rid:
+                    out[rid] = {
+                        "triggers": int(d.get("triggers") or 0),
+                        "messages_sent": int(d.get("messages_sent") or 0),
+                        "tags_added": int(d.get("tags_added") or 0),
+                        "last_trigger_ts": d.get("last_trigger_ts") or None,
+                    }
+            return out
 
     async def get_tag_options(self) -> List[dict]:
         raw = await self.get_setting("tag_options")
@@ -5273,6 +5391,15 @@ class MessageProcessor:
                             await rds.hset(stats_key, mapping={"last_trigger_ts": str(datetime.utcnow().isoformat())})
                     except Exception:
                         pass
+                    try:
+                        await self.db_manager.inc_automation_rule_stat(
+                            str(rule.get("id") or ""),
+                            "triggers",
+                            1,
+                            last_trigger_ts=str(datetime.utcnow().isoformat()),
+                        )
+                    except Exception:
+                        pass
 
                     # Cooldown (best-effort)
                     cooldown = int(rule.get("cooldown_seconds") or 0)
@@ -5315,6 +5442,10 @@ class MessageProcessor:
                                     await rds.hincrby(stats_key, "messages_sent", 1)
                             except Exception:
                                 pass
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
                         elif at in ("add_tag", "tag"):
                             tag = str(act.get("tag") or "").strip()
                             if not tag:
@@ -5339,6 +5470,10 @@ class MessageProcessor:
                                         if rds:
                                             stats_key = f"automation:stats:{_coerce_workspace(ws)}:{rule.get('id')}"
                                             await rds.hincrby(stats_key, "tags_added", 1)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "tags_added", 1)
                                     except Exception:
                                         pass
                                 except Exception:
@@ -7159,13 +7294,20 @@ async def get_automation_rules_stats_endpoint(_: dict = Depends(require_admin)):
         rules = []
 
     rds = getattr(redis_manager, "redis_client", None)
-    out = {}
+    # Prefer durable DB stats
+    try:
+        ids = [str((r or {}).get("id") or "").strip() for r in (rules or []) if str((r or {}).get("id") or "").strip()]
+        out = await db_manager.get_automation_rule_stats(ids)
+    except Exception:
+        out = {}
+
+    # Optionally merge Redis stats (if any) on top (useful for realtime even if DB is slightly behind)
     for r in rules or []:
         try:
             rid = str((r or {}).get("id") or "").strip()
             if not rid:
                 continue
-            stats = {"triggers": 0, "messages_sent": 0, "tags_added": 0, "last_trigger_ts": None}
+            stats = out.get(rid) or {"triggers": 0, "messages_sent": 0, "tags_added": 0, "last_trigger_ts": None}
             if rds:
                 key = f"automation:stats:{_coerce_workspace(ws)}:{rid}"
                 try:

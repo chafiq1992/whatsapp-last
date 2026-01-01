@@ -51,6 +51,7 @@ from .observability.logging import configure_logging as _configure_logging
 from .webhook import WebhookRuntime, WebhookState, create_webhook_router, start_webhook_workers
 
 from fastapi.staticfiles import StaticFiles
+from base64 import b64encode
 try:
     import orjson  # type: ignore
     from fastapi.responses import ORJSONResponse  # type: ignore
@@ -1327,6 +1328,32 @@ class WorkspaceWhatsAppRouter:
             result = response.json()
             print(f"📱 WhatsApp API Response: {result}")
             return result
+
+    async def send_template_message(
+        self,
+        to: str,
+        template_name: str,
+        language: str = "en",
+        components: list[dict] | None = None,
+        context_message_id: str | None = None,
+    ) -> dict:
+        """Send a WhatsApp template message via Graph API."""
+        url = f"{self.base_url}/messages"
+        tpl = {
+            "name": str(template_name or "").strip(),
+            "language": {"code": str(language or "en").strip() or "en"},
+        }
+        if components:
+            tpl["components"] = components
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "template",
+            "template": tpl,
+        }
+        if context_message_id:
+            payload["context"] = {"message_id": context_message_id}
+        return await self._make_request("messages", payload)
 
     async def send_reaction(self, to: str, target_message_id: str, emoji: str, action: str = "react") -> dict:
         """Send a reaction to a specific message via WhatsApp API."""
@@ -3975,7 +4002,8 @@ class MessageProcessor:
           {
             "allowed_phone_number_ids": ["..."],
             "survey_test_numbers": ["2126..."],  (digits only)
-            "auto_reply_test_numbers": ["2126..."] (digits only)
+            "auto_reply_test_numbers": ["2126..."], (digits only)
+            "waba_id": "1234567890"
           }
         """
         ws = _coerce_workspace(workspace or get_current_workspace())
@@ -4026,6 +4054,7 @@ class MessageProcessor:
             "allowed_phone_number_ids": allowed_effective,
             "survey_test_numbers": survey_effective,
             "auto_reply_test_numbers": auto_reply_effective,
+            "waba_id": str((overrides or {}).get("waba_id") or "").strip() or None,
             "overrides": overrides,
         }
         try:
@@ -4081,6 +4110,10 @@ class MessageProcessor:
             "reply_to": message_data.get("reply_to"),
             # buttons passthrough for interactive messages
             "buttons": message_data.get("buttons"),
+            # template passthrough (for WhatsApp template sends)
+            "template_name": message_data.get("template_name"),
+            "template_language": message_data.get("template_language"),
+            "template_components": message_data.get("template_components"),
         }
         # Attach agent attribution if present
         agent_username = message_data.get("agent_username")
@@ -4348,9 +4381,24 @@ class MessageProcessor:
             # Send to WhatsApp API with concurrency guard
             async with wa_semaphore:
                 if message["type"] == "text":
-                    wa_response = await self.whatsapp_messenger.send_text_message(
-                        user_id, message["message"], context_message_id=message.get("reply_to")
-                    )
+                    # If template metadata is present, send a template message instead of plain text.
+                    tname = str(message.get("template_name") or "").strip()
+                    if tname:
+                        lang = str(message.get("template_language") or "en").strip() or "en"
+                        comps = message.get("template_components") or []
+                        if not isinstance(comps, list):
+                            comps = []
+                        wa_response = await self.whatsapp_messenger.send_template_message(
+                            user_id,
+                            tname,
+                            language=lang,
+                            components=comps,
+                            context_message_id=message.get("reply_to"),
+                        )
+                    else:
+                        wa_response = await self.whatsapp_messenger.send_text_message(
+                            user_id, message["message"], context_message_id=message.get("reply_to")
+                        )
                 elif message["type"] in ("catalog_item", "interactive_product"):
                     # Interactive single product via catalog
                     retailer_id = (
@@ -5291,14 +5339,44 @@ class MessageProcessor:
         return cleaned
 
     def _render_template(self, s: str, ctx: dict) -> str:
-        """Very small templating helper: replaces {{ var }} with ctx[var]."""
+        """Template helper supporting dotted paths: {{ customer.phone }}."""
+        def _resolve(path: str):
+            p = str(path or "").strip()
+            if not p:
+                return ""
+            cur = ctx
+            # support dot + [idx]
+            for part in p.split("."):
+                part = part.strip()
+                if not part:
+                    continue
+                m = re.fullmatch(r"([A-Za-z0-9_]+)\[(\d+)\]", part)
+                key = part
+                idx = None
+                if m:
+                    key = m.group(1)
+                    idx = int(m.group(2))
+                if isinstance(cur, dict):
+                    cur = cur.get(key)
+                else:
+                    return ""
+                if idx is not None:
+                    if isinstance(cur, list) and 0 <= idx < len(cur):
+                        cur = cur[idx]
+                    else:
+                        return ""
+            if cur is None:
+                return ""
+            return str(cur)
+
         try:
             if not s:
                 return ""
-            out = str(s)
-            for k, v in (ctx or {}).items():
-                out = re.sub(r"\{\{\s*%s\s*\}\}" % re.escape(str(k)), str(v), out)
-            return out
+            text = str(s)
+            # Replace all {{ ... }} occurrences
+            def _repl(m):
+                return _resolve(m.group(1))
+            return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", _repl, text)
         except Exception:
             return str(s or "")
 
@@ -5427,7 +5505,7 @@ class MessageProcessor:
                             if not msg:
                                 continue
                             await self.process_outgoing_message({
-                                "user_id": user_id,
+                                "user_id": self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id,
                                 "type": "text",
                                 "from_me": True,
                                 "message": msg,
@@ -5446,6 +5524,27 @@ class MessageProcessor:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
                             except Exception:
                                 pass
+                        elif at in ("send_template", "send_whatsapp_template"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                            lang = str(act.get("language") or "en").strip() or "en"
+                            comps = act.get("components") or []
+                            if not tname:
+                                continue
+                            # Provide a visible bubble to the inbox (message preview) while sending the template.
+                            preview = str(act.get("preview") or f"[template] {tname}")
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": preview,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                                # Template send metadata (handled by background sender)
+                                "template_name": tname,
+                                "template_language": lang,
+                                "template_components": comps,
+                            })
                         elif at in ("add_tag", "tag"):
                             tag = str(act.get("tag") or "").strip()
                             if not tag:
@@ -5483,6 +5582,159 @@ class MessageProcessor:
                     continue
         except Exception:
             return
+        finally:
+            if ws_token is not None:
+                try:
+                    _CURRENT_WORKSPACE.reset(ws_token)
+                except Exception:
+                    pass
+
+    async def _run_shopify_automations(self, topic: str, payload: dict, workspace: str | None = None) -> None:
+        """Execute automations for a Shopify webhook event.
+
+        Rules must have trigger.source == "shopify" and trigger.event == <topic>, e.g. "orders/paid".
+        """
+        ws_token = None
+        try:
+            if workspace:
+                try:
+                    ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(workspace))
+                except Exception:
+                    ws_token = None
+
+            ws = get_current_workspace()
+            rules = await self._load_automation_rules(ws)
+            if not rules:
+                return
+
+            topic_norm = str(topic or "").strip()
+            if not topic_norm:
+                return
+
+            data = payload if isinstance(payload, dict) else {}
+
+            def _first(*vals):
+                for v in vals:
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if s:
+                        return s
+                return ""
+
+            # Extract phone from common Shopify fields (digits-only for our inbox ids)
+            phone_raw = _first(
+                (data.get("customer") or {}).get("phone") if isinstance(data.get("customer"), dict) else None,
+                data.get("phone"),
+                (data.get("shipping_address") or {}).get("phone") if isinstance(data.get("shipping_address"), dict) else None,
+                (data.get("billing_address") or {}).get("phone") if isinstance(data.get("billing_address"), dict) else None,
+            )
+            phone_digits = _digits_only(phone_raw)
+
+            # Context for templating
+            ctx = {
+                "topic": topic_norm,
+                "phone": phone_digits,
+                "customer": (data.get("customer") if isinstance(data.get("customer"), dict) else {}),
+                "order_number": data.get("name") or data.get("order_number") or "",
+                "total_price": data.get("total_price") or "",
+                "payload": data,
+            }
+
+            # Best-effort raw text for keyword matching
+            try:
+                hay = json.dumps(data, ensure_ascii=False).lower()
+            except Exception:
+                hay = ""
+
+            for rule in rules:
+                try:
+                    if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
+                        continue
+                    trigger = rule.get("trigger") or {}
+                    if not isinstance(trigger, dict):
+                        trigger = {}
+                    if str(trigger.get("source") or "").lower() != "shopify":
+                        continue
+                    if str(trigger.get("event") or "").strip() != topic_norm:
+                        continue
+
+                    # Optional simple condition: keywords match against payload JSON
+                    cond = rule.get("condition") or {}
+                    if not isinstance(cond, dict):
+                        cond = {}
+                    keywords = cond.get("keywords")
+                    kws = [str(x or "").strip().lower() for x in keywords] if isinstance(keywords, list) else []
+                    if kws and hay:
+                        if not any(k and (k in hay) for k in kws):
+                            continue
+
+                    # Stats trigger
+                    try:
+                        await self.db_manager.inc_automation_rule_stat(
+                            str(rule.get("id") or ""),
+                            "triggers",
+                            1,
+                            last_trigger_ts=str(datetime.utcnow().isoformat()),
+                        )
+                    except Exception:
+                        pass
+
+                    actions = rule.get("actions") or []
+                    if isinstance(actions, dict):
+                        actions = [actions]
+                    if not isinstance(actions, list):
+                        actions = []
+
+                    for act in actions:
+                        if not isinstance(act, dict):
+                            continue
+                        at = str(act.get("type") or "").strip().lower()
+                        if at in ("send_text", "send_whatsapp_text"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
+                            msg = self._render_template(str(act.get("text") or ""), ctx).strip()
+                            if not (to_id and msg):
+                                continue
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": msg,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                            })
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
+                        elif at in ("send_template", "send_whatsapp_template"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
+                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                            lang = str(act.get("language") or "en").strip() or "en"
+                            comps = act.get("components") or []
+                            if not isinstance(comps, list):
+                                comps = []
+                            if not (to_id and tname):
+                                continue
+                            preview = str(act.get("preview") or f"[template] {tname}")
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": preview,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                                "template_name": tname,
+                                "template_language": lang,
+                                "template_components": comps,
+                            })
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
+                except Exception as exc:
+                    print(f"shopify automation failed: {exc}")
+                    continue
         finally:
             if ws_token is not None:
                 try:
@@ -7349,6 +7601,7 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "allowed_phone_number_ids": sorted(list(cfg.get("allowed_phone_number_ids") or [])),
             "survey_test_numbers": sorted(list(cfg.get("survey_test_numbers") or [])),
             "auto_reply_test_numbers": sorted(list(cfg.get("auto_reply_test_numbers") or [])),
+            "waba_id": cfg.get("waba_id") or "",
             "overrides": cfg.get("overrides") or {},
         }
     except Exception:
@@ -7383,6 +7636,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     allowed = [str(x).strip() for x in _as_list(payload.get("allowed_phone_number_ids")) if str(x).strip()]
     survey = [_digits_only(str(x).strip()) for x in _as_list(payload.get("survey_test_numbers")) if str(x).strip()]
     auto_reply = [_digits_only(str(x).strip()) for x in _as_list(payload.get("auto_reply_test_numbers")) if str(x).strip()]
+    waba_id = str((payload or {}).get("waba_id") or "").strip()
 
     # Normalize: dedupe while keeping stable order
     def _dedupe(xs: list[str]) -> list[str]:
@@ -7399,6 +7653,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         "allowed_phone_number_ids": _dedupe(allowed),
         "survey_test_numbers": _dedupe(survey),
         "auto_reply_test_numbers": _dedupe(auto_reply),
+        "waba_id": waba_id,
     }
     await db_manager.set_setting("inbox_env", stored)
     # Bust cache for immediate effect
@@ -7408,6 +7663,106 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     except Exception:
         pass
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}
+
+
+@app.get("/admin/whatsapp/templates")
+async def list_whatsapp_templates_endpoint(_: dict = Depends(require_admin)):
+    """List WhatsApp message templates for the current workspace (WABA ID required)."""
+    cfg = await message_processor._get_inbox_env(get_current_workspace())
+    waba_id = str((cfg or {}).get("waba_id") or "").strip()
+    if not waba_id:
+        raise HTTPException(status_code=400, detail="Missing waba_id (set it in Automation → Environment)")
+
+    # Use the workspace WhatsApp access token
+    try:
+        token = message_processor.whatsapp_messenger._client(get_current_workspace()).access_token  # type: ignore[attr-defined]
+    except Exception:
+        token = ACCESS_TOKEN
+    if not token:
+        raise HTTPException(status_code=503, detail="WhatsApp access token not configured")
+
+    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/message_templates"
+    params = {
+        "limit": 200,
+        "fields": "name,language,status,category,components",
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(url, params=params, headers=headers)
+        if resp.status_code >= 400:
+            try:
+                detail = (resp.text or "")[:500]
+            except Exception:
+                detail = "Template fetch failed"
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        data = resp.json() or {}
+        items = data.get("data") or []
+        if not isinstance(items, list):
+            items = []
+        # Return compact list
+        out = []
+        for t in items:
+            if not isinstance(t, dict):
+                continue
+            out.append(
+                {
+                    "name": t.get("name"),
+                    "language": t.get("language"),
+                    "status": t.get("status"),
+                    "category": t.get("category"),
+                    "components": t.get("components") or [],
+                }
+            )
+        return {"workspace": get_current_workspace(), "waba_id": waba_id, "templates": out}
+
+
+@app.post("/shopify/webhook/{workspace}")
+async def shopify_webhook_endpoint(workspace: str, request: Request):
+    """Shopify webhook endpoint (one URL per workspace).
+
+    Configure in Shopify Admin → Settings → Notifications → Webhooks:
+      URL: https://<your-domain>/shopify/webhook/irranova
+      URL: https://<your-domain>/shopify/webhook/irrakids
+    """
+    ws = _coerce_workspace(workspace)
+    ws_token = _CURRENT_WORKSPACE.set(ws)
+    try:
+        body = await request.body()
+
+        # Verify HMAC if secret configured
+        secret = (
+            os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "")
+            or os.getenv("SHOPIFY_WEBHOOK_SECRET", "")
+        ).strip()
+        if secret:
+            hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
+            digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+            expected = b64encode(digest).decode("utf-8")
+            if not hmac.compare_digest(expected, hmac_header):
+                raise HTTPException(status_code=401, detail="Invalid Shopify webhook HMAC")
+
+        topic = (request.headers.get("X-Shopify-Topic") or "").strip()
+        if not topic:
+            # Shopify always sends a topic header, but keep safe
+            topic = "unknown"
+
+        try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except Exception:
+            payload = {}
+
+        # ACK fast; process in background
+        try:
+            asyncio.create_task(message_processor._run_shopify_automations(topic, payload, workspace=ws))
+        except Exception:
+            pass
+
+        return {"ok": True, "workspace": ws, "topic": topic}
+    finally:
+        try:
+            _CURRENT_WORKSPACE.reset(ws_token)
+        except Exception:
+            pass
 
 @app.post("/admin/agents")
 async def create_agent_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):

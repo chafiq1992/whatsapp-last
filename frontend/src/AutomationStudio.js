@@ -283,7 +283,18 @@ export default function AutomationStudio({ onClose }) {
     replyText: "",
     tag: "",
     cooldownSeconds: 0,
+    triggerSource: "whatsapp",
+    shopifyTopic: "orders/paid",
+    actionMode: "text", // 'text' | 'template'
+    to: "{{ phone }}",
+    templateName: "",
+    templateLanguage: "en",
+    templateVars: [],
   });
+
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesError, setTemplatesError] = useState("");
+  const [templates, setTemplates] = useState([]);
 
   const [envLoading, setEnvLoading] = useState(true);
   const [envSaving, setEnvSaving] = useState(false);
@@ -292,6 +303,7 @@ export default function AutomationStudio({ onClose }) {
     allowed_phone_number_ids: "",
     survey_test_numbers: "",
     auto_reply_test_numbers: "",
+    waba_id: "",
   });
 
   const loadRules = async () => {
@@ -332,6 +344,21 @@ export default function AutomationStudio({ onClose }) {
     }
   };
 
+  const loadTemplates = async () => {
+    setTemplatesError("");
+    setTemplatesLoading(true);
+    try {
+      const res = await api.get("/admin/whatsapp/templates");
+      const arr = Array.isArray(res?.data?.templates) ? res.data.templates : [];
+      setTemplates(arr);
+    } catch (e) {
+      setTemplatesError("Failed to load WhatsApp templates. Check WABA ID + permissions.");
+      setTemplates([]);
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
   const loadInboxEnv = async () => {
     setEnvError("");
     setEnvLoading(true);
@@ -343,6 +370,7 @@ export default function AutomationStudio({ onClose }) {
         allowed_phone_number_ids: join(d.allowed_phone_number_ids),
         survey_test_numbers: join(d.survey_test_numbers),
         auto_reply_test_numbers: join(d.auto_reply_test_numbers),
+        waba_id: String(d.waba_id || ""),
       });
     } catch (e) {
       setEnvError("Failed to load environment settings.");
@@ -359,6 +387,7 @@ export default function AutomationStudio({ onClose }) {
         allowed_phone_number_ids: envDraft.allowed_phone_number_ids,
         survey_test_numbers: envDraft.survey_test_numbers,
         auto_reply_test_numbers: envDraft.auto_reply_test_numbers,
+        waba_id: envDraft.waba_id,
       });
       await loadInboxEnv();
     } catch (e) {
@@ -372,6 +401,8 @@ export default function AutomationStudio({ onClose }) {
     loadRules();
     loadRuleStats();
     loadInboxEnv();
+    // Templates are optional; don't block page load if not configured.
+    loadTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -585,7 +616,22 @@ export default function AutomationStudio({ onClose }) {
           error={rulesError}
           onRefresh={async () => { await loadRules(); await loadRuleStats(); }}
           onOpenNew={() => {
-            setDraft({ id: "", name: "", enabled: true, keywords: "", replyText: "", tag: "", cooldownSeconds: 0 });
+            setDraft({
+              id: "",
+              name: "",
+              enabled: true,
+              keywords: "",
+              replyText: "",
+              tag: "",
+              cooldownSeconds: 0,
+              triggerSource: "whatsapp",
+              shopifyTopic: "orders/paid",
+              actionMode: "text",
+              to: "{{ phone }}",
+              templateName: "",
+              templateLanguage: "en",
+              templateVars: [],
+            });
             setEditorOpen(true);
           }}
           onEdit={(r) => {
@@ -594,6 +640,9 @@ export default function AutomationStudio({ onClose }) {
             const acts = Array.isArray(r.actions) ? r.actions : [];
             const aText = acts.find((x) => String(x?.type || "").toLowerCase().includes("text")) || null;
             const aTag = acts.find((x) => String(x?.type || "").toLowerCase().includes("tag")) || null;
+            const aTpl = acts.find((x) => String(x?.type || "").toLowerCase().includes("template")) || null;
+            const trig = (r && r.trigger) || {};
+            const source = String(trig.source || "whatsapp").toLowerCase();
             setDraft({
               id: String(r.id || ""),
               name: String(r.name || ""),
@@ -602,6 +651,13 @@ export default function AutomationStudio({ onClose }) {
               replyText: String(aText?.text || ""),
               tag: String(aTag?.tag || ""),
               cooldownSeconds: Number(r.cooldown_seconds || 0),
+              triggerSource: source === "shopify" ? "shopify" : "whatsapp",
+              shopifyTopic: String(trig.event || "orders/paid"),
+              actionMode: aTpl ? "template" : "text",
+              to: String((aText?.to || aTpl?.to) || "{{ phone }}"),
+              templateName: String(aTpl?.template_name || ""),
+              templateLanguage: String(aTpl?.language || "en"),
+              templateVars: [],
             });
             setEditorOpen(true);
           }}
@@ -620,6 +676,9 @@ export default function AutomationStudio({ onClose }) {
           {editorOpen && (
             <RuleEditor
               draft={draft}
+              templates={templates}
+              templatesLoading={templatesLoading}
+              templatesError={templatesError}
               saving={rulesSaving}
               onClose={() => setEditorOpen(false)}
               onChange={(p) => setDraft((d) => ({ ...d, ...p }))}
@@ -630,14 +689,33 @@ export default function AutomationStudio({ onClose }) {
                   .map((x) => x.trim())
                   .filter(Boolean);
                 const actions = [];
-                if ((draft.replyText || "").trim()) actions.push({ type: "send_text", text: String(draft.replyText || "") });
+                if (draft.actionMode === "template") {
+                  const tn = String(draft.templateName || "").trim();
+                  if (tn) {
+                    const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
+                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
+                    const comps = bodyParams.length ? [{ type: "body", parameters: bodyParams }] : [];
+                    actions.push({
+                      type: "send_whatsapp_template",
+                      to: String(draft.to || "{{ phone }}"),
+                      template_name: tn,
+                      language: String(draft.templateLanguage || "en"),
+                      components: comps,
+                      preview: `[template] ${tn}`,
+                    });
+                  }
+                } else {
+                  if ((draft.replyText || "").trim()) actions.push({ type: "send_text", to: String(draft.to || "{{ phone }}"), text: String(draft.replyText || "") });
+                }
                 if ((draft.tag || "").trim()) actions.push({ type: "add_tag", tag: String(draft.tag || "").trim() });
                 const rule = {
                   id: newId,
                   name: draft.name || "WhatsApp Auto-reply",
                   enabled: !!draft.enabled,
                   cooldown_seconds: Number(draft.cooldownSeconds || 0),
-                  trigger: { source: "whatsapp", event: "incoming_message" },
+                  trigger: draft.triggerSource === "shopify"
+                    ? { source: "shopify", event: String(draft.shopifyTopic || "orders/paid") }
+                    : { source: "whatsapp", event: "incoming_message" },
                   condition: { match: "contains", keywords: kws },
                   actions,
                 };
@@ -1165,7 +1243,26 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
   );
 }
 
-function RuleEditor({ draft, saving, onClose, onChange, onSave }) {
+function RuleEditor({ draft, templates, templatesLoading, templatesError, saving, onClose, onChange, onSave }) {
+  const shopifyTopics = [
+    { topic: "orders/create", label: "Shopify: New Order (orders/create)" },
+    { topic: "orders/paid", label: "Shopify: Order Paid (orders/paid)" },
+    { topic: "fulfillments/create", label: "Shopify: Fulfillment Created (fulfillments/create)" },
+  ];
+
+  const approvedTemplates = (templates || []).filter((t) => String(t?.status || "").toLowerCase() === "approved");
+
+  const inferBodyVarCount = (tpl) => {
+    try {
+      const comps = tpl?.components || [];
+      const body = (Array.isArray(comps) ? comps : []).find((c) => String(c?.type || "").toUpperCase() === "BODY");
+      const ex = body?.example;
+      const bodyText = ex?.body_text;
+      if (Array.isArray(bodyText) && Array.isArray(bodyText[0])) return bodyText[0].length;
+    } catch {}
+    return 0;
+  };
+
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[100]" onClick={onClose}>
       <div className="w-[680px] max-w-[92vw] bg-white rounded-xl border shadow-xl p-4" onClick={(e) => e.stopPropagation()}>
@@ -1179,6 +1276,38 @@ function RuleEditor({ draft, saving, onClose, onChange, onSave }) {
             <div className="text-xs text-slate-500 mb-1">Name</div>
             <input className="w-full border rounded px-2 py-1" value={draft.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="e.g. Auto-reply price" />
           </div>
+
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">Trigger</div>
+            <div className="flex gap-2">
+              <button className={`px-2 py-1 border rounded text-sm ${draft.triggerSource === "whatsapp" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ triggerSource: "whatsapp" })}>
+                WhatsApp incoming
+              </button>
+              <button className={`px-2 py-1 border rounded text-sm ${draft.triggerSource === "shopify" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ triggerSource: "shopify" })}>
+                Shopify webhook
+              </button>
+            </div>
+            {draft.triggerSource === "shopify" && (
+              <div className="mt-2">
+                <div className="text-xs text-slate-500 mb-1">Shopify topic</div>
+                <select className="w-full border rounded px-2 py-1" value={draft.shopifyTopic || "orders/paid"} onChange={(e) => onChange({ shopifyTopic: e.target.value })}>
+                  {shopifyTopics.map((x) => <option key={x.topic} value={x.topic}>{x.label}</option>)}
+                </select>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  Webhook URL is per workspace: <span className="font-mono">/shopify/webhook/{'{workspace}'}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">Send to (WhatsApp number)</div>
+            <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.to || "{{ phone }}"} onChange={(e) => onChange({ to: e.target.value })} />
+            <div className="text-[11px] text-slate-500 mt-1">
+              Use <span className="font-mono">{"{{ phone }}"}</span> (works for WhatsApp + Shopify triggers).
+            </div>
+          </div>
+
           <div>
             <div className="text-xs text-slate-500 mb-1">Keywords (comma separated)</div>
             <input className="w-full border rounded px-2 py-1" value={draft.keywords} onChange={(e) => onChange({ keywords: e.target.value })} placeholder="price, livraison, سومة" />
@@ -1190,8 +1319,82 @@ function RuleEditor({ draft, saving, onClose, onChange, onSave }) {
             <div className="text-[11px] text-slate-500 mt-1">Prevents spam replies to the same user.</div>
           </div>
           <div className="md:col-span-2">
-            <div className="text-xs text-slate-500 mb-1">Auto-reply text</div>
-            <textarea className="w-full border rounded px-2 py-1" rows={5} value={draft.replyText} onChange={(e) => onChange({ replyText: e.target.value })} placeholder="Type the WhatsApp message to send…" />
+            <div className="text-xs text-slate-500 mb-1">Action</div>
+            <div className="flex gap-2 mb-2">
+              <button className={`px-2 py-1 border rounded text-sm ${draft.actionMode !== "template" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ actionMode: "text" })}>
+                Text
+              </button>
+              <button className={`px-2 py-1 border rounded text-sm ${draft.actionMode === "template" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ actionMode: "template" })}>
+                WhatsApp Template
+              </button>
+            </div>
+
+            {draft.actionMode === "template" ? (
+              <div className="space-y-2">
+                {templatesError && <div className="p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{templatesError}</div>}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Template</div>
+                    <select
+                      className="w-full border rounded px-2 py-1"
+                      value={draft.templateName || ""}
+                      onChange={(e) => {
+                        const name = e.target.value;
+                        const tpl = approvedTemplates.find((t) => t.name === name) || null;
+                        const n = inferBodyVarCount(tpl);
+                        onChange({
+                          templateName: name,
+                          templateLanguage: String(tpl?.language || draft.templateLanguage || "en"),
+                          templateVars: Array.from({ length: n }, (_, i) => (draft.templateVars?.[i] || "")),
+                        });
+                      }}
+                      disabled={templatesLoading}
+                    >
+                      <option value="">{templatesLoading ? "Loading…" : "Select template…"}</option>
+                      {approvedTemplates.map((t) => (
+                        <option key={`${t.name}:${t.language}`} value={t.name}>{t.name} ({t.language})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Language</div>
+                    <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.templateLanguage || "en"} onChange={(e) => onChange({ templateLanguage: e.target.value })} />
+                  </div>
+                </div>
+
+                {(Array.isArray(draft.templateVars) && draft.templateVars.length > 0) && (
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Body variables</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {draft.templateVars.map((v, idx) => (
+                        <input
+                          key={`tplvar:${idx}`}
+                          className="w-full border rounded px-2 py-1"
+                          placeholder={`Var ${idx + 1} (e.g. {{ order_number }})`}
+                          value={v}
+                          onChange={(e) => {
+                            const next = [...draft.templateVars];
+                            next[idx] = e.target.value;
+                            onChange({ templateVars: next });
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Variables support dotted paths like <span className="font-mono">{"{{ customer.phone }}"}</span>.
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="text-xs text-slate-500 mb-1">Auto-reply text</div>
+                <textarea className="w-full border rounded px-2 py-1" rows={5} value={draft.replyText} onChange={(e) => onChange({ replyText: e.target.value })} placeholder="Type the WhatsApp message to send…" />
+                <div className="text-[11px] text-slate-500 mt-1">
+                  Variables: <span className="font-mono">{"{{ phone }}"}</span>, <span className="font-mono">{"{{ text }}"}</span>, <span className="font-mono">{"{{ order_number }}"}</span>, <span className="font-mono">{"{{ total_price }}"}</span>, <span className="font-mono">{"{{ customer.phone }}"}</span>
+                </div>
+              </>
+            )}
           </div>
           <div className="md:col-span-2">
             <div className="text-xs text-slate-500 mb-1">Optional tag to add</div>
@@ -1239,6 +1442,19 @@ function InboxEnvSettings({ loading, saving, error, values, onChange, onRefresh,
         <div className="text-sm text-slate-500">Loading…</div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">WhatsApp Business Account ID (WABA ID)</div>
+            <input
+              className="w-full border rounded px-2 py-1 font-mono text-xs"
+              value={values.waba_id || ""}
+              onChange={(e) => onChange({ waba_id: e.target.value })}
+              placeholder="e.g. 123456789012345"
+            />
+            <div className="text-[11px] text-slate-500 mt-1">
+              Used to list WhatsApp message templates (Admin API). Not secret.
+            </div>
+          </div>
+
           <div className="md:col-span-2">
             <div className="text-xs text-slate-500 mb-1">ALLOWED_PHONE_NUMBER_IDS (one per line)</div>
             <textarea

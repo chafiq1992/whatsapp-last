@@ -23,6 +23,48 @@ def test_automation_rules_api_roundtrip(client):
     assert any(x.get("id") == "r1" for x in data)
 
 
+def test_automation_rules_stats_from_db(db_manager, client, monkeypatch):
+    from backend import main
+    # clear caches
+    try:
+        main.message_processor._automation_rules_cache = {}
+    except Exception:
+        pass
+
+    # store a simple rule
+    tok = main._CURRENT_WORKSPACE.set("irranova")
+    try:
+        asyncio.run(db_manager.set_setting("automation_rules", [{
+            "id": "rstats",
+            "name": "Stats rule",
+            "enabled": True,
+            "cooldown_seconds": 0,
+            "trigger": {"source": "whatsapp", "event": "incoming_message"},
+            "condition": {"match": "contains", "keywords": ["hello"]},
+            "actions": [{"type": "send_text", "to": "{{ phone }}", "text": "hi"}],
+        }]))
+    finally:
+        main._CURRENT_WORKSPACE.reset(tok)
+
+    # stub outgoing send
+    async def fake_process_outgoing_message(message_data: dict):
+        return message_data
+    monkeypatch.setattr(main.message_processor, "process_outgoing_message", fake_process_outgoing_message)
+
+    # run automation (workspace bound)
+    asyncio.run(main.message_processor._run_simple_automations("212600000000", "hello", {"from_me": False}, workspace="irranova"))
+
+    # stats endpoint should show triggers/messages_sent >= 1 even without redis
+    tok2 = main._CURRENT_WORKSPACE.set("irranova")
+    try:
+        resp = client.get("/automation/rules/stats")
+    finally:
+        main._CURRENT_WORKSPACE.reset(tok2)
+    assert resp.status_code == 200
+    s = (resp.json() or {}).get("stats") or {}
+    assert int((s.get("rstats") or {}).get("triggers") or 0) >= 1
+
+
 def test_automation_runner_sends_and_tags(db_manager, monkeypatch):
     from backend import main
 

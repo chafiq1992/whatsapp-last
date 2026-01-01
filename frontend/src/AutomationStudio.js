@@ -268,7 +268,7 @@ function makeEdge(from, fromPort, to, toPort) {
 
 export default function AutomationStudio({ onClose }) {
   // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
-  const [mode, setMode] = useState("simple"); // 'simple' | 'canvas'
+  const [mode, setMode] = useState("simple"); // 'simple' | 'env' | 'canvas'
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesSaving, setRulesSaving] = useState(false);
@@ -282,6 +282,15 @@ export default function AutomationStudio({ onClose }) {
     replyText: "",
     tag: "",
     cooldownSeconds: 0,
+  });
+
+  const [envLoading, setEnvLoading] = useState(true);
+  const [envSaving, setEnvSaving] = useState(false);
+  const [envError, setEnvError] = useState("");
+  const [envDraft, setEnvDraft] = useState({
+    allowed_phone_number_ids: "",
+    survey_test_numbers: "",
+    auto_reply_test_numbers: "",
   });
 
   const loadRules = async () => {
@@ -312,8 +321,45 @@ export default function AutomationStudio({ onClose }) {
     }
   };
 
+  const loadInboxEnv = async () => {
+    setEnvError("");
+    setEnvLoading(true);
+    try {
+      const res = await api.get("/admin/inbox-env");
+      const d = res?.data || {};
+      const join = (arr) => (Array.isArray(arr) ? arr.filter(Boolean).join("\n") : "");
+      setEnvDraft({
+        allowed_phone_number_ids: join(d.allowed_phone_number_ids),
+        survey_test_numbers: join(d.survey_test_numbers),
+        auto_reply_test_numbers: join(d.auto_reply_test_numbers),
+      });
+    } catch (e) {
+      setEnvError("Failed to load environment settings.");
+    } finally {
+      setEnvLoading(false);
+    }
+  };
+
+  const saveInboxEnv = async () => {
+    setEnvError("");
+    setEnvSaving(true);
+    try {
+      await api.post("/admin/inbox-env", {
+        allowed_phone_number_ids: envDraft.allowed_phone_number_ids,
+        survey_test_numbers: envDraft.survey_test_numbers,
+        auto_reply_test_numbers: envDraft.auto_reply_test_numbers,
+      });
+      await loadInboxEnv();
+    } catch (e) {
+      setEnvError("Failed to save environment settings.");
+    } finally {
+      setEnvSaving(false);
+    }
+  };
+
   useEffect(() => {
     loadRules();
+    loadInboxEnv();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -465,6 +511,12 @@ export default function AutomationStudio({ onClose }) {
               Simple (WhatsApp)
             </button>
             <button
+              className={`px-2 py-1 border rounded text-sm ${mode === "env" ? "bg-blue-50 border-blue-200" : ""}`}
+              onClick={() => setMode("env")}
+            >
+              Environment
+            </button>
+            <button
               className={`px-2 py-1 border rounded text-sm ${mode === "canvas" ? "bg-blue-50 border-blue-200" : ""}`}
               onClick={() => setMode("canvas")}
             >
@@ -483,6 +535,8 @@ export default function AutomationStudio({ onClose }) {
             onClick={() => {
               if (mode === "simple") {
                 persistRules(rules);
+              } else if (mode === "env") {
+                saveInboxEnv();
               } else {
                 alert("Canvas draft saved locally (simple rules are the real backend integration).");
               }
@@ -495,6 +549,8 @@ export default function AutomationStudio({ onClose }) {
             onClick={() => {
               if (mode === "simple") {
                 persistRules(rules);
+              } else if (mode === "env") {
+                saveInboxEnv();
               } else {
                 alert("Canvas publish is not wired. Use Simple mode to run real WhatsApp automations.");
               }
@@ -583,6 +639,16 @@ export default function AutomationStudio({ onClose }) {
             />
           )}
         </SimpleAutomations>
+      ) : mode === "env" ? (
+        <InboxEnvSettings
+          loading={envLoading}
+          saving={envSaving}
+          error={envError}
+          values={envDraft}
+          onChange={(patch) => setEnvDraft((prev) => ({ ...prev, ...patch }))}
+          onRefresh={loadInboxEnv}
+          onSave={saveInboxEnv}
+        />
       ) : (
         <>
           <div className="grid grid-cols-12 gap-3 p-3 h-[calc(100vh-3rem)]">
@@ -1119,6 +1185,70 @@ function RuleEditor({ draft, saving, onClose, onChange, onSave }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function InboxEnvSettings({ loading, saving, error, values, onChange, onRefresh, onSave }) {
+  return (
+    <div className="p-4 max-w-5xl mx-auto">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <div className="text-lg font-semibold">Environment</div>
+          <div className="text-sm text-slate-500">
+            Configure inbox/automation settings without Cloud Run env vars (admin only). Changes apply per workspace.
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button className="px-3 py-1.5 border rounded text-sm" onClick={onRefresh} disabled={loading || saving}>Refresh</button>
+          <button className="px-3 py-1.5 rounded text-sm bg-blue-600 text-white" onClick={onSave} disabled={loading || saving}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="mb-3 p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{error}</div>}
+      {loading ? (
+        <div className="text-sm text-slate-500">Loading…</div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">ALLOWED_PHONE_NUMBER_IDS (one per line)</div>
+            <textarea
+              className="w-full border rounded px-2 py-1 font-mono text-xs"
+              rows={5}
+              value={values.allowed_phone_number_ids || ""}
+              onChange={(e) => onChange({ allowed_phone_number_ids: e.target.value })}
+              placeholder="e.g.\n123456789012345\n987654321098765"
+            />
+            <div className="text-[11px] text-slate-500 mt-1">
+              If set, webhooks for other phone_number_id values will be ignored.
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-slate-500 mb-1">SURVEY_TEST_NUMBERS (digits only; one per line)</div>
+            <textarea
+              className="w-full border rounded px-2 py-1 font-mono text-xs"
+              rows={6}
+              value={values.survey_test_numbers || ""}
+              onChange={(e) => onChange({ survey_test_numbers: e.target.value })}
+              placeholder="e.g.\n212600000000"
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-slate-500 mb-1">AUTO_REPLY_TEST_NUMBERS (digits only; one per line)</div>
+            <textarea
+              className="w-full border rounded px-2 py-1 font-mono text-xs"
+              rows={6}
+              value={values.auto_reply_test_numbers || ""}
+              onChange={(e) => onChange({ auto_reply_test_numbers: e.target.value })}
+              placeholder="e.g.\n212611111111"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -66,3 +66,19 @@ def test_automation_runner_sends_and_tags(db_manager, monkeypatch):
     assert "Auto" in (meta.get("tags") or [])
 
 
+def test_inbox_env_endpoints_roundtrip(client):
+    payload = {
+        "allowed_phone_number_ids": ["pid1", "pid2"],
+        "survey_test_numbers": ["+212 600 000 000"],
+        "auto_reply_test_numbers": ["212611111111"],
+    }
+    r = client.post("/admin/inbox-env", json=payload)
+    assert r.status_code == 200
+    out = client.get("/admin/inbox-env")
+    assert out.status_code == 200
+    data = out.json()
+    assert "pid1" in (data.get("allowed_phone_number_ids") or [])
+    # survey should be digits-only in storage/output
+    assert "212600000000" in (data.get("survey_test_numbers") or [])
+
+

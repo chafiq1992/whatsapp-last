@@ -3847,6 +3847,74 @@ class MessageProcessor:
         self.media_dir.mkdir(exist_ok=True)
         # Best-effort in-memory cache for automation rules (workspace-scoped)
         self._automation_rules_cache: dict[str, tuple[float, list[dict]]] = {}
+        # Best-effort in-memory cache for inbox environment overrides (workspace-scoped)
+        self._inbox_env_cache: dict[str, tuple[float, dict]] = {}
+
+    async def _get_inbox_env(self, workspace: str | None = None) -> dict:
+        """Return effective inbox environment settings (DB overrides layered on top of env defaults).
+
+        Stored in DB under settings key "inbox_env" (per-workspace) as JSON:
+          {
+            "allowed_phone_number_ids": ["..."],
+            "survey_test_numbers": ["2126..."],  (digits only)
+            "auto_reply_test_numbers": ["2126..."] (digits only)
+          }
+        """
+        ws = _coerce_workspace(workspace or get_current_workspace())
+        now = time.time()
+        try:
+            cached = self._inbox_env_cache.get(ws)
+            if cached and (now - float(cached[0])) < 3.0:
+                return cached[1] or {}
+        except Exception:
+            pass
+
+        # Defaults from env
+        allowed_default: set[str] = set(ALLOWED_PHONE_NUMBER_IDS or set())
+        survey_default: set[str] = set(SURVEY_TEST_NUMBERS or set())
+        auto_reply_default: set[str] = set(AUTO_REPLY_TEST_NUMBERS or set())
+
+        # Overrides from DB (optional)
+        overrides: dict = {}
+        try:
+            raw = await self.db_manager.get_setting("inbox_env")
+            overrides = json.loads(raw) if raw else {}
+        except Exception:
+            overrides = {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+
+        def _as_list(v):
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                # allow comma/newline separated strings
+                parts = []
+                for chunk in v.replace("\r", "\n").split("\n"):
+                    parts.extend([x.strip() for x in chunk.split(",") if x.strip()])
+                return parts
+            return []
+
+        allowed_override_raw = _as_list(overrides.get("allowed_phone_number_ids"))
+        survey_override_raw = _as_list(overrides.get("survey_test_numbers"))
+        auto_reply_override_raw = _as_list(overrides.get("auto_reply_test_numbers"))
+
+        allowed_effective = set([str(x).strip() for x in allowed_override_raw if str(x).strip()]) if allowed_override_raw else allowed_default
+        survey_effective = set([_digits_only(str(x).strip()) for x in survey_override_raw if str(x).strip()]) if survey_override_raw else survey_default
+        auto_reply_effective = set([_digits_only(str(x).strip()) for x in auto_reply_override_raw if str(x).strip()]) if auto_reply_override_raw else auto_reply_default
+
+        out = {
+            "workspace": ws,
+            "allowed_phone_number_ids": allowed_effective,
+            "survey_test_numbers": survey_effective,
+            "auto_reply_test_numbers": auto_reply_effective,
+            "overrides": overrides,
+        }
+        try:
+            self._inbox_env_cache[ws] = (now, out)
+        except Exception:
+            pass
+        return out
     
     # Fix the method that was duplicated at the bottom of the file
     async def process_outgoing_message(self, message_data: dict) -> dict:
@@ -4714,9 +4782,11 @@ class MessageProcessor:
 
             # Optional: Filter by phone_number_id allowlist (supports multiple IDs)
             try:
-                if ALLOWED_PHONE_NUMBER_IDS and incoming_phone_id and (incoming_phone_id not in ALLOWED_PHONE_NUMBER_IDS):
+                env_cfg = await self._get_inbox_env(get_current_workspace())
+                allowed_ids = set((env_cfg or {}).get("allowed_phone_number_ids") or set())
+                if allowed_ids and incoming_phone_id and (incoming_phone_id not in allowed_ids):
                     _vlog(
-                        f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (allowed {sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:10]})"
+                        f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (allowed {sorted(list(allowed_ids))[:10]})"
                     )
                     return
             except Exception:
@@ -5267,7 +5337,12 @@ class MessageProcessor:
         state = await self.redis_manager.get_survey_state(user_id) or {}
         stage = state.get("stage") or "start"
         uid_digits = _digits_only(user_id)
-        is_test = uid_digits in SURVEY_TEST_NUMBERS
+        try:
+            env_cfg = await self._get_inbox_env()
+            survey_tests = set((env_cfg or {}).get("survey_test_numbers") or set())
+            is_test = uid_digits in survey_tests
+        except Exception:
+            is_test = uid_digits in SURVEY_TEST_NUMBERS
 
         # Start → ask rating
         if reply_id == "survey_start_ok":
@@ -5502,7 +5577,9 @@ class MessageProcessor:
             return
         # Only the QUICK-REPLY BUTTONS are gated by test numbers; catalog matches are for all
         try:
-            is_test_number = _digits_only(user_id) in AUTO_REPLY_TEST_NUMBERS
+            env_cfg = await self._get_inbox_env()
+            test_numbers = set((env_cfg or {}).get("auto_reply_test_numbers") or set())
+            is_test_number = _digits_only(user_id) in test_numbers
         except Exception:
             is_test_number = False
         # 24h cooldown per user (bypass when an explicit product ID/URL is present)
@@ -6181,6 +6258,11 @@ async def _survey_sweep_once() -> None:
         print(f"survey sweep: failed to list conversations: {exc}")
         return
     now = datetime.utcnow().replace(tzinfo=None)
+    try:
+        env_cfg = await message_processor._get_inbox_env(get_current_workspace())
+        survey_tests = set((env_cfg or {}).get("survey_test_numbers") or set())
+    except Exception:
+        survey_tests = set(SURVEY_TEST_NUMBERS or set())
     for conv in conversations:
         try:
             user_id = conv.get("user_id")
@@ -6190,7 +6272,7 @@ async def _survey_sweep_once() -> None:
             if user_id.startswith("team:") or user_id.startswith("agent:") or user_id.startswith("dm:"):
                 continue
             uid_digits = _digits_only(user_id)
-            is_test = uid_digits in SURVEY_TEST_NUMBERS
+            is_test = uid_digits in survey_tests
             # Only if customer hasn't replied since last agent msg
             unresponded = int(conv.get("unresponded_count") or 0)
             if unresponded != 0:
@@ -7016,6 +7098,78 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
     await db_manager.set_setting("automation_rules", cleaned)
     return {"ok": True, "count": len(cleaned)}
 
+
+# ---- Inbox environment settings (workspace-scoped, editable from UI) ----
+@app.get("/admin/inbox-env")
+async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
+    """Return effective inbox env settings (DB overrides layered on env defaults)."""
+    cfg = await message_processor._get_inbox_env(get_current_workspace())
+    try:
+        return {
+            "workspace": cfg.get("workspace") or get_current_workspace(),
+            "allowed_phone_number_ids": sorted(list(cfg.get("allowed_phone_number_ids") or [])),
+            "survey_test_numbers": sorted(list(cfg.get("survey_test_numbers") or [])),
+            "auto_reply_test_numbers": sorted(list(cfg.get("auto_reply_test_numbers") or [])),
+            "overrides": cfg.get("overrides") or {},
+        }
+    except Exception:
+        return {
+            "workspace": get_current_workspace(),
+            "allowed_phone_number_ids": sorted(list(ALLOWED_PHONE_NUMBER_IDS or set())),
+            "survey_test_numbers": sorted(list(SURVEY_TEST_NUMBERS or set())),
+            "auto_reply_test_numbers": sorted(list(AUTO_REPLY_TEST_NUMBERS or set())),
+            "overrides": {},
+        }
+
+
+@app.post("/admin/inbox-env")
+async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Set inbox env overrides for the current workspace.
+
+    Payload accepts lists OR comma/newline-separated strings:
+      - allowed_phone_number_ids
+      - survey_test_numbers
+      - auto_reply_test_numbers
+    """
+    def _as_list(v):
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            parts = []
+            for chunk in v.replace("\r", "\n").split("\n"):
+                parts.extend([x.strip() for x in chunk.split(",") if x.strip()])
+            return parts
+        return []
+
+    allowed = [str(x).strip() for x in _as_list(payload.get("allowed_phone_number_ids")) if str(x).strip()]
+    survey = [_digits_only(str(x).strip()) for x in _as_list(payload.get("survey_test_numbers")) if str(x).strip()]
+    auto_reply = [_digits_only(str(x).strip()) for x in _as_list(payload.get("auto_reply_test_numbers")) if str(x).strip()]
+
+    # Normalize: dedupe while keeping stable order
+    def _dedupe(xs: list[str]) -> list[str]:
+        out = []
+        seen = set()
+        for x in xs:
+            if not x or x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+        return out
+
+    stored = {
+        "allowed_phone_number_ids": _dedupe(allowed),
+        "survey_test_numbers": _dedupe(survey),
+        "auto_reply_test_numbers": _dedupe(auto_reply),
+    }
+    await db_manager.set_setting("inbox_env", stored)
+    # Bust cache for immediate effect
+    try:
+        ws = _coerce_workspace(get_current_workspace())
+        message_processor._inbox_env_cache.pop(ws, None)
+    except Exception:
+        pass
+    return {"ok": True, "workspace": get_current_workspace(), "saved": stored}
+
 @app.post("/admin/agents")
 async def create_agent_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
     username = (payload.get("username") or "").strip()
@@ -7432,6 +7586,12 @@ async def health_check():
     except Exception:
         db_ok = False
     expose_internals = bool(HEALTH_EXPOSE_INTERNALS or LOG_VERBOSE)
+    # Best-effort effective inbox env (admin-safe subset)
+    try:
+        env_cfg = await message_processor._get_inbox_env(get_current_workspace())
+        allowed_ids = sorted(list((env_cfg or {}).get("allowed_phone_number_ids") or []))[:20]
+    except Exception:
+        allowed_ids = sorted(list(ALLOWED_PHONE_NUMBER_IDS or set()))[:20]
     return {
         "status": "healthy",
         "redis": redis_status,
@@ -7456,7 +7616,7 @@ async def health_check():
             "auth_db": _safe_db_url_summary(getattr(auth_db_manager, "db_url", None)),
         },
         "whatsapp": {
-            "allowed_phone_number_ids": sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:20],
+            "allowed_phone_number_ids": allowed_ids,
             "phone_id_to_workspace": PHONE_ID_TO_WORKSPACE,
         },
         "webhook": {
@@ -7688,6 +7848,15 @@ async def admin_init_db(workspace: str | None = None, _: dict = Depends(require_
 async def debug_workspace(request: Request, _: dict = Depends(require_admin)):
     """Admin-only: show resolved workspace + DB routing info (safe)."""
     ws = get_current_workspace()
+    try:
+        env_cfg = await message_processor._get_inbox_env(ws)
+        allowed_ids = sorted(list((env_cfg or {}).get("allowed_phone_number_ids") or []))[:50]
+        survey_tests = sorted(list((env_cfg or {}).get("survey_test_numbers") or []))[:50]
+        auto_reply_tests = sorted(list((env_cfg or {}).get("auto_reply_test_numbers") or []))[:50]
+    except Exception:
+        allowed_ids = sorted(list(ALLOWED_PHONE_NUMBER_IDS or set()))[:50]
+        survey_tests = sorted(list(SURVEY_TEST_NUMBERS or set()))[:50]
+        auto_reply_tests = sorted(list(AUTO_REPLY_TEST_NUMBERS or set()))[:50]
     return {
         "workspace": ws,
         "multi_workspace": {"enabled": bool(ENABLE_MULTI_WORKSPACE), "workspaces": WORKSPACES, "default": DEFAULT_WORKSPACE},
@@ -7700,8 +7869,10 @@ async def debug_workspace(request: Request, _: dict = Depends(require_admin)):
             "auth_db": _safe_db_url_summary(getattr(auth_db_manager, "db_url", None)),
         },
         "whatsapp": {
-            "allowed_phone_number_ids": sorted(list(ALLOWED_PHONE_NUMBER_IDS))[:50],
+            "allowed_phone_number_ids": allowed_ids,
             "phone_id_to_workspace": PHONE_ID_TO_WORKSPACE,
+            "survey_test_numbers": survey_tests,
+            "auto_reply_test_numbers": auto_reply_tests,
             "nova_phone_number_id_configured": bool((WHATSAPP_CONFIG_BY_WORKSPACE.get("irranova") or {}).get("phone_number_id")),
             "kids_phone_number_id_configured": bool((WHATSAPP_CONFIG_BY_WORKSPACE.get("irrakids") or {}).get("phone_number_id")),
         },

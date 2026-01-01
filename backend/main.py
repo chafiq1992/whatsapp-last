@@ -5133,7 +5133,10 @@ class MessageProcessor:
                 txt = str(message_obj.get("message") or "")
             else:
                 txt = ""
-            asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj))
+            # IMPORTANT: this runs after webhook processing may reset the workspace contextvar,
+            # so bind the current workspace explicitly for the task.
+            ws = get_current_workspace()
+            asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
         except Exception:
             pass
 
@@ -5181,9 +5184,16 @@ class MessageProcessor:
         except Exception:
             return str(s or "")
 
-    async def _run_simple_automations(self, user_id: str, incoming_text: str, message_obj: dict | None = None) -> None:
+    async def _run_simple_automations(self, user_id: str, incoming_text: str, message_obj: dict | None = None, workspace: str | None = None) -> None:
         """Execute enabled simple automation rules for an inbound WhatsApp text message."""
+        ws_token = None
         try:
+            if workspace:
+                try:
+                    ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(workspace))
+                except Exception:
+                    ws_token = None
+
             # Only run for real WhatsApp customers, not internal channels
             if not isinstance(user_id, str):
                 return
@@ -5254,6 +5264,16 @@ class MessageProcessor:
                     if not matched:
                         continue
 
+                    # Simple per-rule stats (best-effort, Redis if available)
+                    try:
+                        rds = getattr(self.redis_manager, "redis_client", None)
+                        if rds:
+                            stats_key = f"automation:stats:{_coerce_workspace(ws)}:{rule.get('id')}"
+                            await rds.hincrby(stats_key, "triggers", 1)
+                            await rds.hset(stats_key, mapping={"last_trigger_ts": str(datetime.utcnow().isoformat())})
+                    except Exception:
+                        pass
+
                     # Cooldown (best-effort)
                     cooldown = int(rule.get("cooldown_seconds") or 0)
                     if cooldown > 0 and getattr(self.redis_manager, "redis_client", None):
@@ -5288,6 +5308,13 @@ class MessageProcessor:
                                 # mark as system/automation for downstream filtering (best-effort)
                                 "agent_username": "automation",
                             })
+                            try:
+                                rds = getattr(self.redis_manager, "redis_client", None)
+                                if rds:
+                                    stats_key = f"automation:stats:{_coerce_workspace(ws)}:{rule.get('id')}"
+                                    await rds.hincrby(stats_key, "messages_sent", 1)
+                            except Exception:
+                                pass
                         elif at in ("add_tag", "tag"):
                             tag = str(act.get("tag") or "").strip()
                             if not tag:
@@ -5307,6 +5334,13 @@ class MessageProcessor:
                                         "type": "conversation_tags_updated",
                                         "data": {"user_id": user_id, "tags": tags},
                                     })
+                                    try:
+                                        rds = getattr(self.redis_manager, "redis_client", None)
+                                        if rds:
+                                            stats_key = f"automation:stats:{_coerce_workspace(ws)}:{rule.get('id')}"
+                                            await rds.hincrby(stats_key, "tags_added", 1)
+                                    except Exception:
+                                        pass
                                 except Exception:
                                     pass
                 except Exception as exc:
@@ -5314,6 +5348,12 @@ class MessageProcessor:
                     continue
         except Exception:
             return
+        finally:
+            if ws_token is not None:
+                try:
+                    _CURRENT_WORKSPACE.reset(ws_token)
+                except Exception:
+                    pass
 
     # -------- survey flow --------
     async def send_survey_invite(self, user_id: str) -> None:
@@ -7096,7 +7136,64 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
         cleaned = cleaned[:200]
 
     await db_manager.set_setting("automation_rules", cleaned)
+    # Bust cache for immediate effect in webhook-triggered tasks
+    try:
+        ws = _coerce_workspace(get_current_workspace())
+        message_processor._automation_rules_cache.pop(ws, None)
+    except Exception:
+        pass
     return {"ok": True, "count": len(cleaned)}
+
+
+@app.get("/automation/rules/stats")
+async def get_automation_rules_stats_endpoint(_: dict = Depends(require_admin)):
+    """Best-effort per-rule counters (Redis-backed when available)."""
+    ws = get_current_workspace()
+    # Always return something usable by the UI
+    try:
+        raw = await db_manager.get_setting("automation_rules")
+        rules = json.loads(raw) if raw else []
+        if not isinstance(rules, list):
+            rules = []
+    except Exception:
+        rules = []
+
+    rds = getattr(redis_manager, "redis_client", None)
+    out = {}
+    for r in rules or []:
+        try:
+            rid = str((r or {}).get("id") or "").strip()
+            if not rid:
+                continue
+            stats = {"triggers": 0, "messages_sent": 0, "tags_added": 0, "last_trigger_ts": None}
+            if rds:
+                key = f"automation:stats:{_coerce_workspace(ws)}:{rid}"
+                try:
+                    data = await rds.hgetall(key)
+                except Exception:
+                    data = {}
+                # redis may return bytes
+                def _s(x):
+                    if isinstance(x, (bytes, bytearray)):
+                        return x.decode("utf-8", "ignore")
+                    return str(x)
+                if isinstance(data, dict):
+                    try:
+                        if "triggers" in data or b"triggers" in data:
+                            stats["triggers"] = int(_s(data.get("triggers") or data.get(b"triggers") or 0) or 0)
+                        if "messages_sent" in data or b"messages_sent" in data:
+                            stats["messages_sent"] = int(_s(data.get("messages_sent") or data.get(b"messages_sent") or 0) or 0)
+                        if "tags_added" in data or b"tags_added" in data:
+                            stats["tags_added"] = int(_s(data.get("tags_added") or data.get(b"tags_added") or 0) or 0)
+                        if "last_trigger_ts" in data or b"last_trigger_ts" in data:
+                            v = _s(data.get("last_trigger_ts") or data.get(b"last_trigger_ts") or "")
+                            stats["last_trigger_ts"] = v or None
+                    except Exception:
+                        pass
+            out[rid] = stats
+        except Exception:
+            continue
+    return {"workspace": ws, "stats": out}
 
 
 # ---- Inbox environment settings (workspace-scoped, editable from UI) ----

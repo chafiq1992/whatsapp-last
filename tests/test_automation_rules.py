@@ -26,6 +26,12 @@ def test_automation_rules_api_roundtrip(client):
 def test_automation_runner_sends_and_tags(db_manager, monkeypatch):
     from backend import main
 
+    # Ensure no stale cached rules from other tests
+    try:
+        main.message_processor._automation_rules_cache = {}
+    except Exception:
+        pass
+
     asyncio.run(
         db_manager.set_setting(
             "automation_rules",
@@ -64,6 +70,63 @@ def test_automation_runner_sends_and_tags(db_manager, monkeypatch):
     assert any("Our price is 199 MAD." in str(m.get("message") or "") for m in sent)
     meta = asyncio.run(db_manager.get_conversation_meta("212600000000"))
     assert "Auto" in (meta.get("tags") or [])
+
+
+def test_automation_runner_binds_workspace_context(db_manager, monkeypatch):
+    from backend import main
+
+    # Ensure no stale cached rules from other tests
+    try:
+        main.message_processor._automation_rules_cache = {}
+    except Exception:
+        pass
+
+    # Save a rule (doesn't matter which workspace since tests use single sqlite),
+    # but we verify that the runner binds _CURRENT_WORKSPACE for downstream calls.
+    tok_save = main._CURRENT_WORKSPACE.set("irranova")
+    try:
+        asyncio.run(
+            db_manager.set_setting(
+                "automation_rules",
+                [
+                    {
+                        "id": "r_ws",
+                        "name": "Workspace bind",
+                        "enabled": True,
+                        "cooldown_seconds": 0,
+                        "trigger": {"source": "whatsapp", "event": "incoming_message"},
+                        "condition": {"match": "contains", "keywords": ["ping"]},
+                        "actions": [{"type": "send_text", "text": "pong"}],
+                    }
+                ],
+            )
+        )
+    finally:
+        main._CURRENT_WORKSPACE.reset(tok_save)
+
+    seen_ws = {"value": None}
+
+    async def fake_process_outgoing_message(message_data: dict):
+        seen_ws["value"] = main.get_current_workspace()
+        return message_data
+
+    monkeypatch.setattr(main.message_processor, "process_outgoing_message", fake_process_outgoing_message)
+
+    # Force current workspace to something else, then run with explicit workspace arg.
+    tok = main._CURRENT_WORKSPACE.set("irrakids")
+    try:
+        asyncio.run(
+            main.message_processor._run_simple_automations(
+                "212600000000",
+                incoming_text="ping",
+                message_obj={"from_me": False},
+                workspace="irranova",
+            )
+        )
+    finally:
+        main._CURRENT_WORKSPACE.reset(tok)
+
+    assert seen_ws["value"] == "irranova"
 
 
 def test_inbox_env_endpoints_roundtrip(client):

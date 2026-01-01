@@ -273,6 +273,7 @@ export default function AutomationStudio({ onClose }) {
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesSaving, setRulesSaving] = useState(false);
   const [rulesError, setRulesError] = useState("");
+  const [ruleStats, setRuleStats] = useState({});
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState({
     id: "",
@@ -321,6 +322,16 @@ export default function AutomationStudio({ onClose }) {
     }
   };
 
+  const loadRuleStats = async () => {
+    try {
+      const res = await api.get("/automation/rules/stats");
+      const s = res?.data?.stats || {};
+      setRuleStats(s && typeof s === "object" ? s : {});
+    } catch {
+      setRuleStats({});
+    }
+  };
+
   const loadInboxEnv = async () => {
     setEnvError("");
     setEnvLoading(true);
@@ -359,6 +370,7 @@ export default function AutomationStudio({ onClose }) {
 
   useEffect(() => {
     loadRules();
+    loadRuleStats();
     loadInboxEnv();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -567,10 +579,11 @@ export default function AutomationStudio({ onClose }) {
       {mode === "simple" ? (
         <SimpleAutomations
           rules={rules}
+          stats={ruleStats}
           loading={rulesLoading}
           saving={rulesSaving}
           error={rulesError}
-          onRefresh={loadRules}
+          onRefresh={async () => { await loadRules(); await loadRuleStats(); }}
           onOpenNew={() => {
             setDraft({ id: "", name: "", enabled: true, keywords: "", replyText: "", tag: "", cooldownSeconds: 0 });
             setEditorOpen(true);
@@ -595,11 +608,13 @@ export default function AutomationStudio({ onClose }) {
           onToggle={async (id, enabled) => {
             const next = (rules || []).map((r) => (r.id === id ? { ...r, enabled } : r));
             await persistRules(next);
+            await loadRuleStats();
           }}
           onDelete={async (id) => {
             if (!window.confirm("Delete this automation?")) return;
             const next = (rules || []).filter((r) => r.id !== id);
             await persistRules(next);
+            await loadRuleStats();
           }}
         >
           {editorOpen && (
@@ -634,6 +649,7 @@ export default function AutomationStudio({ onClose }) {
                   return arr;
                 })();
                 await persistRules(next);
+                await loadRuleStats();
                 setEditorOpen(false);
               }}
             />
@@ -1082,7 +1098,7 @@ function Inspector({ node, onUpdate }){
   return <div className="text-sm text-slate-500">No settings.</div>;
 }
 
-function SimpleAutomations({ rules, loading, saving, error, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
+function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
   return (
     <div className="p-4 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-3">
@@ -1104,27 +1120,38 @@ function SimpleAutomations({ rules, loading, saving, error, onRefresh, onOpenNew
           {(rules || []).length === 0 ? (
             <div className="p-4 rounded border bg-white text-sm text-slate-500">No automations yet. Create your first rule.</div>
           ) : (
-            (rules || []).map((r) => (
-              <div key={r.id} className="p-3 rounded border bg-white flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <div className="font-semibold truncate">{r.name || r.id}</div>
-                    <span className={`text-xs px-2 py-0.5 rounded ${r.enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
-                      {r.enabled ? "Enabled" : "Disabled"}
-                    </span>
+            (rules || []).map((r) => {
+              const s = (stats && r && r.id && stats[r.id]) ? stats[r.id] : {};
+              const triggers = Number(s?.triggers || 0);
+              const sent = Number(s?.messages_sent || 0);
+              const last = s?.last_trigger_ts || null;
+              return (
+                <div key={r.id} className="p-3 rounded border bg-white flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <div className="font-semibold truncate">{r.name || r.id}</div>
+                      <span className={`text-xs px-2 py-0.5 rounded ${r.enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                        {r.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1 truncate">Trigger: WhatsApp incoming message</div>
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                      <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">Triggers: {triggers}</span>
+                      <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">Messages sent: {sent}</span>
+                      {last && <span className="px-2 py-0.5 rounded bg-slate-50 text-slate-600">Last: {String(last).slice(0, 19).replace('T',' ')}</span>}
+                    </div>
                   </div>
-                  <div className="text-xs text-slate-500 mt-1 truncate">Trigger: WhatsApp incoming message</div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <label className="text-sm flex items-center gap-2">
+                      <input type="checkbox" checked={!!r.enabled} onChange={(e) => onToggle(r.id, e.target.checked)} />
+                      On
+                    </label>
+                    <button className="px-2 py-1 border rounded text-sm" onClick={() => onEdit(r)}>Edit</button>
+                    <button className="px-2 py-1 border rounded text-sm text-rose-700 border-rose-200" onClick={() => onDelete(r.id)}>Delete</button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <label className="text-sm flex items-center gap-2">
-                    <input type="checkbox" checked={!!r.enabled} onChange={(e) => onToggle(r.id, e.target.checked)} />
-                    On
-                  </label>
-                  <button className="px-2 py-1 border rounded text-sm" onClick={() => onEdit(r)}>Edit</button>
-                  <button className="px-2 py-1 border rounded text-sm text-rose-700 border-rose-200" onClick={() => onDelete(r.id)}>Delete</button>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       )}

@@ -8202,6 +8202,8 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
         if not agent:
             raise HTTPException(status_code=401, detail="Unauthorized")
     try:
+        # Encourage long-lived caching of successful thumbnails, and avoid caching error responses.
+        DEFAULT_OK_CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=600, stale-if-error=86400"
         signed = maybe_signed_url_for(url, ttl_seconds=600)
         # Only redirect to signed URL when not resizing
         if signed and not w:
@@ -8242,8 +8244,7 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
                             content=thumb_bytes,
                             media_type="image/jpeg",
                             headers={
-                                "Cache-Control": "public, max-age=86400",
-                                "Vary": "Accept",
+                                "Cache-Control": DEFAULT_OK_CACHE_CONTROL,
                             },
                         )
                     except Exception:
@@ -8253,8 +8254,7 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
                     content=data,
                     media_type=ctype,
                     headers={
-                        "Cache-Control": "public, max-age=86400",
-                        "Vary": "Accept",
+                        "Cache-Control": DEFAULT_OK_CACHE_CONTROL,
                     },
                 )
             except Exception:
@@ -8277,10 +8277,20 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         media_type = resp.headers.get("Content-Type", "image/jpeg")
         # Forward upstream status code and caching headers to enable proper browser caching/conditional requests
-        passthrough = {
-            "Cache-Control": resp.headers.get("Cache-Control", "public, max-age=86400"),
-            "Vary": resp.headers.get("Vary", "Accept"),
-        }
+        passthrough: dict[str, str] = {}
+        if resp.status_code >= 400:
+            # Never cache rate limit / error pages; otherwise clients can get stuck until cache expiry.
+            passthrough["Cache-Control"] = "no-store"
+        else:
+            passthrough["Cache-Control"] = resp.headers.get("Cache-Control") or DEFAULT_OK_CACHE_CONTROL
+        # Only forward Vary if upstream explicitly sets it (do NOT force Vary: Accept,
+        # because our resized thumbnails don't vary by Accept and it breaks SW/browser cache hits).
+        try:
+            vary = resp.headers.get("Vary")
+            if vary:
+                passthrough["Vary"] = vary
+        except Exception:
+            pass
         for h in ("ETag", "Last-Modified", "Content-Length"):
             v = resp.headers.get(h)
             if v:
@@ -8298,6 +8308,8 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
                 thumb_bytes = buf.getvalue()
                 # Remove upstream length since content length changed
                 passthrough.pop("Content-Length", None)
+                # Resized thumbnails are always JPEG and do not depend on request headers
+                passthrough.pop("Vary", None)
                 return StarletteResponse(
                     content=thumb_bytes,
                     media_type="image/jpeg",

@@ -1,4 +1,5 @@
-const CACHE_VERSION = 'v6';
+// Bump this whenever caching logic changes to ensure clients pick up the new SW behavior.
+const CACHE_VERSION = 'v8';
 const RUNTIME_CACHE = `runtime-${CACHE_VERSION}`;
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 
@@ -50,16 +51,24 @@ self.addEventListener('fetch', (event) => {
 
   // Cache-first for image proxy endpoint to enable fast thumbnail loads and offline viewing
   if (path.startsWith('/proxy-image')) {
-    event.respondWith(
-      caches.match(req).then((cached) => {
-        if (cached) return cached;
-        return fetch(req).then((res) => {
-          const copy = res.clone();
-          caches.open(RUNTIME_CACHE).then((cache) => cache.put(req, copy));
-          return res;
-        });
-      })
-    );
+    event.respondWith((async () => {
+      const cache = await caches.open(RUNTIME_CACHE);
+      // Important: ignore Vary so <img> requests and fetch() requests share the same cached entry.
+      const cached = await cache.match(req, { ignoreVary: true });
+      if (cached) {
+        // Best-effort refresh in background, but NEVER cache non-200 responses (e.g. 429 rate limit pages).
+        event.waitUntil((async () => {
+          try {
+            const res = await fetch(req);
+            if (res && res.ok) await cache.put(req, res.clone());
+          } catch {}
+        })());
+        return cached;
+      }
+      const res = await fetch(req);
+      if (res && res.ok) await cache.put(req, res.clone());
+      return res;
+    })());
     return;
   }
 
@@ -83,7 +92,7 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       caches.match(req).then((cached) => cached || fetch(req).then((res) => {
         const copy = res.clone();
-        caches.open(RUNTIME_CACHE).then((cache) => cache.put(req, copy));
+        if (res && res.ok) caches.open(RUNTIME_CACHE).then((cache) => cache.put(req, copy));
         return res;
       }))
     );
@@ -95,7 +104,7 @@ self.addEventListener('fetch', (event) => {
     caches.match(req).then((cached) => {
       const fetched = fetch(req).then((res) => {
         const copy = res.clone();
-        caches.open(RUNTIME_CACHE).then((cache) => cache.put(req, copy));
+        if (res && res.ok) caches.open(RUNTIME_CACHE).then((cache) => cache.put(req, copy));
         return res;
       }).catch(() => cached);
       return cached || fetched;
@@ -103,32 +112,81 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Background precache of thumbnails, with concurrency limits to avoid network saturation
+// ---------------------------------------------------------------------------
+// Background precache of thumbnails
+// ---------------------------------------------------------------------------
+// IMPORTANT: Agents can open large catalogs and trigger many PRECACHE_THUMBS messages quickly.
+// If we start a new concurrency pool per message, we can easily flood /proxy-image and cause
+// 429/503 storms + flickering images. Instead: maintain ONE global queue + ONE concurrency pool.
+
+const PRECACHE_STATE = {
+  queue: [],
+  running: false,
+  seen: new Set(),       // URLs we've queued/processed this session
+  failUntil: new Map(),  // URL -> epoch ms until we try again
+};
+
+async function drainPrecacheQueue() {
+  if (PRECACHE_STATE.running) return;
+  PRECACHE_STATE.running = true;
+  try {
+    const cache = await caches.open(RUNTIME_CACHE);
+    const CONCURRENCY = 6;
+    const COOL_DOWN_MS = 60 * 1000;
+
+    const worker = async () => {
+      while (PRECACHE_STATE.queue.length) {
+        const u = PRECACHE_STATE.queue.shift();
+        if (!u) continue;
+        try {
+          const until = PRECACHE_STATE.failUntil.get(u) || 0;
+          if (until > Date.now()) continue;
+
+          const match = await cache.match(u, { ignoreVary: true });
+          if (match) continue;
+
+          const res = await fetch(u);
+          if (res && res.ok) {
+            await cache.put(u, res.clone());
+          } else {
+            // Don't spam retries when the backend or upstream is rate limiting / unavailable.
+            if (res && (res.status === 429 || res.status >= 500)) {
+              PRECACHE_STATE.failUntil.set(u, Date.now() + COOL_DOWN_MS);
+            }
+          }
+        } catch {
+          PRECACHE_STATE.failUntil.set(u, Date.now() + COOL_DOWN_MS);
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  } finally {
+    PRECACHE_STATE.running = false;
+    // If more items were queued while we were draining, schedule another pass.
+    if (PRECACHE_STATE.queue.length) {
+      setTimeout(() => { drainPrecacheQueue(); }, 0);
+    }
+  }
+}
+
 self.addEventListener('message', (event) => {
   const data = event.data || {};
   if (data.type === 'PRECACHE_THUMBS' && Array.isArray(data.urls)) {
     const urls = Array.from(new Set(data.urls.filter(Boolean)));
-    const CONCURRENCY = 6;
-    event.waitUntil((async () => {
-      const cache = await caches.open(RUNTIME_CACHE);
-      let idx = 0;
-      const runNext = async () => {
-        const i = idx++;
-        if (i >= urls.length) return;
-        const u = urls[i];
-        try {
-          const match = await cache.match(u);
-          if (!match) {
-            const res = await fetch(u, { cache: 'no-store' });
-            if (res && res.ok) {
-              await cache.put(u, res.clone());
-            }
-          }
-        } catch {}
-        return runNext();
-      };
-      await Promise.all(Array.from({ length: CONCURRENCY }, runNext));
-    })());
+    // Cap memory growth; if a user keeps switching catalogs, don't leak forever.
+    if (PRECACHE_STATE.seen.size > 10_000) {
+      PRECACHE_STATE.seen.clear();
+      PRECACHE_STATE.failUntil.clear();
+    }
+    for (const u of urls) {
+      if (PRECACHE_STATE.seen.has(u)) continue;
+      const until = PRECACHE_STATE.failUntil.get(u) || 0;
+      if (until > Date.now()) continue;
+      PRECACHE_STATE.seen.add(u);
+      PRECACHE_STATE.queue.push(u);
+    }
+    event.waitUntil(drainPrecacheQueue());
   }
 });
 

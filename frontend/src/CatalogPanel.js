@@ -29,10 +29,13 @@ export default function CatalogPanel({
   const [selectedSet, setSelectedSet] = useState(null);
 
   // Products and pagination
-  const INITIAL_FETCH_LIMIT = 10000; // fetch many items up-front for instant preview
+  const INITIAL_FETCH_LIMIT = 600; // keep initial render/network bounded; load more on scroll
   const PREFETCH_LIMIT = 120; // lightweight background prefetch for folder previews
   const PAGE_STEP = 200; // only used when falling back to infinite scroll for very large sets
   const CONCURRENT_THUMB_PREFETCH = 6;
+  // IMPORTANT: keep this low. This runs in addition to <img loading="lazy"> requests,
+  // and can easily overwhelm /proxy-image on large catalogs / repeated modal opens.
+  const MAX_THUMBNAIL_PRECACHE = 80;
   const [products, setProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -42,6 +45,9 @@ export default function CatalogPanel({
   const requestIdRef = useRef(0);
   const fetchInFlightRef = useRef(false);
   const fetchLimitTimerRef = useRef(null);
+  const prefetchedThumbsRef = useRef(new Set());
+  const prefetchedSetIdsRef = useRef(new Set());
+  const failedThumbsRef = useRef(new Map()); // proxiedThumbUrl -> retryAfterMs (epoch)
 
   // Selected images (URLs)
   const [selectedImages, setSelectedImages] = useState([]);
@@ -128,10 +134,27 @@ export default function CatalogPanel({
         const i = index++;
         if (i >= unique.length) return;
         const u = unique[i];
-        try { await fetch(u, { cache: 'no-store' }); } catch {}
+        // Allow normal HTTP caching; SW (when present) will also cache-first.
+        try { await fetch(u, { cache: 'force-cache' }); } catch {}
         return runNext();
       };
       await Promise.all(Array.from({ length: CONCURRENT_THUMB_PREFETCH }, runNext));
+    } catch {}
+  };
+
+  const _shouldSkipThumb = (proxiedThumbUrl) => {
+    try {
+      const until = failedThumbsRef.current.get(proxiedThumbUrl);
+      return typeof until === 'number' && until > Date.now();
+    } catch {
+      return false;
+    }
+  };
+  const _markThumbFailed = (proxiedThumbUrl, ms = 60_000) => {
+    try {
+      if (!proxiedThumbUrl) return;
+      // Simple circuit breaker: if a URL is returning 429/5xx, avoid re-requesting it for a bit.
+      failedThumbsRef.current.set(proxiedThumbUrl, Date.now() + Math.max(5_000, Number(ms) || 60_000));
     } catch {}
   };
 
@@ -155,11 +178,31 @@ export default function CatalogPanel({
         setHasMore(list.length >= (limit || INITIAL_FETCH_LIMIT));
         // Prefetch thumbnails for the entire list with concurrency limits (via SW when available)
         try {
-          const urls = (list || [])
-            .map(p => p?.images?.[0]?.url)
-            .filter(Boolean)
-            .map(u => thumbUrlFor(u, 256));
-          setTimeout(() => { _precacheThumbs(urls); }, 0);
+          // Only do this once per set per session to avoid re-flooding when agents reopen the modal.
+          if (!prefetchedSetIdsRef.current.has(String(setId || ""))) {
+            const urls = (list || [])
+              .map(p => p?.images?.[0]?.url)
+              .filter(Boolean)
+              .map(u => thumbUrlFor(u, 256));
+            const next = [];
+            for (const u of urls) {
+              if (!u || prefetchedThumbsRef.current.has(u)) continue;
+              if (_shouldSkipThumb(u)) continue;
+              prefetchedThumbsRef.current.add(u);
+              next.push(u);
+              if (next.length >= MAX_THUMBNAIL_PRECACHE) break;
+            }
+            if (next.length) {
+              const run = () => { try { _precacheThumbs(next); } catch {} };
+              // Let critical UI work (and the first visible <img>s) run first.
+              if (typeof window.requestIdleCallback === 'function') {
+                window.requestIdleCallback(run, { timeout: 1500 });
+              } else {
+                setTimeout(run, 250);
+              }
+            }
+            prefetchedSetIdsRef.current.add(String(setId || ""));
+          }
         } catch {}
       }
       try { await saveCatalogSetProducts(setId, list); } catch {}
@@ -738,22 +781,41 @@ export default function CatalogPanel({
                       {products.map((p, idx) => {
                         const url = p.images?.[0]?.url;
                         const checked = url && selectedImages.includes(url);
+                        const thumb256 = url ? thumbUrlFor(url, 256) : "";
+                        const shouldSkip = !!thumb256 && _shouldSkipThumb(thumb256);
+                        const effectiveSrc = shouldSkip ? "/broken-image.png" : thumb256;
                         return (
-                          <div key={`${p.retailer_id}-${idx}`} className="relative group border rounded overflow-hidden">
+                          <div key={`${p.retailer_id || p.id || 'p'}-${idx}`} className="relative group border rounded overflow-hidden">
                             {url && (
                               <input type="checkbox" className="absolute top-2 right-2 z-10 scale-150 cursor-pointer" checked={checked} onChange={() => toggleSelect(url)} />
                             )}
                             <div className="w-full h-32 bg-gray-100 flex items-center justify-center">
                               {url ? (
                                 <img
-                                  src={thumbUrlFor(url, 256)}
-                                  srcSet={`${thumbUrlFor(url, 160)} 160w, ${thumbUrlFor(url, 256)} 256w, ${thumbUrlFor(url, 384)} 384w`}
+                                  src={effectiveSrc}
+                                  srcSet={
+                                    shouldSkip
+                                      ? ""
+                                      : `${thumbUrlFor(url, 160)} 160w, ${thumbUrlFor(url, 256)} 256w, ${thumbUrlFor(url, 384)} 384w`
+                                  }
                                   sizes="(max-width: 640px) 45vw, (max-width: 1024px) 22vw, 256px"
                                   alt={p.name}
                                   className="w-full h-32 object-cover"
-                                  loading="eager"
+                                  loading="lazy"
                                   decoding="async"
-                                  onError={(e) => { try { e.currentTarget.src = '/broken-image.png'; } catch {} }}
+                                  onError={(e) => {
+                                    try {
+                                      const img = e.currentTarget;
+                                      if (img?.dataset?.fallbackApplied) return;
+                                      img.dataset.fallbackApplied = '1';
+                                      // Stop the browser from trying other srcSet candidates after failure.
+                                      try { img.removeAttribute('srcset'); } catch {}
+                                      try { img.removeAttribute('sizes'); } catch {}
+                                      // Mark this thumb as "cooling down" to avoid refetch storms on remounts.
+                                      try { if (thumb256) _markThumbFailed(thumb256, 90_000); } catch {}
+                                      img.src = '/broken-image.png';
+                                    } catch {}
+                                  }}
                                 />
                               ) : (
                                 <span className="text-xs text-gray-400">No Image</span>

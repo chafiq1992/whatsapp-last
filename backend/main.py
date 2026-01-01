@@ -3845,6 +3845,8 @@ class MessageProcessor:
         self.whatsapp_messenger = WorkspaceWhatsAppRouter(WHATSAPP_CONFIG_BY_WORKSPACE)
         self.media_dir = MEDIA_DIR
         self.media_dir.mkdir(exist_ok=True)
+        # Best-effort in-memory cache for automation rules (workspace-scoped)
+        self._automation_rules_cache: dict[str, tuple[float, list[dict]]] = {}
     
     # Fix the method that was duplicated at the bottom of the file
     async def process_outgoing_message(self, message_data: dict) -> dict:
@@ -3919,6 +3921,15 @@ class MessageProcessor:
             "type": "message_sent",
             "data": optimistic_message
         })
+
+        # Also notify inbox listeners so conversation previews update across agents/tabs.
+        # The admin UI listens for "message_received" events on /ws/admin and uses them as live previews.
+        try:
+            await self.connection_manager.broadcast_to_admins(
+                {"type": "message_received", "data": optimistic_message}
+            )
+        except Exception:
+            pass
         
         # 2. Cache for quick retrieval
         await self.redis_manager.cache_message(user_id, optimistic_message)
@@ -5044,6 +5055,195 @@ class MessageProcessor:
         except Exception as _exc:
             # Never break incoming flow due to auto-reply errors
             print(f"Auto-reply failed: {_exc}")
+
+        # Workspace-scoped "simple automations" (admin-configured rules).
+        # Run async so webhook ingest latency stays low.
+        try:
+            if msg_type == "text":
+                txt = str(message_obj.get("message") or "")
+            else:
+                txt = ""
+            asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj))
+        except Exception:
+            pass
+
+    async def _load_automation_rules(self, workspace: str) -> list[dict]:
+        """Load automation rules from settings store (per-workspace) with a small in-memory cache."""
+        ws = _coerce_workspace(workspace or DEFAULT_WORKSPACE)
+        now = time.time()
+        try:
+            cached = self._automation_rules_cache.get(ws)
+            if cached and (now - float(cached[0])) < 3.0:
+                return cached[1] or []
+        except Exception:
+            pass
+        try:
+            raw = await self.db_manager.get_setting("automation_rules")
+            rules = json.loads(raw) if raw else []
+            if not isinstance(rules, list):
+                rules = []
+        except Exception:
+            rules = []
+        # normalize to list[dict]
+        cleaned: list[dict] = []
+        for r in rules or []:
+            if not isinstance(r, dict):
+                continue
+            rid = str(r.get("id") or "").strip()
+            if not rid:
+                continue
+            cleaned.append(r)
+        try:
+            self._automation_rules_cache[ws] = (now, cleaned)
+        except Exception:
+            pass
+        return cleaned
+
+    def _render_template(self, s: str, ctx: dict) -> str:
+        """Very small templating helper: replaces {{ var }} with ctx[var]."""
+        try:
+            if not s:
+                return ""
+            out = str(s)
+            for k, v in (ctx or {}).items():
+                out = re.sub(r"\{\{\s*%s\s*\}\}" % re.escape(str(k)), str(v), out)
+            return out
+        except Exception:
+            return str(s or "")
+
+    async def _run_simple_automations(self, user_id: str, incoming_text: str, message_obj: dict | None = None) -> None:
+        """Execute enabled simple automation rules for an inbound WhatsApp text message."""
+        try:
+            # Only run for real WhatsApp customers, not internal channels
+            if not isinstance(user_id, str):
+                return
+            if user_id.startswith(("dm:", "team:", "agent:")):
+                return
+            # Only inbound messages
+            if message_obj and bool(message_obj.get("from_me")):
+                return
+
+            ws = get_current_workspace()
+            rules = await self._load_automation_rules(ws)
+            if not rules:
+                return
+
+            text = str(incoming_text or "")
+            text_lc = text.lower()
+            ctx = {
+                "phone": user_id,
+                "user_id": user_id,
+                "text": text,
+            }
+
+            for rule in rules:
+                try:
+                    if not isinstance(rule, dict):
+                        continue
+                    if not bool(rule.get("enabled", False)):
+                        continue
+                    trigger = rule.get("trigger") or {}
+                    if not isinstance(trigger, dict):
+                        trigger = {}
+                    if str(trigger.get("source") or "whatsapp").lower() != "whatsapp":
+                        continue
+                    if str(trigger.get("event") or "incoming_message").lower() not in ("incoming_message", "message"):
+                        continue
+
+                    # Condition
+                    cond = rule.get("condition") or {}
+                    if not isinstance(cond, dict):
+                        cond = {}
+                    mode = str(cond.get("match") or "contains").lower()
+                    needle = str(cond.get("value") or "").strip()
+                    keywords = cond.get("keywords")
+                    if isinstance(keywords, list):
+                        kws = [str(x or "").strip() for x in keywords if str(x or "").strip()]
+                    else:
+                        kws = []
+
+                    matched = False
+                    if mode == "any":
+                        matched = True
+                    elif kws:
+                        matched = any((k.lower() in text_lc) for k in kws)
+                    elif not needle:
+                        matched = True
+                    elif mode == "contains":
+                        matched = needle.lower() in text_lc
+                    elif mode == "starts_with":
+                        matched = text_lc.startswith(needle.lower())
+                    elif mode == "regex":
+                        try:
+                            matched = bool(re.search(needle, text, flags=re.IGNORECASE))
+                        except Exception:
+                            matched = False
+                    else:
+                        matched = False
+
+                    if not matched:
+                        continue
+
+                    # Cooldown (best-effort)
+                    cooldown = int(rule.get("cooldown_seconds") or 0)
+                    if cooldown > 0 and getattr(self.redis_manager, "redis_client", None):
+                        try:
+                            cd_key = f"automation:cooldown:{_coerce_workspace(ws)}:{rule.get('id')}:{user_id}"
+                            ok = await self.redis_manager.redis_client.set(cd_key, "1", ex=cooldown, nx=True)
+                            if not ok:
+                                continue
+                        except Exception:
+                            pass
+
+                    # Actions
+                    actions = rule.get("actions") or []
+                    if isinstance(actions, dict):
+                        actions = [actions]
+                    if not isinstance(actions, list):
+                        actions = []
+                    for act in actions:
+                        if not isinstance(act, dict):
+                            continue
+                        at = str(act.get("type") or "").strip().lower()
+                        if at in ("send_text", "send_whatsapp_text"):
+                            msg = self._render_template(str(act.get("text") or ""), ctx).strip()
+                            if not msg:
+                                continue
+                            await self.process_outgoing_message({
+                                "user_id": user_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": msg,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                # mark as system/automation for downstream filtering (best-effort)
+                                "agent_username": "automation",
+                            })
+                        elif at in ("add_tag", "tag"):
+                            tag = str(act.get("tag") or "").strip()
+                            if not tag:
+                                continue
+                            try:
+                                meta = await self.db_manager.get_conversation_meta(user_id)
+                                tags = list((meta or {}).get("tags") or []) if isinstance(meta, dict) else []
+                            except Exception:
+                                tags = []
+                            if tag not in tags:
+                                tags.append(tag)
+                                try:
+                                    await self.db_manager.set_conversation_tags(user_id, tags)
+                                    # Notify UI best-effort via admin ws: ChatList merges tags from conversation fetch,
+                                    # but this gives faster visual feedback.
+                                    await self.connection_manager.broadcast_to_admins({
+                                        "type": "conversation_tags_updated",
+                                        "data": {"user_id": user_id, "tags": tags},
+                                    })
+                                except Exception:
+                                    pass
+                except Exception as exc:
+                    print(f"automation rule failed: {exc}")
+                    continue
+        except Exception:
+            return
 
     # -------- survey flow --------
     async def send_survey_invite(self, user_id: str) -> None:
@@ -6753,6 +6953,68 @@ async def set_tag_options_endpoint(payload: dict = Body(...), _: dict = Depends(
             norm.append({"label": item, "icon": ""})
     await auth_db_manager.set_tag_options(norm)
     return {"ok": True, "count": len(norm)}
+
+
+# ---- Automation rules (workspace-scoped) ----
+@app.get("/automation/rules")
+async def get_automation_rules_endpoint(_: dict = Depends(require_admin)):
+    """Return saved automation rules for the current workspace."""
+    raw = await db_manager.get_setting("automation_rules")
+    try:
+        rules = json.loads(raw) if raw else []
+        if not isinstance(rules, list):
+            rules = []
+    except Exception:
+        rules = []
+    return rules
+
+
+@app.post("/automation/rules")
+async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Replace automation rules for the current workspace."""
+    rules = payload.get("rules")
+    if not isinstance(rules, list):
+        raise HTTPException(status_code=400, detail="rules must be a list")
+
+    cleaned: list[dict] = []
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "").strip()
+        if not rid:
+            rid = f"r_{uuid.uuid4().hex[:12]}"
+        name = str(r.get("name") or "").strip() or rid
+        enabled = bool(r.get("enabled", False))
+        trigger = r.get("trigger") if isinstance(r.get("trigger"), dict) else {}
+        cond = r.get("condition") if isinstance(r.get("condition"), dict) else {}
+        actions = r.get("actions") or []
+        if isinstance(actions, dict):
+            actions = [actions]
+        if not isinstance(actions, list):
+            actions = []
+        # cap sizes for safety
+        if len(actions) > 10:
+            actions = actions[:10]
+        cleaned.append(
+            {
+                "id": rid,
+                "name": name[:120],
+                "enabled": enabled,
+                "cooldown_seconds": int(r.get("cooldown_seconds") or 0),
+                "trigger": {
+                    "source": str((trigger or {}).get("source") or "whatsapp"),
+                    "event": str((trigger or {}).get("event") or "incoming_message"),
+                },
+                "condition": cond,
+                "actions": actions,
+            }
+        )
+
+    if len(cleaned) > 200:
+        cleaned = cleaned[:200]
+
+    await db_manager.set_setting("automation_rules", cleaned)
+    return {"ok": True, "count": len(cleaned)}
 
 @app.post("/admin/agents")
 async def create_agent_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):

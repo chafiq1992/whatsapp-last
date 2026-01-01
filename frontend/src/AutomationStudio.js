@@ -1,6 +1,6 @@
 // Lightweight Automation Studio — WhatsApp × Shopify
 // Self-contained, Tailwind-only (no shadcn, no framer-motion)
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Rocket,
   Plus,
@@ -19,6 +19,7 @@ import {
   Settings2,
   Trash,
 } from "lucide-react";
+import api from "./api";
 
 const NODE_TYPES = {
   TRIGGER: "trigger",
@@ -266,6 +267,56 @@ function makeEdge(from, fromPort, to, toPort) {
 }
 
 export default function AutomationStudio({ onClose }) {
+  // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
+  const [mode, setMode] = useState("simple"); // 'simple' | 'canvas'
+  const [rules, setRules] = useState([]);
+  const [rulesLoading, setRulesLoading] = useState(true);
+  const [rulesSaving, setRulesSaving] = useState(false);
+  const [rulesError, setRulesError] = useState("");
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [draft, setDraft] = useState({
+    id: "",
+    name: "",
+    enabled: true,
+    keywords: "",
+    replyText: "",
+    tag: "",
+    cooldownSeconds: 0,
+  });
+
+  const loadRules = async () => {
+    setRulesError("");
+    setRulesLoading(true);
+    try {
+      const res = await api.get("/automation/rules");
+      const arr = Array.isArray(res?.data) ? res.data : [];
+      setRules(arr);
+    } catch (e) {
+      setRulesError("Failed to load automations (admin only).");
+      setRules([]);
+    } finally {
+      setRulesLoading(false);
+    }
+  };
+
+  const persistRules = async (nextRules) => {
+    setRulesError("");
+    setRulesSaving(true);
+    try {
+      await api.post("/automation/rules", { rules: nextRules });
+      setRules(nextRules);
+    } catch (e) {
+      setRulesError("Failed to save automations.");
+    } finally {
+      setRulesSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    loadRules();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [flow, setFlow] = useState(defaultFlow);
   const [linking, setLinking] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -406,6 +457,20 @@ export default function AutomationStudio({ onClose }) {
           <span className="text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-700">Beta</span>
         </div>
         <div className="flex items-center gap-2">
+          <div className="hidden sm:flex items-center gap-1 mr-2">
+            <button
+              className={`px-2 py-1 border rounded text-sm ${mode === "simple" ? "bg-blue-50 border-blue-200" : ""}`}
+              onClick={() => setMode("simple")}
+            >
+              Simple (WhatsApp)
+            </button>
+            <button
+              className={`px-2 py-1 border rounded text-sm ${mode === "canvas" ? "bg-blue-50 border-blue-200" : ""}`}
+              onClick={() => setMode("canvas")}
+            >
+              Canvas (demo)
+            </button>
+          </div>
           <button
             className="px-2 py-1 border rounded text-sm"
             onClick={simulate}
@@ -415,13 +480,25 @@ export default function AutomationStudio({ onClose }) {
           </button>
           <button
             className="px-2 py-1 border rounded text-sm"
-            onClick={() => alert("Saved draft (wire up API)!")}
+            onClick={() => {
+              if (mode === "simple") {
+                persistRules(rules);
+              } else {
+                alert("Canvas draft saved locally (simple rules are the real backend integration).");
+              }
+            }}
           >
             <span className="inline-flex items-center gap-1"><Save className="w-4 h-4" />Save draft</span>
           </button>
           <button
             className="px-2 py-1 rounded text-sm bg-blue-600 text-white"
-            onClick={() => alert("Published (replace with API)")}
+            onClick={() => {
+              if (mode === "simple") {
+                persistRules(rules);
+              } else {
+                alert("Canvas publish is not wired. Use Simple mode to run real WhatsApp automations.");
+              }
+            }}
           >
             <span className="inline-flex items-center gap-1"><CirclePlay className="w-4 h-4" />Publish</span>
           </button>
@@ -431,7 +508,83 @@ export default function AutomationStudio({ onClose }) {
         </div>
       </header>
 
-      <div className="grid grid-cols-12 gap-3 p-3 h-[calc(100vh-3rem)]">
+      {mode === "simple" ? (
+        <SimpleAutomations
+          rules={rules}
+          loading={rulesLoading}
+          saving={rulesSaving}
+          error={rulesError}
+          onRefresh={loadRules}
+          onOpenNew={() => {
+            setDraft({ id: "", name: "", enabled: true, keywords: "", replyText: "", tag: "", cooldownSeconds: 0 });
+            setEditorOpen(true);
+          }}
+          onEdit={(r) => {
+            const cond = (r && r.condition) || {};
+            const kws = Array.isArray(cond.keywords) ? cond.keywords : [];
+            const acts = Array.isArray(r.actions) ? r.actions : [];
+            const aText = acts.find((x) => String(x?.type || "").toLowerCase().includes("text")) || null;
+            const aTag = acts.find((x) => String(x?.type || "").toLowerCase().includes("tag")) || null;
+            setDraft({
+              id: String(r.id || ""),
+              name: String(r.name || ""),
+              enabled: !!r.enabled,
+              keywords: kws.join(", "),
+              replyText: String(aText?.text || ""),
+              tag: String(aTag?.tag || ""),
+              cooldownSeconds: Number(r.cooldown_seconds || 0),
+            });
+            setEditorOpen(true);
+          }}
+          onToggle={async (id, enabled) => {
+            const next = (rules || []).map((r) => (r.id === id ? { ...r, enabled } : r));
+            await persistRules(next);
+          }}
+          onDelete={async (id) => {
+            if (!window.confirm("Delete this automation?")) return;
+            const next = (rules || []).filter((r) => r.id !== id);
+            await persistRules(next);
+          }}
+        >
+          {editorOpen && (
+            <RuleEditor
+              draft={draft}
+              saving={rulesSaving}
+              onClose={() => setEditorOpen(false)}
+              onChange={(p) => setDraft((d) => ({ ...d, ...p }))}
+              onSave={async () => {
+                const newId = draft.id || `r_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+                const kws = String(draft.keywords || "")
+                  .split(",")
+                  .map((x) => x.trim())
+                  .filter(Boolean);
+                const actions = [];
+                if ((draft.replyText || "").trim()) actions.push({ type: "send_text", text: String(draft.replyText || "") });
+                if ((draft.tag || "").trim()) actions.push({ type: "add_tag", tag: String(draft.tag || "").trim() });
+                const rule = {
+                  id: newId,
+                  name: draft.name || "WhatsApp Auto-reply",
+                  enabled: !!draft.enabled,
+                  cooldown_seconds: Number(draft.cooldownSeconds || 0),
+                  trigger: { source: "whatsapp", event: "incoming_message" },
+                  condition: { match: "contains", keywords: kws },
+                  actions,
+                };
+                const next = (() => {
+                  const arr = Array.isArray(rules) ? [...rules] : [];
+                  const idx = arr.findIndex((r) => r.id === newId);
+                  if (idx === -1) return [...arr, rule];
+                  arr[idx] = { ...arr[idx], ...rule, id: arr[idx].id };
+                  return arr;
+                })();
+                await persistRules(next);
+                setEditorOpen(false);
+              }}
+            />
+          )}
+        </SimpleAutomations>
+      ) : (
+        <div className="grid grid-cols-12 gap-3 p-3 h-[calc(100vh-3rem)]">
         <aside className="col-span-12 md:col-span-3 space-y-3 overflow-y-auto pb-20">
           <div className="border rounded">
             <div className="px-3 py-2 border-b text-sm font-medium flex items-center gap-2"><Webhook className="w-4 h-4"/>Triggers</div>
@@ -551,6 +704,7 @@ export default function AutomationStudio({ onClose }) {
           <button className="px-2 py-1 rounded text-sm bg-blue-600 text-white" onClick={()=>alert("Published!")}><span className="inline-flex items-center gap-1"><CirclePlay className="w-4 h-4"/>Publish</span></button>
         </div>
       </footer>
+      )}
     </div>
   );
 }
@@ -858,6 +1012,113 @@ function Inspector({ node, onUpdate }){
     );
   }
   return <div className="text-sm text-slate-500">No settings.</div>;
+}
+
+function SimpleAutomations({ rules, loading, saving, error, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
+  return (
+    <div className="p-4 max-w-5xl mx-auto">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <div className="text-lg font-semibold">WhatsApp Automations</div>
+          <div className="text-sm text-slate-500">Real-time automations connected to the inbox (trigger on incoming WhatsApp messages).</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button className="px-3 py-1.5 border rounded text-sm" onClick={onRefresh} disabled={loading || saving}>Refresh</button>
+          <button className="px-3 py-1.5 rounded text-sm bg-blue-600 text-white" onClick={onOpenNew} disabled={loading || saving}>+ New rule</button>
+        </div>
+      </div>
+
+      {error && <div className="mb-3 p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{error}</div>}
+      {loading && <div className="text-sm text-slate-500">Loading…</div>}
+
+      {!loading && (
+        <div className="grid gap-2">
+          {(rules || []).length === 0 ? (
+            <div className="p-4 rounded border bg-white text-sm text-slate-500">No automations yet. Create your first rule.</div>
+          ) : (
+            (rules || []).map((r) => (
+              <div key={r.id} className="p-3 rounded border bg-white flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <div className="font-semibold truncate">{r.name || r.id}</div>
+                    <span className={`text-xs px-2 py-0.5 rounded ${r.enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                      {r.enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1 truncate">Trigger: WhatsApp incoming message</div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <label className="text-sm flex items-center gap-2">
+                    <input type="checkbox" checked={!!r.enabled} onChange={(e) => onToggle(r.id, e.target.checked)} />
+                    On
+                  </label>
+                  <button className="px-2 py-1 border rounded text-sm" onClick={() => onEdit(r)}>Edit</button>
+                  <button className="px-2 py-1 border rounded text-sm text-rose-700 border-rose-200" onClick={() => onDelete(r.id)}>Delete</button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {children}
+
+      <div className="mt-6 text-xs text-slate-500">
+        Tip: after enabling a rule, send a WhatsApp message matching the keywords and you should see the auto-reply appear instantly in the same conversation.
+      </div>
+    </div>
+  );
+}
+
+function RuleEditor({ draft, saving, onClose, onChange, onSave }) {
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[100]" onClick={onClose}>
+      <div className="w-[680px] max-w-[92vw] bg-white rounded-xl border shadow-xl p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="font-semibold">{draft.id ? "Edit rule" : "New rule"}</div>
+          <button className="px-2 py-1 border rounded text-sm" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">Name</div>
+            <input className="w-full border rounded px-2 py-1" value={draft.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="e.g. Auto-reply price" />
+          </div>
+          <div>
+            <div className="text-xs text-slate-500 mb-1">Keywords (comma separated)</div>
+            <input className="w-full border rounded px-2 py-1" value={draft.keywords} onChange={(e) => onChange({ keywords: e.target.value })} placeholder="price, livraison, سومة" />
+            <div className="text-[11px] text-slate-500 mt-1">If empty, it will match all incoming messages.</div>
+          </div>
+          <div>
+            <div className="text-xs text-slate-500 mb-1">Cooldown (seconds)</div>
+            <input type="number" className="w-full border rounded px-2 py-1" value={draft.cooldownSeconds} onChange={(e) => onChange({ cooldownSeconds: Number(e.target.value || 0) })} />
+            <div className="text-[11px] text-slate-500 mt-1">Prevents spam replies to the same user.</div>
+          </div>
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">Auto-reply text</div>
+            <textarea className="w-full border rounded px-2 py-1" rows={5} value={draft.replyText} onChange={(e) => onChange({ replyText: e.target.value })} placeholder="Type the WhatsApp message to send…" />
+          </div>
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">Optional tag to add</div>
+            <input className="w-full border rounded px-2 py-1" value={draft.tag} onChange={(e) => onChange({ tag: e.target.value })} placeholder="e.g. Auto" />
+          </div>
+          <div className="md:col-span-2">
+            <label className="text-sm flex items-center gap-2">
+              <input type="checkbox" checked={!!draft.enabled} onChange={(e) => onChange({ enabled: e.target.checked })} />
+              Enabled
+            </label>
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button className="px-3 py-1.5 border rounded text-sm" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="px-3 py-1.5 rounded text-sm bg-blue-600 text-white" onClick={onSave} disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 

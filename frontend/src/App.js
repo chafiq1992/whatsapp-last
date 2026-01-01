@@ -532,6 +532,17 @@ export default function App() {
               return [newConv, ...prev];
             });
           }
+          if (data.type === "conversation_tags_updated") {
+            const d = data.data || {};
+            const userId = d.user_id;
+            const tags = Array.isArray(d.tags) ? d.tags : [];
+            if (userId) {
+              setConversations((prev) => prev.map((c) => c.user_id === userId ? { ...c, tags } : c));
+              if (activeUserRef.current?.user_id === userId) {
+                setActiveUser((prev) => prev ? { ...prev, tags } : prev);
+              }
+            }
+          }
         } catch (err) {
           console.error("WS message parsing failed", err);
         }

@@ -584,8 +584,9 @@ export default function AutomationStudio({ onClose }) {
           )}
         </SimpleAutomations>
       ) : (
-        <div className="grid grid-cols-12 gap-3 p-3 h-[calc(100vh-3rem)]">
-        <aside className="col-span-12 md:col-span-3 space-y-3 overflow-y-auto pb-20">
+        <>
+          <div className="grid grid-cols-12 gap-3 p-3 h-[calc(100vh-3rem)]">
+          <aside className="col-span-12 md:col-span-3 space-y-3 overflow-y-auto pb-20">
           <div className="border rounded">
             <div className="px-3 py-2 border-b text-sm font-medium flex items-center gap-2"><Webhook className="w-4 h-4"/>Triggers</div>
             <div className="p-2 grid gap-2">
@@ -692,18 +693,19 @@ export default function AutomationStudio({ onClose }) {
             </div>
           </div>
         </aside>
-      </div>
-
-      <footer className="fixed bottom-3 left-0 right-0 flex justify-center">
-        <div className="flex items-center gap-2 bg-white/80 backdrop-blur rounded-full shadow px-3 py-2 border">
-          <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/>Validated</span>
-          <span className="text-xs text-slate-500">No errors</span>
-          <div className="w-px h-5 bg-slate-300 mx-1"/>
-          <button className="px-2 py-1 border rounded text-sm" onClick={simulate} disabled={running}><span className="inline-flex items-center gap-1"><Play className="w-4 h-4"/>Test</span></button>
-          <button className="px-2 py-1 border rounded text-sm" onClick={()=>alert("Saved!")}><span className="inline-flex items-center gap-1"><Save className="w-4 h-4"/>Save</span></button>
-          <button className="px-2 py-1 rounded text-sm bg-blue-600 text-white" onClick={()=>alert("Published!")}><span className="inline-flex items-center gap-1"><CirclePlay className="w-4 h-4"/>Publish</span></button>
         </div>
-      </footer>
+
+          <footer className="fixed bottom-3 left-0 right-0 flex justify-center">
+            <div className="flex items-center gap-2 bg-white/80 backdrop-blur rounded-full shadow px-3 py-2 border">
+              <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/>Validated</span>
+              <span className="text-xs text-slate-500">No errors</span>
+              <div className="w-px h-5 bg-slate-300 mx-1"/>
+              <button className="px-2 py-1 border rounded text-sm" onClick={simulate} disabled={running}><span className="inline-flex items-center gap-1"><Play className="w-4 h-4"/>Test</span></button>
+              <button className="px-2 py-1 border rounded text-sm" onClick={()=>alert("Saved!")}><span className="inline-flex items-center gap-1"><Save className="w-4 h-4"/>Save</span></button>
+              <button className="px-2 py-1 rounded text-sm bg-blue-600 text-white" onClick={()=>alert("Published!")}><span className="inline-flex items-center gap-1"><CirclePlay className="w-4 h-4"/>Publish</span></button>
+            </div>
+          </footer>
+        </>
       )}
     </div>
   );

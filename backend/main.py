@@ -5773,6 +5773,214 @@ class MessageProcessor:
                 except Exception:
                     pass
 
+    async def _run_delivery_automations(self, event: str, payload: dict, workspace: str | None = None) -> None:
+        """Execute automations for a Delivery App webhook event (e.g. order status changed).
+
+        Rules must have:
+          trigger.source == "delivery"
+          trigger.event == <event>, e.g. "order_status_changed"
+        """
+        ws_token = None
+        try:
+            if workspace:
+                try:
+                    ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(workspace))
+                except Exception:
+                    ws_token = None
+
+            ws = get_current_workspace()
+            rules = await self._load_automation_rules(ws)
+            if not rules:
+                return
+
+            event_norm = str(event or "").strip() or "order_status_changed"
+            data = payload if isinstance(payload, dict) else {}
+
+            # Accept either flat payload or { order: {...} }
+            order_obj = data.get("order") if isinstance(data.get("order"), dict) else {}
+            if not isinstance(order_obj, dict):
+                order_obj = {}
+
+            def _first(*vals):
+                for v in vals:
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if s:
+                        return s
+                return ""
+
+            phone_raw = _first(
+                data.get("customer_phone"),
+                data.get("phone"),
+                order_obj.get("customer_phone"),
+                order_obj.get("phone"),
+            )
+            phone_digits = _digits_only(phone_raw)
+
+            status_val = _first(
+                data.get("status"),
+                data.get("new_status"),
+                order_obj.get("status"),
+                order_obj.get("delivery_status"),
+                order_obj.get("new_status"),
+            )
+            status_norm = str(status_val or "").strip()
+
+            ctx = {
+                "event": event_norm,
+                "phone": phone_digits,
+                "status": status_norm,
+                "order": order_obj,
+                # Common aliases for convenience in templates
+                "order_id": order_obj.get("id") or data.get("order_id") or "",
+                "order_name": order_obj.get("order_name") or data.get("order_name") or "",
+                "city": order_obj.get("city") or data.get("city") or "",
+                "cash_amount": order_obj.get("cash_amount") or data.get("cash_amount") or "",
+                "payload": data,
+            }
+
+            # Best-effort raw text for fallback keyword matching
+            try:
+                hay = json.dumps(data, ensure_ascii=False).lower()
+            except Exception:
+                hay = ""
+
+            for rule in rules:
+                try:
+                    if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
+                        continue
+                    trigger = rule.get("trigger") or {}
+                    if not isinstance(trigger, dict):
+                        trigger = {}
+                    if str(trigger.get("source") or "").lower() != "delivery":
+                        continue
+                    if str(trigger.get("event") or "").strip() != event_norm:
+                        continue
+
+                    # Optional testing guard: only fire for specific phone numbers.
+                    try:
+                        test_phones = rule.get("test_phone_numbers") or rule.get("test_numbers") or []
+                        if isinstance(test_phones, str):
+                            test_phones = [x.strip() for x in re.split(r"[,\n\r]+", test_phones) if x and x.strip()]
+                        if isinstance(test_phones, list):
+                            test_set = {_digits_only(str(x or "")) for x in test_phones}
+                            test_set = {x for x in test_set if x}
+                        else:
+                            test_set = set()
+                        if test_set:
+                            if not phone_digits:
+                                continue
+                            if phone_digits not in test_set:
+                                continue
+                    except Exception:
+                        pass
+
+                    cond = rule.get("condition") or {}
+                    if not isinstance(cond, dict):
+                        cond = {}
+                    mode = str(cond.get("match") or "any").strip().lower()
+
+                    matched = False
+                    if mode in ("any", "*"):
+                        matched = True
+                    elif mode in ("status_in", "delivery_status_in"):
+                        raw = cond.get("statuses")
+                        if isinstance(raw, str):
+                            statuses = [x.strip() for x in re.split(r"[,\n\r]+", raw) if x and x.strip()]
+                        elif isinstance(raw, list):
+                            statuses = [str(x or "").strip() for x in raw if str(x or "").strip()]
+                        else:
+                            statuses = []
+                        sset = {s.lower() for s in statuses if s}
+                        matched = bool(status_norm) and (status_norm.lower() in sset) if sset else True
+                    elif mode in ("status_equals", "delivery_status_equals"):
+                        needle = str(cond.get("value") or "").strip().lower()
+                        matched = bool(needle) and bool(status_norm) and (status_norm.lower() == needle)
+                    else:
+                        # Fallback: contains keywords in payload json
+                        keywords = cond.get("keywords")
+                        kws = [str(x or "").strip().lower() for x in keywords] if isinstance(keywords, list) else []
+                        if kws and hay:
+                            matched = any(k and (k in hay) for k in kws)
+                        else:
+                            matched = True
+
+                    if not matched:
+                        continue
+
+                    try:
+                        await self.db_manager.inc_automation_rule_stat(
+                            str(rule.get("id") or ""),
+                            "triggers",
+                            1,
+                            last_trigger_ts=str(datetime.utcnow().isoformat()),
+                        )
+                    except Exception:
+                        pass
+
+                    actions = rule.get("actions") or []
+                    if isinstance(actions, dict):
+                        actions = [actions]
+                    if not isinstance(actions, list):
+                        actions = []
+
+                    for act in actions:
+                        if not isinstance(act, dict):
+                            continue
+                        at = str(act.get("type") or "").strip().lower()
+                        if at in ("send_text", "send_whatsapp_text"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
+                            msg = self._render_template(str(act.get("text") or ""), ctx).strip()
+                            if not (to_id and msg):
+                                continue
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": msg,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                            })
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
+                        elif at in ("send_template", "send_whatsapp_template"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
+                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                            lang = str(act.get("language") or "en").strip() or "en"
+                            comps = act.get("components") or []
+                            if not isinstance(comps, list):
+                                comps = []
+                            if not (to_id and tname):
+                                continue
+                            preview = str(act.get("preview") or f"[template] {tname}")
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": preview,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                                "template_name": tname,
+                                "template_language": lang,
+                                "template_components": comps,
+                            })
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
+                except Exception as exc:
+                    print(f"delivery automation failed: {exc}")
+                    continue
+        finally:
+            if ws_token is not None:
+                try:
+                    _CURRENT_WORKSPACE.reset(ws_token)
+                except Exception:
+                    pass
+
     # -------- survey flow --------
     async def send_survey_invite(self, user_id: str) -> None:
         body = (
@@ -7795,6 +8003,54 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
             pass
 
         return {"ok": True, "workspace": ws, "topic": topic}
+    finally:
+        try:
+            _CURRENT_WORKSPACE.reset(ws_token)
+        except Exception:
+            pass
+
+
+@app.post("/delivery/webhook/{workspace}")
+async def delivery_webhook_endpoint(workspace: str, request: Request):
+    """Delivery app webhook endpoint (one URL per workspace).
+
+    Delivery app should POST JSON with fields like:
+      { "event": "order_status_changed", "order": { ... }, "status": "Livré", "customer_phone": "+212..." }
+
+    Optional security: configure `DELIVERY_WEBHOOK_SECRET` or per-workspace
+    `DELIVERY_WEBHOOK_SECRET_<WORKSPACE>` to enable HMAC verification.
+    """
+    ws = _coerce_workspace(workspace)
+    ws_token = _CURRENT_WORKSPACE.set(ws)
+    try:
+        body = await request.body()
+
+        secret = (
+            os.getenv(f"DELIVERY_WEBHOOK_SECRET_{ws.upper()}", "")
+            or os.getenv("DELIVERY_WEBHOOK_SECRET", "")
+        ).strip()
+        if secret:
+            sig_header = (request.headers.get("X-Delivery-Signature") or "").strip()
+            digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+            expected = b64encode(digest).decode("utf-8")
+            if not hmac.compare_digest(expected, sig_header):
+                raise HTTPException(status_code=401, detail="Invalid delivery webhook HMAC")
+
+        try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except Exception:
+            payload = {}
+
+        event = "order_status_changed"
+        if isinstance(payload, dict):
+            event = str(payload.get("event") or payload.get("type") or event).strip() or event
+
+        try:
+            asyncio.create_task(message_processor._run_delivery_automations(event, payload, workspace=ws))
+        except Exception:
+            pass
+
+        return {"ok": True, "workspace": ws, "event": event}
     finally:
         try:
             _CURRENT_WORKSPACE.reset(ws_token)

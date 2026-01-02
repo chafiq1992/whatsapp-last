@@ -239,6 +239,19 @@ const SHOPIFY_EVENTS = [
   },
 ];
 
+const DELIVERY_VARS = [
+  "status",
+  "order_id",
+  "order_name",
+  "city",
+  "cash_amount",
+  "phone",
+  "order.customer_phone",
+  "order.address",
+  "order.tags",
+  "payload",
+];
+
 function TagIcon() {
   return (
     <svg
@@ -320,6 +333,8 @@ export default function AutomationStudio({ onClose }) {
     shopifyTopic: "orders/paid",
     shopifyTaggedWith: "",
     shopifyTestPhones: "",
+    deliveryStatuses: "",
+    deliveryTestPhones: "",
     actionMode: "text", // 'text' | 'template'
     to: "{{ phone }}",
     templateName: "",
@@ -663,6 +678,8 @@ export default function AutomationStudio({ onClose }) {
               shopifyTopic: "orders/paid",
               shopifyTaggedWith: "",
               shopifyTestPhones: "",
+              deliveryStatuses: "",
+              deliveryTestPhones: "",
               actionMode: "text",
               to: "{{ phone }}",
               templateName: "",
@@ -685,6 +702,9 @@ export default function AutomationStudio({ onClose }) {
             const taggedWith = String(r?.condition?.match || "").toLowerCase() === "tag_contains"
               ? String(r?.condition?.value || r?.condition?.tag || "")
               : "";
+            const isDelivery = source === "delivery";
+            const statuses = Array.isArray(r?.condition?.statuses) ? r.condition.statuses : [];
+            const statusesStr = statuses.filter(Boolean).join(", ");
             setDraft({
               id: String(r.id || ""),
               name: String(r.name || ""),
@@ -693,10 +713,12 @@ export default function AutomationStudio({ onClose }) {
               replyText: String(aText?.text || ""),
               tag: String(aTag?.tag || ""),
               cooldownSeconds: Number(r.cooldown_seconds || 0),
-              triggerSource: source === "shopify" ? "shopify" : "whatsapp",
+              triggerSource: source === "shopify" ? "shopify" : (source === "delivery" ? "delivery" : "whatsapp"),
               shopifyTopic: String(trig.event || "orders/paid"),
               shopifyTaggedWith: taggedWith,
               shopifyTestPhones: testPhonesStr,
+              deliveryStatuses: isDelivery ? statusesStr : "",
+              deliveryTestPhones: isDelivery ? testPhonesStr : "",
               actionMode: aTpl ? "template" : "text",
               to: String((aText?.to || aTpl?.to) || "{{ phone }}"),
               templateName: String(aTpl?.template_name || ""),
@@ -736,6 +758,14 @@ export default function AutomationStudio({ onClose }) {
                   .split(/\r?\n|,/g)
                   .map((x) => x.trim())
                   .filter(Boolean);
+                const deliveryTestPhones = String(draft.deliveryTestPhones || "")
+                  .split(/\r?\n|,/g)
+                  .map((x) => x.trim())
+                  .filter(Boolean);
+                const deliveryStatuses = String(draft.deliveryStatuses || "")
+                  .split(/\r?\n|,/g)
+                  .map((x) => x.trim())
+                  .filter(Boolean);
                 const actions = [];
                 if (draft.actionMode === "template") {
                   const tn = String(draft.templateName || "").trim();
@@ -762,13 +792,23 @@ export default function AutomationStudio({ onClose }) {
                   name: draft.name || "WhatsApp Auto-reply",
                   enabled: !!draft.enabled,
                   cooldown_seconds: Number(draft.cooldownSeconds || 0),
-                  trigger: draft.triggerSource === "shopify"
-                    ? { source: "shopify", event: String(draft.shopifyTopic || "orders/paid") }
-                    : { source: "whatsapp", event: "incoming_message" },
-                  condition: draft.triggerSource === "shopify" && tagged
-                    ? { match: "tag_contains", value: tagged }
-                    : { match: "contains", keywords: kws },
-                  ...(draft.triggerSource === "shopify" ? { test_phone_numbers: testPhones } : {}),
+                  trigger:
+                    draft.triggerSource === "shopify"
+                      ? { source: "shopify", event: String(draft.shopifyTopic || "orders/paid") }
+                      : draft.triggerSource === "delivery"
+                        ? { source: "delivery", event: "order_status_changed" }
+                        : { source: "whatsapp", event: "incoming_message" },
+                  condition:
+                    draft.triggerSource === "shopify" && tagged
+                      ? { match: "tag_contains", value: tagged }
+                      : draft.triggerSource === "delivery"
+                        ? (deliveryStatuses.length ? { match: "status_in", statuses: deliveryStatuses } : { match: "any" })
+                        : { match: "contains", keywords: kws },
+                  ...(draft.triggerSource === "shopify"
+                    ? { test_phone_numbers: testPhones }
+                    : draft.triggerSource === "delivery"
+                      ? { test_phone_numbers: deliveryTestPhones }
+                      : {}),
                   actions,
                 };
                 const next = (() => {
@@ -1358,6 +1398,9 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
               <button className={`px-2 py-1 border rounded text-sm ${draft.triggerSource === "shopify" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ triggerSource: "shopify" })}>
                 Shopify webhook
               </button>
+              <button className={`px-2 py-1 border rounded text-sm ${draft.triggerSource === "delivery" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ triggerSource: "delivery" })}>
+                Delivery status
+              </button>
             </div>
             {draft.triggerSource === "shopify" && (
               <div className="mt-2">
@@ -1427,13 +1470,71 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                 </div>
               </div>
             )}
+            {draft.triggerSource === "delivery" && (
+              <div className="mt-2">
+                <div className="text-xs text-slate-500 mb-1">Delivery event</div>
+                <div className="w-full border rounded px-2 py-1 bg-slate-50 text-sm">
+                  Order status changed <span className="font-mono text-xs">(order_status_changed)</span>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  The delivery app posts one webhook per status change (same URL). You can filter which statuses should send WhatsApp.
+                </div>
+
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Statuses (optional, comma separated)</div>
+                    <input
+                      className="w-full border rounded px-2 py-1"
+                      value={draft.deliveryStatuses || ""}
+                      onChange={(e) => onChange({ deliveryStatuses: e.target.value })}
+                      placeholder="En cours, Rescheduled, Livré, Paid, Returned…"
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      If empty, it will match all status changes.
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Test phone numbers (optional)</div>
+                    <textarea
+                      className="w-full border rounded px-2 py-1 font-mono text-xs"
+                      rows={3}
+                      value={draft.deliveryTestPhones || ""}
+                      onChange={(e) => onChange({ deliveryTestPhones: e.target.value })}
+                      placeholder={"+212612345678\n+212600000000"}
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      If set, this rule only fires when the delivery order phone matches one of these numbers.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-2">
+                  <div className="text-xs text-slate-500 mb-1">Delivery variables (click to copy)</div>
+                  <div className="flex flex-wrap gap-1">
+                    {DELIVERY_VARS.map((v) => (
+                      <button
+                        key={`delvar:${v}`}
+                        type="button"
+                        className="px-2 py-0.5 rounded border text-xs hover:bg-slate-50"
+                        onClick={() => copyVar(v)}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Use dotted paths like <span className="font-mono">{"{{ order.order_name }}"}</span>.
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="md:col-span-2">
             <div className="text-xs text-slate-500 mb-1">Send to (WhatsApp number)</div>
             <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.to || "{{ phone }}"} onChange={(e) => onChange({ to: e.target.value })} />
             <div className="text-[11px] text-slate-500 mt-1">
-              Use <span className="font-mono">{"{{ phone }}"}</span> (works for WhatsApp + Shopify triggers).
+              Use <span className="font-mono">{"{{ phone }}"}</span> (works for WhatsApp + Shopify + Delivery triggers).
             </div>
           </div>
 
@@ -1501,6 +1602,23 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                           {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 24).map((v) => (
                             <button
                               key={`shopvar2:${v}`}
+                              type="button"
+                              className="px-2 py-0.5 rounded border text-xs hover:bg-slate-50"
+                              onClick={() => copyVar(v)}
+                            >
+                              {v}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {draft.triggerSource === "delivery" && (
+                      <div className="mb-2">
+                        <div className="text-[11px] text-slate-500 mb-1">Insert Delivery variable (click to copy then paste into Var fields)</div>
+                        <div className="flex flex-wrap gap-1">
+                          {DELIVERY_VARS.slice(0, 24).map((v) => (
+                            <button
+                              key={`delvar2:${v}`}
                               type="button"
                               className="px-2 py-0.5 rounded border text-xs hover:bg-slate-50"
                               onClick={() => copyVar(v)}

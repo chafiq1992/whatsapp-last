@@ -705,6 +705,20 @@ export default function AutomationStudio({ onClose }) {
             const isDelivery = source === "delivery";
             const statuses = Array.isArray(r?.condition?.statuses) ? r.condition.statuses : [];
             const statusesStr = statuses.filter(Boolean).join(", ");
+            const tplVars = (() => {
+              try {
+                const comps = Array.isArray(aTpl?.components) ? aTpl.components : [];
+                const body = comps.find((c) => String(c?.type || "").toLowerCase() === "body") || null;
+                const params = Array.isArray(body?.parameters) ? body.parameters : [];
+                // We currently only expose text params in the UI
+                return params
+                  .filter((p) => String(p?.type || "").toLowerCase() === "text")
+                  .map((p) => String(p?.text || ""))
+                  .filter((s) => s.trim().length > 0);
+              } catch {
+                return [];
+              }
+            })();
             setDraft({
               id: String(r.id || ""),
               name: String(r.name || ""),
@@ -723,7 +737,7 @@ export default function AutomationStudio({ onClose }) {
               to: String((aText?.to || aTpl?.to) || "{{ phone }}"),
               templateName: String(aTpl?.template_name || ""),
               templateLanguage: String(aTpl?.language || "en"),
-              templateVars: [],
+              templateVars: tplVars,
             });
             setEditorOpen(true);
           }}

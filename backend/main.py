@@ -7740,23 +7740,37 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
             actions = [actions]
         if not isinstance(actions, list):
             actions = []
+        # Optional testing guard: list of phone numbers (digits-only comparison is done at runtime)
+        test_phones = r.get("test_phone_numbers") or r.get("test_numbers") or []
+        if isinstance(test_phones, str):
+            test_phones = [x.strip() for x in re.split(r"[,\n\r]+", test_phones) if x and x.strip()]
+        if not isinstance(test_phones, list):
+            test_phones = []
+        # cap sizes for safety
+        if len(test_phones) > 200:
+            test_phones = test_phones[:200]
+        try:
+            test_phones = [str(x or "").strip() for x in test_phones if str(x or "").strip()]
+        except Exception:
+            test_phones = []
         # cap sizes for safety
         if len(actions) > 10:
             actions = actions[:10]
-        cleaned.append(
-            {
-                "id": rid,
-                "name": name[:120],
-                "enabled": enabled,
-                "cooldown_seconds": int(r.get("cooldown_seconds") or 0),
-                "trigger": {
-                    "source": str((trigger or {}).get("source") or "whatsapp"),
-                    "event": str((trigger or {}).get("event") or "incoming_message"),
-                },
-                "condition": cond,
-                "actions": actions,
-            }
-        )
+        out_rule = {
+            "id": rid,
+            "name": name[:120],
+            "enabled": enabled,
+            "cooldown_seconds": int(r.get("cooldown_seconds") or 0),
+            "trigger": {
+                "source": str((trigger or {}).get("source") or "whatsapp"),
+                "event": str((trigger or {}).get("event") or "incoming_message"),
+            },
+            "condition": cond,
+            "actions": actions,
+        }
+        if test_phones:
+            out_rule["test_phone_numbers"] = test_phones
+        cleaned.append(out_rule)
 
     if len(cleaned) > 200:
         cleaned = cleaned[:200]

@@ -11,7 +11,20 @@ def test_automation_rules_api_roundtrip(client):
                 "cooldown_seconds": 0,
                 "trigger": {"source": "whatsapp", "event": "incoming_message"},
                 "condition": {"match": "contains", "keywords": ["hello"]},
-                "actions": [{"type": "send_text", "text": "hi"}],
+                # Ensure optional fields survive the backend "cleaning" step
+                "test_phone_numbers": ["+212600000000", "212611111111"],
+                "actions": [
+                    {"type": "send_text", "text": "hi"},
+                    {
+                        "type": "send_whatsapp_template",
+                        "to": "{{ phone }}",
+                        "template_name": "order_confirmed",
+                        "language": "ar",
+                        "components": [
+                            {"type": "body", "parameters": [{"type": "text", "text": "{{ order_number }}"}]}
+                        ],
+                    },
+                ],
             }
         ]
     }
@@ -20,7 +33,12 @@ def test_automation_rules_api_roundtrip(client):
     out = client.get("/automation/rules")
     assert out.status_code == 200
     data = out.json()
-    assert any(x.get("id") == "r1" for x in data)
+    r1 = next((x for x in data if x.get("id") == "r1"), None)
+    assert r1 is not None
+    assert "test_phone_numbers" in r1
+    assert any("212600000000" in str(x) for x in (r1.get("test_phone_numbers") or []))
+    acts = r1.get("actions") or []
+    assert any(str(a.get("type") or "").lower().endswith("template") for a in acts if isinstance(a, dict))
 
 
 def test_automation_rules_stats_from_db(db_manager, client, monkeypatch):

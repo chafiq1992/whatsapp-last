@@ -5656,18 +5656,30 @@ class MessageProcessor:
                         trigger = {}
                     if str(trigger.get("source") or "").lower() != "shopify":
                         continue
+                    # Allow exact topic match; Shopify sends topics like "orders/paid", "orders/updated", etc.
                     if str(trigger.get("event") or "").strip() != topic_norm:
                         continue
 
-                    # Optional simple condition: keywords match against payload JSON
+                    # Optional simple condition:
+                    # - match=contains + keywords: search within payload JSON
+                    # - match=tag_contains + value: match order.tags contains value (Shopify tags string)
                     cond = rule.get("condition") or {}
                     if not isinstance(cond, dict):
                         cond = {}
-                    keywords = cond.get("keywords")
-                    kws = [str(x or "").strip().lower() for x in keywords] if isinstance(keywords, list) else []
-                    if kws and hay:
-                        if not any(k and (k in hay) for k in kws):
-                            continue
+                    match_mode = str(cond.get("match") or "").strip().lower()
+                    if match_mode in ("tag_contains", "tagged_with"):
+                        needle = str(cond.get("value") or cond.get("tag") or "").strip().lower()
+                        if needle:
+                            tags_str = str(data.get("tags") or "")
+                            tags = [t.strip().lower() for t in tags_str.split(",") if t and t.strip()]
+                            if needle not in tags:
+                                continue
+                    else:
+                        keywords = cond.get("keywords")
+                        kws = [str(x or "").strip().lower() for x in keywords] if isinstance(keywords, list) else []
+                        if kws and hay:
+                            if not any(k and (k in hay) for k in kws):
+                                continue
 
                     # Stats trigger
                     try:
@@ -7723,6 +7735,12 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
     Configure in Shopify Admin → Settings → Notifications → Webhooks:
       URL: https://<your-domain>/shopify/webhook/irranova
       URL: https://<your-domain>/shopify/webhook/irrakids
+
+    Notes:
+    - Shopify requires the FULL URL (base domain + path). Pasting just "/shopify/webhook/irranova" is not enough.
+    - Use one webhook per workspace if you run multiple stores/workspaces in the same app.
+    - (Optional but recommended) Configure `SHOPIFY_WEBHOOK_SECRET` or per-workspace
+      `SHOPIFY_WEBHOOK_SECRET_<WORKSPACE>` (e.g. `SHOPIFY_WEBHOOK_SECRET_IRRANOVA`) to enable HMAC verification.
     """
     ws = _coerce_workspace(workspace)
     ws_token = _CURRENT_WORKSPACE.set(ws)

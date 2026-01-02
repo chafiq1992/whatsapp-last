@@ -1247,7 +1247,13 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
   const shopifyTopics = [
     { topic: "orders/create", label: "Shopify: New Order (orders/create)" },
     { topic: "orders/paid", label: "Shopify: Order Paid (orders/paid)" },
+    { topic: "orders/updated", label: "Shopify: Order Updated (orders/updated) — use for tags" },
+    { topic: "orders/cancelled", label: "Shopify: Order Cancelled (orders/cancelled)" },
     { topic: "fulfillments/create", label: "Shopify: Fulfillment Created (fulfillments/create)" },
+    { topic: "fulfillments/update", label: "Shopify: Fulfillment Updated (fulfillments/update)" },
+    { topic: "customers/create", label: "Shopify: Customer Created (customers/create)" },
+    { topic: "customers/update", label: "Shopify: Customer Updated (customers/update)" },
+    { topic: "refunds/create", label: "Shopify: Refund Created (refunds/create)" },
   ];
 
   const approvedTemplates = (templates || []).filter((t) => String(t?.status || "").toLowerCase() === "approved");
@@ -1261,6 +1267,19 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
       if (Array.isArray(bodyText) && Array.isArray(bodyText[0])) return bodyText[0].length;
     } catch {}
     return 0;
+  };
+
+  const shopifyVarsByTopic = (topic) => {
+    try {
+      const ev = (Array.isArray(SHOPIFY_EVENTS) ? SHOPIFY_EVENTS : []).find((x) => x.topic === topic);
+      if (ev && Array.isArray(ev.variables)) return ev.variables;
+    } catch {}
+    // minimal fallback
+    return ["customer.phone", "name", "order_number", "total_price", "tags"];
+  };
+
+  const copyVar = async (v) => {
+    try { await navigator.clipboard.writeText(`{{ ${v} }}`); } catch {}
   };
 
   return (
@@ -1290,11 +1309,39 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
             {draft.triggerSource === "shopify" && (
               <div className="mt-2">
                 <div className="text-xs text-slate-500 mb-1">Shopify topic</div>
-                <select className="w-full border rounded px-2 py-1" value={draft.shopifyTopic || "orders/paid"} onChange={(e) => onChange({ shopifyTopic: e.target.value })}>
-                  {shopifyTopics.map((x) => <option key={x.topic} value={x.topic}>{x.label}</option>)}
-                </select>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <select className="w-full border rounded px-2 py-1" value={draft.shopifyTopic || "orders/paid"} onChange={(e) => onChange({ shopifyTopic: e.target.value })}>
+                    {shopifyTopics.map((x) => <option key={x.topic} value={x.topic}>{x.label}</option>)}
+                  </select>
+                  <input
+                    className="w-full border rounded px-2 py-1 font-mono text-xs"
+                    value={draft.shopifyTopic || ""}
+                    onChange={(e) => onChange({ shopifyTopic: e.target.value })}
+                    placeholder="Custom topic (optional)"
+                  />
+                </div>
                 <div className="text-[11px] text-slate-500 mt-1">
                   Webhook URL is per workspace: <span className="font-mono">/shopify/webhook/{'{workspace}'}</span>
+                </div>
+
+                <div className="mt-2">
+                  <div className="text-xs text-slate-500 mb-1">Shopify variables (click to copy)</div>
+                  <div className="flex flex-wrap gap-1">
+                    {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 40).map((v) => (
+                      <button
+                        key={`shopvar:${v}`}
+                        type="button"
+                        className="px-2 py-0.5 rounded border text-xs hover:bg-slate-50"
+                        title="Click to copy"
+                        onClick={() => copyVar(v)}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    For “tagged with”, use trigger <span className="font-mono">orders/updated</span> and set keyword to the tag (or we can add a dedicated tag condition next).
+                  </div>
                 </div>
               </div>
             )}
@@ -1365,6 +1412,23 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                 {(Array.isArray(draft.templateVars) && draft.templateVars.length > 0) && (
                   <div>
                     <div className="text-xs text-slate-500 mb-1">Body variables</div>
+                    {draft.triggerSource === "shopify" && (
+                      <div className="mb-2">
+                        <div className="text-[11px] text-slate-500 mb-1">Insert Shopify variable (click to copy then paste into Var fields)</div>
+                        <div className="flex flex-wrap gap-1">
+                          {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 24).map((v) => (
+                            <button
+                              key={`shopvar2:${v}`}
+                              type="button"
+                              className="px-2 py-0.5 rounded border text-xs hover:bg-slate-50"
+                              onClick={() => copyVar(v)}
+                            >
+                              {v}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                       {draft.templateVars.map((v, idx) => (
                         <input

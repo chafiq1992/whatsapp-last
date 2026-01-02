@@ -5660,6 +5660,25 @@ class MessageProcessor:
                     if str(trigger.get("event") or "").strip() != topic_norm:
                         continue
 
+                    # Optional testing guard: if configured, only fire when the order/draft-order phone matches.
+                    # Accept either list or newline/comma separated string.
+                    try:
+                        test_phones = rule.get("test_phone_numbers") or rule.get("test_numbers") or []
+                        if isinstance(test_phones, str):
+                            test_phones = [x.strip() for x in re.split(r"[,\n\r]+", test_phones) if x and x.strip()]
+                        if isinstance(test_phones, list):
+                            test_set = {_digits_only(str(x or "")) for x in test_phones}
+                            test_set = {x for x in test_set if x}
+                        else:
+                            test_set = set()
+                        if test_set:
+                            if not phone_digits:
+                                continue
+                            if phone_digits not in test_set:
+                                continue
+                    except Exception:
+                        pass
+
                     # Optional simple condition:
                     # - match=contains + keywords: search within payload JSON
                     # - match=tag_contains + value: match order.tags contains value (Shopify tags string)

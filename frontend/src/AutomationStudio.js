@@ -112,6 +112,39 @@ const LOGIC = [
 // Shopify event catalog with common variables and sample payload hints
 const SHOPIFY_EVENTS = [
   {
+    id: "draft_orders/create",
+    label: "Shopify: Draft Order Created",
+    topic: "draft_orders/create",
+    variables: [
+      "id",
+      "name",
+      "invoice_url",
+      "status",
+      "note",
+      "tags",
+      "total_price",
+      "created_at",
+      "customer.id",
+      "customer.first_name",
+      "customer.last_name",
+      "customer.phone",
+      "shipping_address.city",
+      "shipping_address.province",
+    ],
+    sample: JSON.stringify({
+      topic: "draft_orders/create",
+      id: 777,
+      name: "#D1025",
+      status: "open",
+      note: "Test note",
+      tags: "test, vip",
+      total_price: 199,
+      created_at: "2024-01-01T12:00:00Z",
+      customer: { id: 999, first_name: "Nora", last_name: "A.", phone: "+212612345678" },
+      shipping_address: { city: "Casablanca", province: "Casablanca-Settat" },
+    }, null, 2),
+  },
+  {
     id: "orders/create",
     label: "Shopify: New Order",
     topic: "orders/create",
@@ -285,6 +318,8 @@ export default function AutomationStudio({ onClose }) {
     cooldownSeconds: 0,
     triggerSource: "whatsapp",
     shopifyTopic: "orders/paid",
+    shopifyTaggedWith: "",
+    shopifyTestPhones: "",
     actionMode: "text", // 'text' | 'template'
     to: "{{ phone }}",
     templateName: "",
@@ -626,6 +661,8 @@ export default function AutomationStudio({ onClose }) {
               cooldownSeconds: 0,
               triggerSource: "whatsapp",
               shopifyTopic: "orders/paid",
+              shopifyTaggedWith: "",
+              shopifyTestPhones: "",
               actionMode: "text",
               to: "{{ phone }}",
               templateName: "",
@@ -643,6 +680,11 @@ export default function AutomationStudio({ onClose }) {
             const aTpl = acts.find((x) => String(x?.type || "").toLowerCase().includes("template")) || null;
             const trig = (r && r.trigger) || {};
             const source = String(trig.source || "whatsapp").toLowerCase();
+            const testPhones = Array.isArray(r?.test_phone_numbers) ? r.test_phone_numbers : [];
+            const testPhonesStr = testPhones.filter(Boolean).join("\n");
+            const taggedWith = String(r?.condition?.match || "").toLowerCase() === "tag_contains"
+              ? String(r?.condition?.value || r?.condition?.tag || "")
+              : "";
             setDraft({
               id: String(r.id || ""),
               name: String(r.name || ""),
@@ -653,6 +695,8 @@ export default function AutomationStudio({ onClose }) {
               cooldownSeconds: Number(r.cooldown_seconds || 0),
               triggerSource: source === "shopify" ? "shopify" : "whatsapp",
               shopifyTopic: String(trig.event || "orders/paid"),
+              shopifyTaggedWith: taggedWith,
+              shopifyTestPhones: testPhonesStr,
               actionMode: aTpl ? "template" : "text",
               to: String((aText?.to || aTpl?.to) || "{{ phone }}"),
               templateName: String(aTpl?.template_name || ""),
@@ -688,6 +732,10 @@ export default function AutomationStudio({ onClose }) {
                   .split(",")
                   .map((x) => x.trim())
                   .filter(Boolean);
+                const testPhones = String(draft.shopifyTestPhones || "")
+                  .split(/\r?\n|,/g)
+                  .map((x) => x.trim())
+                  .filter(Boolean);
                 const actions = [];
                 if (draft.actionMode === "template") {
                   const tn = String(draft.templateName || "").trim();
@@ -708,6 +756,7 @@ export default function AutomationStudio({ onClose }) {
                   if ((draft.replyText || "").trim()) actions.push({ type: "send_text", to: String(draft.to || "{{ phone }}"), text: String(draft.replyText || "") });
                 }
                 if ((draft.tag || "").trim()) actions.push({ type: "add_tag", tag: String(draft.tag || "").trim() });
+                const tagged = String(draft.shopifyTaggedWith || "").trim();
                 const rule = {
                   id: newId,
                   name: draft.name || "WhatsApp Auto-reply",
@@ -716,7 +765,10 @@ export default function AutomationStudio({ onClose }) {
                   trigger: draft.triggerSource === "shopify"
                     ? { source: "shopify", event: String(draft.shopifyTopic || "orders/paid") }
                     : { source: "whatsapp", event: "incoming_message" },
-                  condition: { match: "contains", keywords: kws },
+                  condition: draft.triggerSource === "shopify" && tagged
+                    ? { match: "tag_contains", value: tagged }
+                    : { match: "contains", keywords: kws },
+                  ...(draft.triggerSource === "shopify" ? { test_phone_numbers: testPhones } : {}),
                   actions,
                 };
                 const next = (() => {
@@ -1245,6 +1297,7 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
 
 function RuleEditor({ draft, templates, templatesLoading, templatesError, saving, onClose, onChange, onSave }) {
   const shopifyTopics = [
+    { topic: "draft_orders/create", label: "Shopify: Draft Order Created (draft_orders/create)" },
     { topic: "orders/create", label: "Shopify: New Order (orders/create)" },
     { topic: "orders/paid", label: "Shopify: Order Paid (orders/paid)" },
     { topic: "orders/updated", label: "Shopify: Order Updated (orders/updated) — use for tags" },
@@ -1321,7 +1374,36 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                   />
                 </div>
                 <div className="text-[11px] text-slate-500 mt-1">
-                  Webhook URL is per workspace: <span className="font-mono">/shopify/webhook/{'{workspace}'}</span>
+                  Use the SAME webhook URL for all Shopify topics (Shopify creates one subscription per topic, but the URL can be identical):
+                  <span className="font-mono"> /shopify/webhook/{'{workspace}'}</span>
+                </div>
+
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Tagged with (optional)</div>
+                    <input
+                      className="w-full border rounded px-2 py-1"
+                      value={draft.shopifyTaggedWith || ""}
+                      onChange={(e) => onChange({ shopifyTaggedWith: e.target.value })}
+                      placeholder="e.g. vip"
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Uses <span className="font-mono">orders/updated</span> + condition <span className="font-mono">tag_contains</span>.
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Test phone numbers (optional)</div>
+                    <textarea
+                      className="w-full border rounded px-2 py-1 font-mono text-xs"
+                      rows={3}
+                      value={draft.shopifyTestPhones || ""}
+                      onChange={(e) => onChange({ shopifyTestPhones: e.target.value })}
+                      placeholder={"+212612345678\n+212600000000"}
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      If set, this rule only fires when the Shopify payload phone matches one of these numbers.
+                    </div>
+                  </div>
                 </div>
 
                 <div className="mt-2">
@@ -1340,7 +1422,7 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                     ))}
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1">
-                    For “tagged with”, use trigger <span className="font-mono">orders/updated</span> and set keyword to the tag (or we can add a dedicated tag condition next).
+                    Variables support dotted paths like <span className="font-mono">{"{{ customer.phone }}"}</span>.
                   </div>
                 </div>
               </div>

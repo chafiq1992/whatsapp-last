@@ -553,6 +553,9 @@ def _is_public_path(path: str) -> bool:
     # Webhook endpoints must remain public for Meta
     if path.startswith("/webhook"):
         return True
+    # Delivery app outbound status webhooks must be public (called server-to-server).
+    if path.startswith("/delivery/webhook"):
+        return True
     # Public tracking endpoints (Shopify theme / website)
     if path.startswith("/track/"):
         return True
@@ -5626,10 +5629,41 @@ class MessageProcessor:
             phone_raw = _first(
                 (data.get("customer") or {}).get("phone") if isinstance(data.get("customer"), dict) else None,
                 data.get("phone"),
+                (data.get("destination") or {}).get("phone") if isinstance(data.get("destination"), dict) else None,  # fulfillments/create
                 (data.get("shipping_address") or {}).get("phone") if isinstance(data.get("shipping_address"), dict) else None,
                 (data.get("billing_address") or {}).get("phone") if isinstance(data.get("billing_address"), dict) else None,
             )
             phone_digits = _digits_only(phone_raw)
+
+            # Fulfillment webhooks often don't include customer phone. If we have an order_id, enrich from Shopify.
+            if not phone_digits:
+                try:
+                    order_id = (
+                        data.get("order_id")
+                        or (data.get("order") or {}).get("id") if isinstance(data.get("order"), dict) else None
+                        or (data.get("fulfillment") or {}).get("order_id") if isinstance(data.get("fulfillment"), dict) else None
+                    )
+                    order_id_s = str(order_id).strip() if order_id is not None else ""
+                    if order_id_s and order_id_s.isdigit():
+                        from .shopify_integration import admin_api_base, _client_args  # type: ignore
+
+                        async with httpx.AsyncClient(timeout=15.0) as client:
+                            resp = await client.get(f"{admin_api_base()}/orders/{order_id_s}.json", **_client_args())
+                            if resp.status_code == 200:
+                                order_obj = (resp.json() or {}).get("order") or {}
+                                if isinstance(order_obj, dict):
+                                    phone_raw2 = _first(
+                                        (order_obj.get("customer") or {}).get("phone") if isinstance(order_obj.get("customer"), dict) else None,
+                                        order_obj.get("phone"),
+                                        (order_obj.get("shipping_address") or {}).get("phone") if isinstance(order_obj.get("shipping_address"), dict) else None,
+                                        (order_obj.get("billing_address") or {}).get("phone") if isinstance(order_obj.get("billing_address"), dict) else None,
+                                    )
+                                    phone_digits = _digits_only(phone_raw2) or phone_digits
+                                    # Keep context richer for templating/rules
+                                    data = dict(data)
+                                    data["_order"] = order_obj
+                except Exception:
+                    pass
 
             # Context for templating
             ctx = {
@@ -5672,8 +5706,14 @@ class MessageProcessor:
                         else:
                             test_set = set()
                         if test_set:
+                            # Allow testing even if the webhook payload doesn't include a phone number
+                            # (e.g. fulfillments/create). If exactly one test number is configured, route to it.
                             if not phone_digits:
-                                continue
+                                if len(test_set) == 1:
+                                    phone_digits = next(iter(test_set))
+                                    ctx["phone"] = phone_digits
+                                else:
+                                    continue
                             if phone_digits not in test_set:
                                 continue
                     except Exception:
@@ -7995,9 +8035,36 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
         ).strip()
         if secret:
             hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
-            digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
-            expected = b64encode(digest).decode("utf-8")
-            if not hmac.compare_digest(expected, hmac_header):
+            # Shopify expects base64(HMAC_SHA256(secret, raw_body)).
+            # Some Shopify UIs show a 64-char hex signing secret; be tolerant and try both:
+            # - literal UTF-8 bytes of the secret string
+            # - hex-decoded bytes (if the secret looks like hex)
+            candidates: list[str] = []
+            try:
+                digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+                candidates.append(b64encode(digest).decode("utf-8"))
+            except Exception:
+                pass
+            try:
+                s = secret.strip().lower()
+                if len(s) == 64 and all(c in "0123456789abcdef" for c in s):
+                    key = bytes.fromhex(s)
+                    digest2 = hmac.new(key, body, hashlib.sha256).digest()
+                    candidates.append(b64encode(digest2).decode("utf-8"))
+            except Exception:
+                pass
+
+            if (not hmac_header) or (not any(hmac.compare_digest(exp, hmac_header) for exp in candidates)):
+                try:
+                    logging.getLogger(__name__).warning(
+                        "Invalid Shopify webhook HMAC (workspace=%s topic=%s header_len=%s candidates=%s)",
+                        ws,
+                        (request.headers.get("X-Shopify-Topic") or "").strip(),
+                        len(hmac_header or ""),
+                        len(candidates),
+                    )
+                except Exception:
+                    pass
                 raise HTTPException(status_code=401, detail="Invalid Shopify webhook HMAC")
 
         topic = (request.headers.get("X-Shopify-Topic") or "").strip()
@@ -8031,24 +8098,13 @@ async def delivery_webhook_endpoint(workspace: str, request: Request):
     Delivery app should POST JSON with fields like:
       { "event": "order_status_changed", "order": { ... }, "status": "Livré", "customer_phone": "+212..." }
 
-    Optional security: configure `DELIVERY_WEBHOOK_SECRET` or per-workspace
-    `DELIVERY_WEBHOOK_SECRET_<WORKSPACE>` to enable HMAC verification.
+    This endpoint is intentionally unauthenticated (public) so the delivery app
+    can POST status events without managing secrets/tokens.
     """
     ws = _coerce_workspace(workspace)
     ws_token = _CURRENT_WORKSPACE.set(ws)
     try:
         body = await request.body()
-
-        secret = (
-            os.getenv(f"DELIVERY_WEBHOOK_SECRET_{ws.upper()}", "")
-            or os.getenv("DELIVERY_WEBHOOK_SECRET", "")
-        ).strip()
-        if secret:
-            sig_header = (request.headers.get("X-Delivery-Signature") or "").strip()
-            digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
-            expected = b64encode(digest).decode("utf-8")
-            if not hmac.compare_digest(expected, sig_header):
-                raise HTTPException(status_code=401, detail="Invalid delivery webhook HMAC")
 
         try:
             payload = json.loads(body.decode("utf-8") or "{}")

@@ -802,7 +802,13 @@ export default function AutomationStudio({ onClose }) {
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
                     const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
-                    const tpl = approvedTemplates.find((t) => t.name === tn) || null;
+                    // NOTE: this onSave handler runs in the parent component scope.
+                    // Use the in-scope `templates` list (not RuleEditor-scoped `approvedTemplates`).
+                    const tplAll = Array.isArray(templates) ? templates : [];
+                    const tpl =
+                      tplAll.find((t) => t && t.name === tn && String(t.status || "").toLowerCase() === "approved") ||
+                      tplAll.find((t) => t && t.name === tn) ||
+                      null;
                     // If the selected template requires a media header (IMAGE/VIDEO/DOCUMENT),
                     // include it when a URL is provided.
                     const headerMeta = (() => {

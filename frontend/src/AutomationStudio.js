@@ -685,6 +685,7 @@ export default function AutomationStudio({ onClose }) {
               templateName: "",
               templateLanguage: "en",
               templateVars: [],
+              templateHeaderUrl: "",
             });
             setEditorOpen(true);
           }}
@@ -719,6 +720,20 @@ export default function AutomationStudio({ onClose }) {
                 return [];
               }
             })();
+            const tplHeaderUrl = (() => {
+              try {
+                const comps = Array.isArray(aTpl?.components) ? aTpl.components : [];
+                const header = comps.find((c) => String(c?.type || "").toLowerCase() === "header") || null;
+                const params = Array.isArray(header?.parameters) ? header.parameters : [];
+                const p0 = params[0] || null;
+                if (!p0) return "";
+                const t = String(p0.type || "").toLowerCase();
+                if (t === "image") return String(p0.image?.link || "");
+                if (t === "video") return String(p0.video?.link || "");
+                if (t === "document") return String(p0.document?.link || "");
+              } catch {}
+              return "";
+            })();
             setDraft({
               id: String(r.id || ""),
               name: String(r.name || ""),
@@ -738,6 +753,7 @@ export default function AutomationStudio({ onClose }) {
               templateName: String(aTpl?.template_name || ""),
               templateLanguage: String(aTpl?.language || "en"),
               templateVars: tplVars,
+              templateHeaderUrl: tplHeaderUrl,
             });
             setEditorOpen(true);
           }}
@@ -786,7 +802,32 @@ export default function AutomationStudio({ onClose }) {
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
                     const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
-                    const comps = bodyParams.length ? [{ type: "body", parameters: bodyParams }] : [];
+                    const tpl = approvedTemplates.find((t) => t.name === tn) || null;
+                    // If the selected template requires a media header (IMAGE/VIDEO/DOCUMENT),
+                    // include it when a URL is provided.
+                    const headerMeta = (() => {
+                      try {
+                        const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                        const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+                        const fmt = String(h?.format || "").toUpperCase();
+                        return fmt; // IMAGE | VIDEO | DOCUMENT | TEXT | ...
+                      } catch {
+                        return "";
+                      }
+                    })();
+                    const headerUrl = String(draft.templateHeaderUrl || "").trim();
+                    const headerComp = (() => {
+                      if (!headerUrl) return null;
+                      const fmt = String(headerMeta || "").toUpperCase();
+                      if (fmt === "IMAGE") return { type: "header", parameters: [{ type: "image", image: { link: headerUrl } }] };
+                      if (fmt === "VIDEO") return { type: "header", parameters: [{ type: "video", video: { link: headerUrl } }] };
+                      if (fmt === "DOCUMENT") return { type: "header", parameters: [{ type: "document", document: { link: headerUrl } }] };
+                      return null;
+                    })();
+                    const comps = [
+                      ...(headerComp ? [headerComp] : []),
+                      ...(bodyParams.length ? [{ type: "body", parameters: bodyParams }] : []),
+                    ];
                     actions.push({
                       type: "send_whatsapp_template",
                       to: String(draft.to || "{{ phone }}"),
@@ -1586,10 +1627,21 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                         const name = e.target.value;
                         const tpl = approvedTemplates.find((t) => t.name === name) || null;
                         const n = inferBodyVarCount(tpl);
+                        const headerFormat = (() => {
+                          try {
+                            const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                            const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+                            return String(h?.format || "").toUpperCase();
+                          } catch {
+                            return "";
+                          }
+                        })();
                         onChange({
                           templateName: name,
                           templateLanguage: String(tpl?.language || draft.templateLanguage || "en"),
                           templateVars: Array.from({ length: n }, (_, i) => (draft.templateVars?.[i] || "")),
+                          // If switching to a new template, keep existing header URL only if it still needs a media header.
+                          templateHeaderUrl: (["IMAGE", "VIDEO", "DOCUMENT"].includes(headerFormat) ? (draft.templateHeaderUrl || "") : ""),
                         });
                       }}
                       disabled={templatesLoading}
@@ -1605,6 +1657,36 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                     <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.templateLanguage || "en"} onChange={(e) => onChange({ templateLanguage: e.target.value })} />
                   </div>
                 </div>
+
+                {(() => {
+                  try {
+                    const tn = String(draft.templateName || "").trim();
+                    if (!tn) return null;
+                    const tpl = approvedTemplates.find((t) => t.name === tn) || null;
+                    const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                    const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+                    const fmt = String(h?.format || "").toUpperCase();
+                    if (!["IMAGE", "VIDEO", "DOCUMENT"].includes(fmt)) return null;
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        <div className="md:col-span-2">
+                          <div className="text-xs text-slate-500 mb-1">Header {fmt} URL</div>
+                          <input
+                            className="w-full border rounded px-2 py-1 font-mono text-xs"
+                            value={draft.templateHeaderUrl || ""}
+                            onChange={(e) => onChange({ templateHeaderUrl: e.target.value })}
+                            placeholder="https://... (public image/video/pdf URL)"
+                          />
+                          <div className="text-[11px] text-slate-500 mt-1">
+                            This template requires a {fmt} header. If you leave it empty, WhatsApp will reject the message (error 132012).
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  } catch {
+                    return null;
+                  }
+                })()}
 
                 {(Array.isArray(draft.templateVars) && draft.templateVars.length > 0) && (
                   <div>

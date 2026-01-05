@@ -8035,33 +8035,26 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
         ).strip()
         if secret:
             hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
-            # Shopify expects base64(HMAC_SHA256(secret, raw_body)).
-            # Some Shopify UIs show a 64-char hex signing secret; be tolerant and try both:
-            # - literal UTF-8 bytes of the secret string
-            # - hex-decoded bytes (if the secret looks like hex)
-            candidates: list[str] = []
-            try:
-                digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
-                candidates.append(b64encode(digest).decode("utf-8"))
-            except Exception:
-                pass
-            try:
-                s = secret.strip().lower()
-                if len(s) == 64 and all(c in "0123456789abcdef" for c in s):
-                    key = bytes.fromhex(s)
-                    digest2 = hmac.new(key, body, hashlib.sha256).digest()
-                    candidates.append(b64encode(digest2).decode("utf-8"))
-            except Exception:
-                pass
+            from .shopify_webhook import verify_shopify_webhook_hmac
 
-            if (not hmac_header) or (not any(hmac.compare_digest(exp, hmac_header) for exp in candidates)):
+            ok, dbg = verify_shopify_webhook_hmac(secret, body, hmac_header)
+            if not ok:
+                # Log safe debug hints (never log the secret).
                 try:
                     logging.getLogger(__name__).warning(
-                        "Invalid Shopify webhook HMAC (workspace=%s topic=%s header_len=%s candidates=%s)",
+                        "Invalid Shopify webhook HMAC (workspace=%s topic=%s shop=%s api=%s webhook_id=%s body_len=%s header_len=%s header_prefix=%s candidates=%s cand_prefixes=%s secret_len=%s secret_hex=%s)",
                         ws,
                         (request.headers.get("X-Shopify-Topic") or "").strip(),
-                        len(hmac_header or ""),
-                        len(candidates),
+                        (request.headers.get("X-Shopify-Shop-Domain") or "").strip(),
+                        (request.headers.get("X-Shopify-API-Version") or "").strip(),
+                        (request.headers.get("X-Shopify-Webhook-Id") or "").strip(),
+                        dbg.get("body_len"),
+                        dbg.get("header_len"),
+                        dbg.get("header_prefix"),
+                        dbg.get("candidates"),
+                        ",".join(dbg.get("candidate_prefixes") or []),
+                        dbg.get("secret_len"),
+                        dbg.get("secret_is_hex_64"),
                     )
                 except Exception:
                     pass

@@ -1347,13 +1347,45 @@ class WorkspaceWhatsAppRouter:
         context_message_id: str | None = None,
     ) -> dict:
         """Send a WhatsApp template message via Graph API."""
+        def _sanitize_components(raw: list[dict] | None) -> list[dict] | None:
+            """WhatsApp rejects template text params with empty string text (error 131008).
+
+            Ensure every parameter of type 'text' has a non-empty value.
+            """
+            if not raw:
+                return raw
+            if not isinstance(raw, list):
+                return None
+            out: list[dict] = []
+            for comp in raw:
+                if not isinstance(comp, dict):
+                    continue
+                c2 = dict(comp)
+                params = c2.get("parameters")
+                if isinstance(params, list):
+                    new_params: list[dict] = []
+                    for p in params:
+                        if not isinstance(p, dict):
+                            continue
+                        p2 = dict(p)
+                        if str(p2.get("type") or "").strip().lower() == "text":
+                            txt = p2.get("text")
+                            txt_s = str(txt if txt is not None else "").strip()
+                            # Use "-" instead of empty string; WhatsApp treats "" as missing.
+                            p2["text"] = txt_s if txt_s else "-"
+                        new_params.append(p2)
+                    c2["parameters"] = new_params
+                out.append(c2)
+            return out
+
         url = f"{self.base_url}/messages"
         tpl = {
             "name": str(template_name or "").strip(),
             "language": {"code": str(language or "en").strip() or "en"},
         }
-        if components:
-            tpl["components"] = components
+        safe_components = _sanitize_components(components)
+        if safe_components:
+            tpl["components"] = safe_components
         payload = {
             "messaging_product": "whatsapp",
             "to": to,

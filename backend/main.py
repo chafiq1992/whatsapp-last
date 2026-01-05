@@ -8340,10 +8340,28 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
         body = await request.body()
 
         # Verify HMAC if secret configured
-        secret = (
-            os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "")
-            or os.getenv("SHOPIFY_WEBHOOK_SECRET", "")
-        ).strip()
+        secret_ws_raw = os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "") or ""
+        secret_global_raw = os.getenv("SHOPIFY_WEBHOOK_SECRET", "") or ""
+        secret = (secret_ws_raw or secret_global_raw).strip()
+        secret_source = (
+            "workspace"
+            if (secret_ws_raw or "").strip()
+            else ("global" if (secret_global_raw or "").strip() else "none")
+        )
+        # Safe debug log: helps confirm which secret the runtime actually sees (never logs the secret value).
+        try:
+            logging.getLogger(__name__).info(
+                "Shopify webhook received (workspace=%s topic=%s shop=%s secret_source=%s secret_len=%s hmac_header_len=%s body_len=%s)",
+                ws,
+                (request.headers.get("X-Shopify-Topic") or "").strip(),
+                (request.headers.get("X-Shopify-Shop-Domain") or "").strip(),
+                secret_source,
+                len(secret or ""),
+                len((request.headers.get("X-Shopify-Hmac-Sha256") or "").strip() or ""),
+                len(body or b""),
+            )
+        except Exception:
+            pass
         if secret:
             hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
             from .shopify_webhook import verify_shopify_webhook_hmac

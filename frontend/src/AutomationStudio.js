@@ -335,11 +335,24 @@ export default function AutomationStudio({ onClose }) {
     shopifyTestPhones: "",
     deliveryStatuses: "",
     deliveryTestPhones: "",
-    actionMode: "text", // 'text' | 'template'
+    actionMode: "text", // 'text' | 'template' | 'order_confirm'
     to: "{{ phone }}",
     templateName: "",
     templateLanguage: "en",
     templateVars: [],
+    templateHeaderUrl: "",
+    // Order confirmation flow (multi-step)
+    ocConfirmTitles: "تأكيد الطلب\nتاكيد الطلب",
+    ocChangeTitles: "تغيير المعلومات\nتغير المعلومات",
+    ocTalkTitles: "تكلم مع العميل",
+    ocConfirmIds: "",
+    ocChangeIds: "",
+    ocTalkIds: "",
+    ocConfirmAudioUrl: "",
+    ocChangeAudioUrl: "",
+    ocTalkAudioUrl: "",
+    ocSendItems: true,
+    ocMaxItems: 10,
   });
 
   const [templatesLoading, setTemplatesLoading] = useState(false);
@@ -686,6 +699,17 @@ export default function AutomationStudio({ onClose }) {
               templateLanguage: "en",
               templateVars: [],
               templateHeaderUrl: "",
+              ocConfirmTitles: "تأكيد الطلب\nتاكيد الطلب",
+              ocChangeTitles: "تغيير المعلومات\nتغير المعلومات",
+              ocTalkTitles: "تكلم مع العميل",
+              ocConfirmIds: "",
+              ocChangeIds: "",
+              ocTalkIds: "",
+              ocConfirmAudioUrl: "",
+              ocChangeAudioUrl: "",
+              ocTalkAudioUrl: "",
+              ocSendItems: true,
+              ocMaxItems: 10,
             });
             setEditorOpen(true);
           }}
@@ -696,6 +720,7 @@ export default function AutomationStudio({ onClose }) {
             const aText = acts.find((x) => String(x?.type || "").toLowerCase().includes("text")) || null;
             const aTag = acts.find((x) => String(x?.type || "").toLowerCase().includes("tag")) || null;
             const aTpl = acts.find((x) => String(x?.type || "").toLowerCase().includes("template")) || null;
+            const aOC = acts.find((x) => ["order_confirmation_flow", "order_confirm_flow"].includes(String(x?.type || "").toLowerCase())) || null;
             const trig = (r && r.trigger) || {};
             const source = String(trig.source || "whatsapp").toLowerCase();
             const testPhones = Array.isArray(r?.test_phone_numbers) ? r.test_phone_numbers : [];
@@ -708,7 +733,8 @@ export default function AutomationStudio({ onClose }) {
             const statusesStr = statuses.filter(Boolean).join(", ");
             const tplVars = (() => {
               try {
-                const comps = Array.isArray(aTpl?.components) ? aTpl.components : [];
+                const src = aOC || aTpl;
+                const comps = Array.isArray(src?.components) ? src.components : [];
                 const body = comps.find((c) => String(c?.type || "").toLowerCase() === "body") || null;
                 const params = Array.isArray(body?.parameters) ? body.parameters : [];
                 // We currently only expose text params in the UI
@@ -722,7 +748,8 @@ export default function AutomationStudio({ onClose }) {
             })();
             const tplHeaderUrl = (() => {
               try {
-                const comps = Array.isArray(aTpl?.components) ? aTpl.components : [];
+                const src = aOC || aTpl;
+                const comps = Array.isArray(src?.components) ? src.components : [];
                 const header = comps.find((c) => String(c?.type || "").toLowerCase() === "header") || null;
                 const params = Array.isArray(header?.parameters) ? header.parameters : [];
                 const p0 = params[0] || null;
@@ -748,12 +775,23 @@ export default function AutomationStudio({ onClose }) {
               shopifyTestPhones: testPhonesStr,
               deliveryStatuses: isDelivery ? statusesStr : "",
               deliveryTestPhones: isDelivery ? testPhonesStr : "",
-              actionMode: aTpl ? "template" : "text",
-              to: String((aText?.to || aTpl?.to) || "{{ phone }}"),
-              templateName: String(aTpl?.template_name || ""),
-              templateLanguage: String(aTpl?.language || "en"),
+              actionMode: aOC ? "order_confirm" : (aTpl ? "template" : "text"),
+              to: String((aText?.to || aTpl?.to || aOC?.to) || "{{ phone }}"),
+              templateName: String(aTpl?.template_name || aOC?.template_name || ""),
+              templateLanguage: String(aTpl?.language || aOC?.language || "en"),
               templateVars: tplVars,
               templateHeaderUrl: tplHeaderUrl,
+              ocConfirmTitles: Array.isArray(aOC?.confirm_titles) ? aOC.confirm_titles.filter(Boolean).join("\n") : "تأكيد الطلب\nتاكيد الطلب",
+              ocChangeTitles: Array.isArray(aOC?.change_titles) ? aOC.change_titles.filter(Boolean).join("\n") : "تغيير المعلومات\nتغير المعلومات",
+              ocTalkTitles: Array.isArray(aOC?.talk_titles) ? aOC.talk_titles.filter(Boolean).join("\n") : "تكلم مع العميل",
+              ocConfirmIds: Array.isArray(aOC?.confirm_ids) ? aOC.confirm_ids.filter(Boolean).join("\n") : "",
+              ocChangeIds: Array.isArray(aOC?.change_ids) ? aOC.change_ids.filter(Boolean).join("\n") : "",
+              ocTalkIds: Array.isArray(aOC?.talk_ids) ? aOC.talk_ids.filter(Boolean).join("\n") : "",
+              ocConfirmAudioUrl: String(aOC?.confirm_audio_url || ""),
+              ocChangeAudioUrl: String(aOC?.change_audio_url || ""),
+              ocTalkAudioUrl: String(aOC?.talk_audio_url || ""),
+              ocSendItems: aOC?.send_items === undefined ? true : !!aOC.send_items,
+              ocMaxItems: Number(aOC?.max_items || 10),
             });
             setEditorOpen(true);
           }}
@@ -797,7 +835,65 @@ export default function AutomationStudio({ onClose }) {
                   .map((x) => x.trim())
                   .filter(Boolean);
                 const actions = [];
-                if (draft.actionMode === "template") {
+                const listFromLines = (s) =>
+                  String(s || "")
+                    .split(/\r?\n|,/g)
+                    .map((x) => x.trim())
+                    .filter(Boolean);
+
+                if (draft.actionMode === "order_confirm") {
+                  const tn = String(draft.templateName || "").trim();
+                  if (tn) {
+                    const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
+                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
+                    const tplAll = Array.isArray(templates) ? templates : [];
+                    const tpl =
+                      tplAll.find((t) => t && t.name === tn && String(t.status || "").toLowerCase() === "approved") ||
+                      tplAll.find((t) => t && t.name === tn) ||
+                      null;
+                    const headerMeta = (() => {
+                      try {
+                        const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                        const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+                        return String(h?.format || "").toUpperCase();
+                      } catch {
+                        return "";
+                      }
+                    })();
+                    const headerUrl = String(draft.templateHeaderUrl || "").trim();
+                    const headerComp = (() => {
+                      if (!headerUrl) return null;
+                      const fmt = String(headerMeta || "").toUpperCase();
+                      if (fmt === "IMAGE") return { type: "header", parameters: [{ type: "image", image: { link: headerUrl } }] };
+                      if (fmt === "VIDEO") return { type: "header", parameters: [{ type: "video", video: { link: headerUrl } }] };
+                      if (fmt === "DOCUMENT") return { type: "header", parameters: [{ type: "document", document: { link: headerUrl } }] };
+                      return null;
+                    })();
+                    const comps = [
+                      ...(headerComp ? [headerComp] : []),
+                      ...(bodyParams.length ? [{ type: "body", parameters: bodyParams }] : []),
+                    ];
+                    actions.push({
+                      type: "order_confirmation_flow",
+                      to: String(draft.to || "{{ phone }}"),
+                      template_name: tn,
+                      language: String(draft.templateLanguage || "en"),
+                      components: comps,
+                      preview: `[template] ${tn}`,
+                      confirm_titles: listFromLines(draft.ocConfirmTitles),
+                      change_titles: listFromLines(draft.ocChangeTitles),
+                      talk_titles: listFromLines(draft.ocTalkTitles),
+                      confirm_ids: listFromLines(draft.ocConfirmIds),
+                      change_ids: listFromLines(draft.ocChangeIds),
+                      talk_ids: listFromLines(draft.ocTalkIds),
+                      confirm_audio_url: String(draft.ocConfirmAudioUrl || "").trim(),
+                      change_audio_url: String(draft.ocChangeAudioUrl || "").trim(),
+                      talk_audio_url: String(draft.ocTalkAudioUrl || "").trim(),
+                      send_items: !!draft.ocSendItems,
+                      max_items: Number(draft.ocMaxItems || 10),
+                    });
+                  }
+                } else if (draft.actionMode === "template") {
                   const tn = String(draft.templateName || "").trim();
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
@@ -1365,7 +1461,13 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
                         {r.enabled ? "Enabled" : "Disabled"}
                       </span>
                     </div>
-                    <div className="text-xs text-slate-500 mt-1 truncate">Trigger: WhatsApp incoming message</div>
+                    <div className="text-xs text-slate-500 mt-1 truncate">
+                      Trigger: {String(r?.trigger?.source || "whatsapp") === "shopify"
+                        ? `Shopify webhook (${String(r?.trigger?.event || "")})`
+                        : String(r?.trigger?.source || "whatsapp") === "delivery"
+                          ? "Delivery status"
+                          : "WhatsApp incoming message"}
+                    </div>
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
                       <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">Triggers: {triggers}</span>
                       <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">Messages sent: {sent}</span>
@@ -1618,9 +1720,12 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
               <button className={`px-2 py-1 border rounded text-sm ${draft.actionMode === "template" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ actionMode: "template" })}>
                 WhatsApp Template
               </button>
+              <button className={`px-2 py-1 border rounded text-sm ${draft.actionMode === "order_confirm" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ actionMode: "order_confirm" })}>
+                Confirmation flow
+              </button>
             </div>
 
-            {draft.actionMode === "template" ? (
+            {(draft.actionMode === "template" || draft.actionMode === "order_confirm") ? (
               <div className="space-y-2">
                 {templatesError && <div className="p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{templatesError}</div>}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -1748,6 +1853,68 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
                     </div>
                     <div className="text-[11px] text-slate-500 mt-1">
                       Variables support dotted paths like <span className="font-mono">{"{{ customer.phone }}"}</span>.
+                    </div>
+                  </div>
+                )}
+
+                {draft.actionMode === "order_confirm" && (
+                  <div className="mt-2 space-y-3">
+                    <div className="text-xs font-semibold text-slate-700">Button click branches</div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div className="md:col-span-2">
+                        <div className="text-xs text-slate-500 mb-1">Confirm button titles (one per line)</div>
+                        <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocConfirmTitles || ""} onChange={(e)=>onChange({ ocConfirmTitles: e.target.value })} />
+                      </div>
+                      <div className="md:col-span-2">
+                        <div className="text-xs text-slate-500 mb-1">Change info button titles (one per line)</div>
+                        <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocChangeTitles || ""} onChange={(e)=>onChange({ ocChangeTitles: e.target.value })} />
+                      </div>
+                      <div className="md:col-span-2">
+                        <div className="text-xs text-slate-500 mb-1">Talk to agent button titles (one per line)</div>
+                        <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocTalkTitles || ""} onChange={(e)=>onChange({ ocTalkTitles: e.target.value })} />
+                      </div>
+
+                      <div className="md:col-span-2 text-[11px] text-slate-500">
+                        Prefer matching by button <span className="font-mono">id</span> if your template buttons have stable IDs.
+                      </div>
+
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Confirm button IDs (optional)</div>
+                        <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocConfirmIds || ""} onChange={(e)=>onChange({ ocConfirmIds: e.target.value })} />
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Change button IDs (optional)</div>
+                        <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocChangeIds || ""} onChange={(e)=>onChange({ ocChangeIds: e.target.value })} />
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Talk button IDs (optional)</div>
+                        <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocTalkIds || ""} onChange={(e)=>onChange({ ocTalkIds: e.target.value })} />
+                      </div>
+
+                      <div className="md:col-span-2">
+                        <div className="text-xs text-slate-500 mb-1">Confirm audio URL (optional)</div>
+                        <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.ocConfirmAudioUrl || ""} onChange={(e)=>onChange({ ocConfirmAudioUrl: e.target.value })} placeholder="https://.../confirm.ogg" />
+                      </div>
+                      <div className="md:col-span-2">
+                        <div className="text-xs text-slate-500 mb-1">Change info audio URL (optional)</div>
+                        <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.ocChangeAudioUrl || ""} onChange={(e)=>onChange({ ocChangeAudioUrl: e.target.value })} placeholder="https://.../change.ogg" />
+                      </div>
+                      <div className="md:col-span-2">
+                        <div className="text-xs text-slate-500 mb-1">Talk to agent audio URL (optional)</div>
+                        <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.ocTalkAudioUrl || ""} onChange={(e)=>onChange({ ocTalkAudioUrl: e.target.value })} placeholder="https://.../talk.ogg" />
+                      </div>
+
+                      <div className="md:col-span-2 flex items-center justify-between gap-3">
+                        <label className="text-sm flex items-center gap-2">
+                          <input type="checkbox" checked={!!draft.ocSendItems} onChange={(e)=>onChange({ ocSendItems: e.target.checked })} />
+                          Send ordered items after confirm (catalog items)
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <div className="text-xs text-slate-500">Max items</div>
+                          <input type="number" className="w-24 border rounded px-2 py-1" value={draft.ocMaxItems || 10} onChange={(e)=>onChange({ ocMaxItems: Number(e.target.value || 10) })} />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}

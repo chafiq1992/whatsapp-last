@@ -5132,6 +5132,34 @@ class MessageProcessor:
                 reply_id = (btn.get("id") or lst.get("id") or "").strip()
                 message_obj["type"] = "text"
                 message_obj["message"] = title or "[interactive_reply]"
+                # Order confirmation automation flow (Shopify-triggered): if a pending flow exists,
+                # run it and skip default interactive acknowledgment.
+                try:
+                    ws = get_current_workspace()
+                except Exception:
+                    ws = DEFAULT_WORKSPACE
+                try:
+                    handled_oc = await self._try_handle_order_confirmation_automation(
+                        sender,
+                        title=title or "",
+                        reply_id=reply_id or "",
+                        workspace=ws,
+                    )
+                except Exception:
+                    handled_oc = False
+                if handled_oc:
+                    # Persist the textual reply bubble first (so agents see what was clicked)
+                    await self.connection_manager.send_to_user(sender, {
+                        "type": "message_received",
+                        "data": message_obj
+                    })
+                    await self.connection_manager.broadcast_to_admins(
+                        {"type": "message_received", "data": message_obj}, exclude_user=sender
+                    )
+                    db_data = {k: v for k, v in message_obj.items() if k != "id"}
+                    await self.redis_manager.cache_message(sender, db_data)
+                    await self.db_manager.upsert_message(db_data)
+                    return
                 # Route survey interactions before generic acknowledgment
                 if reply_id.startswith("survey_"):
                     # Persist the textual reply bubble first
@@ -5383,6 +5411,183 @@ class MessageProcessor:
         except Exception:
             return str(s or "")
 
+    def _render_template_components(self, components: Any, ctx: dict) -> list[dict]:
+        """Render {{ ... }} variables inside WhatsApp template components.
+
+        This is needed because automations store the Graph API component JSON, and
+        users expect values like {{ customer.phone }} to be resolved at runtime.
+        """
+        if not isinstance(components, list):
+            return []
+        out: list[dict] = []
+        for comp in components:
+            if not isinstance(comp, dict):
+                continue
+            c2 = dict(comp)
+            params = c2.get("parameters")
+            if isinstance(params, list):
+                new_params: list[dict] = []
+                for p in params:
+                    if not isinstance(p, dict):
+                        continue
+                    p2 = dict(p)
+                    ptype = str(p2.get("type") or "").strip().lower()
+                    if ptype == "text":
+                        p2["text"] = self._render_template(str(p2.get("text") or ""), ctx)
+                    elif ptype in ("image", "video", "document"):
+                        blob = p2.get(ptype)
+                        if isinstance(blob, dict):
+                            b2 = dict(blob)
+                            if "link" in b2:
+                                b2["link"] = self._render_template(str(b2.get("link") or ""), ctx)
+                            p2[ptype] = b2
+                    new_params.append(p2)
+                c2["parameters"] = new_params
+            out.append(c2)
+        return out
+
+    async def _try_handle_order_confirmation_automation(
+        self,
+        user_id: str,
+        *,
+        title: str,
+        reply_id: str,
+        workspace: str,
+    ) -> bool:
+        """Continue a pending order-confirmation automation flow on a button/list click."""
+        try:
+            ws = _coerce_workspace(workspace or DEFAULT_WORKSPACE)
+            rules = await self._load_automation_rules(ws)
+            if not rules:
+                return False
+
+            uid = str(user_id or "").strip()
+            if not uid:
+                return False
+
+            def _norm_ar(s: str) -> str:
+                t = (s or "").strip()
+                try:
+                    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+                except Exception:
+                    pass
+                return t
+
+            tnorm = _norm_ar(title or "")
+            rid = str(reply_id or "").strip()
+
+            for rule in rules:
+                if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
+                    continue
+                trig = rule.get("trigger") or {}
+                if not isinstance(trig, dict) or str(trig.get("source") or "").lower() != "shopify":
+                    continue
+
+                actions = rule.get("actions") or []
+                if isinstance(actions, dict):
+                    actions = [actions]
+                if not isinstance(actions, list):
+                    actions = []
+
+                oc_action = next(
+                    (a for a in actions if isinstance(a, dict) and str(a.get("type") or "").lower() in ("order_confirmation_flow", "order_confirm_flow")),
+                    None,
+                )
+                if not oc_action:
+                    continue
+
+                state_key = f"automation:order_confirm:{ws}:{uid}:{str(rule.get('id') or '')}"
+                state = await self.redis_manager.get_json(state_key)
+                if not isinstance(state, dict):
+                    continue
+
+                cfg = state.get("cfg") if isinstance(state.get("cfg"), dict) else {}
+
+                confirm_ids = {str(x).strip() for x in (cfg.get("confirm_ids") or []) if str(x).strip()}
+                change_ids = {str(x).strip() for x in (cfg.get("change_ids") or []) if str(x).strip()}
+                talk_ids = {str(x).strip() for x in (cfg.get("talk_ids") or []) if str(x).strip()}
+
+                confirm_titles = {_norm_ar(str(x)) for x in (cfg.get("confirm_titles") or []) if str(x).strip()}
+                change_titles = {_norm_ar(str(x)) for x in (cfg.get("change_titles") or []) if str(x).strip()}
+                talk_titles = {_norm_ar(str(x)) for x in (cfg.get("talk_titles") or []) if str(x).strip()}
+
+                branch: str | None = None
+                if rid and rid in confirm_ids:
+                    branch = "confirm"
+                elif rid and rid in change_ids:
+                    branch = "change"
+                elif rid and rid in talk_ids:
+                    branch = "talk"
+                elif tnorm and tnorm in confirm_titles:
+                    branch = "confirm"
+                elif tnorm and tnorm in change_titles:
+                    branch = "change"
+                elif tnorm and tnorm in talk_titles:
+                    branch = "talk"
+                else:
+                    continue
+
+                audio_url = ""
+                if branch == "confirm":
+                    audio_url = str(cfg.get("confirm_audio_url") or "")
+                elif branch == "change":
+                    audio_url = str(cfg.get("change_audio_url") or "")
+                elif branch == "talk":
+                    audio_url = str(cfg.get("talk_audio_url") or "")
+
+                if audio_url.strip():
+                    await self.process_outgoing_message({
+                        "user_id": uid,
+                        "type": "audio",
+                        "from_me": True,
+                        "url": audio_url.strip(),
+                        "message": audio_url.strip(),
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "agent_username": "automation",
+                    })
+
+                if branch == "confirm" and bool(cfg.get("send_items", True)):
+                    items = state.get("items") if isinstance(state.get("items"), list) else []
+                    max_items = max(1, int(cfg.get("max_items") or 10))
+                    sent = 0
+                    for it in items:
+                        if sent >= max_items:
+                            break
+                        if not isinstance(it, dict):
+                            continue
+                        variant_id = str(it.get("variant_id") or "").strip()
+                        caption = str(it.get("caption") or "").strip()
+                        if not variant_id:
+                            continue
+                        await self.process_outgoing_message({
+                            "user_id": uid,
+                            "type": "catalog_item",
+                            "from_me": True,
+                            "product_retailer_id": variant_id,
+                            "caption": caption,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "agent_username": "automation",
+                        })
+                        sent += 1
+                        await asyncio.sleep(0.15)
+
+                # Clear state after handling to prevent double-send
+                try:
+                    if getattr(self.redis_manager, "redis_client", None):
+                        await self.redis_manager.redis_client.delete(state_key)  # type: ignore[union-attr]
+                    else:
+                        try:
+                            self.redis_manager._mem_json.pop(state_key, None)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                return True
+        except Exception:
+            return False
+        return False
+
     async def _run_simple_automations(self, user_id: str, incoming_text: str, message_obj: dict | None = None, workspace: str | None = None) -> None:
         """Execute enabled simple automation rules for an inbound WhatsApp text message."""
         ws_token = None
@@ -5531,11 +5736,11 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = act.get("components") or []
+                            comps = self._render_template_components(act.get("components") or [], ctx)
                             if not tname:
                                 continue
                             # Provide a visible bubble to the inbox (message preview) while sending the template.
-                            preview = str(act.get("preview") or f"[template] {tname}")
+                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",
@@ -5782,12 +5987,10 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = act.get("components") or []
-                            if not isinstance(comps, list):
-                                comps = []
+                            comps = self._render_template_components(act.get("components") or [], ctx)
                             if not (to_id and tname):
                                 continue
-                            preview = str(act.get("preview") or f"[template] {tname}")
+                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",
@@ -5801,6 +6004,116 @@ class MessageProcessor:
                             })
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
+                        elif at in ("order_confirmation_flow", "order_confirm_flow"):
+                            # Start a multi-step order confirmation flow (Shopify -> WA template -> button click -> branch).
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
+                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                            lang = str(act.get("language") or "en").strip() or "en"
+                            comps = self._render_template_components(act.get("components") or [], ctx)
+                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
+
+                            if to_id and tname:
+                                await self.process_outgoing_message({
+                                    "user_id": to_id,
+                                    "type": "text",
+                                    "from_me": True,
+                                    "message": preview,
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                    "agent_username": "automation",
+                                    "template_name": tname,
+                                    "template_language": lang,
+                                    "template_components": comps,
+                                })
+                                try:
+                                    await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                                except Exception:
+                                    pass
+
+                            # Build items list from order payload (best-effort, up to 20)
+                            items_out: list[dict] = []
+                            try:
+                                order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
+                                line_items = (order_obj.get("line_items") or []) if isinstance(order_obj, dict) else []
+                                for li in (line_items or [])[:20]:
+                                    if not isinstance(li, dict):
+                                        continue
+                                    vid = li.get("variant_id")
+                                    if not vid:
+                                        continue
+                                    qty = li.get("quantity")
+                                    try:
+                                        qstr = str(int(qty)) if qty is not None else ""
+                                    except Exception:
+                                        qstr = str(qty or "")
+                                    props = {}
+                                    try:
+                                        for p in (li.get("properties") or []):
+                                            if not isinstance(p, dict):
+                                                continue
+                                            n = str(p.get("name") or "").strip().lower()
+                                            v = str(p.get("value") or "").strip()
+                                            if n:
+                                                props[n] = v
+                                    except Exception:
+                                        props = {}
+                                    size = props.get("size") or props.get("المقاس") or None
+                                    color = props.get("color") or props.get("اللون") or None
+                                    if not (size and color):
+                                        vt = str(li.get("variant_title") or "").strip()
+                                        if vt and "/" in vt:
+                                            parts = [s.strip() for s in vt.split("/") if s.strip()]
+                                            if len(parts) >= 1 and not size:
+                                                size = parts[0]
+                                            if len(parts) >= 2 and not color:
+                                                color = parts[1]
+                                    price = str(li.get("price") or "").strip()
+                                    lines = []
+                                    if color:
+                                        lines.append(f"اللون: {color}")
+                                    if size:
+                                        lines.append(f"المقاس: {size}")
+                                    if qstr:
+                                        lines.append(f"الكمية: {qstr}")
+                                    if price:
+                                        lines.append(f"السعر: {price}")
+                                    caption = "\n".join(lines)
+                                    items_out.append({"variant_id": str(vid), "caption": caption})
+                            except Exception:
+                                items_out = []
+
+                            cfg = {
+                                "confirm_titles": act.get("confirm_titles") or ["تأكيد الطلب", "تاكيد الطلب"],
+                                "change_titles": act.get("change_titles") or ["تغيير المعلومات", "تغير المعلومات"],
+                                "talk_titles": act.get("talk_titles") or ["تكلم مع العميل", "تكلّم مع العميل"],
+                                "confirm_ids": act.get("confirm_ids") or [],
+                                "change_ids": act.get("change_ids") or [],
+                                "talk_ids": act.get("talk_ids") or [],
+                                "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
+                                "change_audio_url": str(act.get("change_audio_url") or ""),
+                                "talk_audio_url": str(act.get("talk_audio_url") or ""),
+                                "send_items": bool(act.get("send_items", True)),
+                                "max_items": int(act.get("max_items") or 10),
+                            }
+
+                            # Cache state for later click continuation (3 days)
+                            try:
+                                uid = str(to_id or phone_digits or "").strip()
+                                if uid:
+                                    state_key = f"automation:order_confirm:{ws}:{uid}:{str(rule.get('id') or '')}"
+                                    await self.redis_manager.set_json(
+                                        state_key,
+                                        {
+                                            "rule_id": str(rule.get("id") or ""),
+                                            "topic": topic_norm,
+                                            "order_id": str(data.get("id") or ""),
+                                            "ts": datetime.utcnow().isoformat(),
+                                            "cfg": cfg,
+                                            "items": items_out,
+                                        },
+                                        ttl=3 * 24 * 3600,
+                                    )
                             except Exception:
                                 pass
                 except Exception as exc:
@@ -5990,12 +6303,10 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = act.get("components") or []
-                            if not isinstance(comps, list):
-                                comps = []
+                            comps = self._render_template_components(act.get("components") or [], ctx)
                             if not (to_id and tname):
                                 continue
-                            preview = str(act.get("preview") or f"[template] {tname}")
+                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",

@@ -556,6 +556,9 @@ def _is_public_path(path: str) -> bool:
     # Shopify webhooks must remain public (Shopify cannot send Authorization headers).
     if path.startswith("/shopify/webhook"):
         return True
+    # Legacy/compat Shopify webhook endpoints (no Authorization header either).
+    if path.startswith("/shopify/webhooks"):
+        return True
     # Delivery app outbound status webhooks must be public (called server-to-server).
     if path.startswith("/delivery/webhook"):
         return True
@@ -8414,6 +8417,93 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
             _CURRENT_WORKSPACE.reset(ws_token)
         except Exception:
             pass
+
+
+@app.post("/shopify/webhooks/orders/create")
+async def shopify_orders_create_webhook_legacy(request: Request):
+    """Compatibility endpoint for older Shopify webhook URLs.
+
+    Some deployments (and the older `whatsapp_confermation` project) used:
+      POST /shopify/webhooks/orders/create
+
+    Shopify always signs the raw request body with:
+      X-Shopify-Hmac-Sha256 = base64(hmac_sha256(secret, raw_body))
+
+    This endpoint verifies the HMAC (if a secret is configured) and then forwards
+    the event into the existing Shopify automation pipeline (same as /shopify/webhook/{workspace}).
+
+    Workspace resolution:
+    - Prefer `?workspace=<ws>` (Shopify allows query strings in webhook URLs)
+    - Otherwise, best-effort infer from `X-Shopify-Shop-Domain`
+    - Fallback to DEFAULT_WORKSPACE
+    """
+    ws = DEFAULT_WORKSPACE
+    ws_token = None
+    try:
+        # 1) Try explicit workspace from query param/header (header unlikely for Shopify).
+        ws = _coerce_workspace(_workspace_from_request(request))
+
+        # 2) Best-effort infer from shop domain when multi-workspace is enabled.
+        try:
+            shop_domain = (request.headers.get("X-Shopify-Shop-Domain") or "").strip().lower()
+        except Exception:
+            shop_domain = ""
+        if ENABLE_MULTI_WORKSPACE and (ws == DEFAULT_WORKSPACE) and shop_domain:
+            for cand in (WORKSPACES or []):
+                if cand and cand in shop_domain:
+                    ws = _coerce_workspace(cand)
+                    break
+
+        ws_token = _CURRENT_WORKSPACE.set(ws)
+
+        body = await request.body()
+
+        # Secret precedence:
+        # - Per-workspace SHOPIFY_WEBHOOK_SECRET_<WS>
+        # - Global SHOPIFY_WEBHOOK_SECRET
+        # - Legacy per-project secrets (kept for compatibility with older configs)
+        secret_ws = (os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "") or "").strip()
+        secret_global = (os.getenv("SHOPIFY_WEBHOOK_SECRET", "") or "").strip()
+        legacy = ""
+        if ws == "irrakids":
+            legacy = (os.getenv("IRRAKIDS_WEBHOOK_SECRET", "") or "").strip()
+        elif ws == "irranova":
+            legacy = (os.getenv("IRRANOVA_WEBHOOK_SECRET", "") or "").strip()
+        secret = (secret_ws or secret_global or legacy).strip()
+
+        if secret:
+            hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
+            from .shopify_webhook import verify_shopify_webhook_hmac
+
+            ok, _dbg = verify_shopify_webhook_hmac(secret, body, hmac_header)
+            if not ok:
+                raise HTTPException(status_code=401, detail="Invalid Shopify webhook HMAC")
+        else:
+            logging.getLogger(__name__).warning(
+                "SHOPIFY_WEBHOOK_SECRET not set; accepting Shopify webhook without verification (workspace=%s)", ws
+            )
+
+        # Topic: prefer Shopify header, fallback to orders/create.
+        topic = (request.headers.get("X-Shopify-Topic") or "").strip() or "orders/create"
+
+        try:
+            payload = json.loads((body or b"{}").decode("utf-8") or "{}")
+        except Exception:
+            payload = {}
+
+        # Process asynchronously (fast ACK to Shopify).
+        try:
+            asyncio.create_task(message_processor._run_shopify_automations(topic, payload, workspace=ws))
+        except Exception:
+            pass
+
+        return {"ok": True, "workspace": ws, "topic": topic, "compat": True}
+    finally:
+        if ws_token is not None:
+            try:
+                _CURRENT_WORKSPACE.reset(ws_token)
+            except Exception:
+                pass
 
 
 @app.post("/delivery/webhook/{workspace}")

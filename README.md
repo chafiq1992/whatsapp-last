@@ -41,6 +41,30 @@ gcloud run deploy whatsapp-backend \
 
 Replace the values with the credentials for your Shopify store. Alternatively use the `IRRAKIDS_*` or `IRRANOVA_*` variable names if those are available.
 
+## Shopify Webhooks (Orders/Create etc.)
+
+Shopify webhooks are **public endpoints** (Shopify does not send `Authorization` headers). Authentication is done via the `X-Shopify-Hmac-Sha256` signature header.
+
+- **Recommended URL (multi-workspace)**:
+  - `POST /shopify/webhook/{workspace}`
+  - Example URLs to paste in Shopify:
+    - `https://<your-domain>/shopify/webhook/irrakids`
+    - `https://<your-domain>/shopify/webhook/irranova`
+
+- **Compatibility URL (legacy / older deployments)**:
+  - `POST /shopify/webhooks/orders/create?workspace=<workspace>`
+  - Example:
+    - `https://<your-domain>/shopify/webhooks/orders/create?workspace=irrakids`
+
+### Webhook secret (HMAC)
+
+Set **one** of the following (per-workspace recommended):
+
+- `SHOPIFY_WEBHOOK_SECRET` (global)
+- `SHOPIFY_WEBHOOK_SECRET_IRRAKIDS` / `SHOPIFY_WEBHOOK_SECRET_IRRANOVA` (per workspace)
+
+If no secret is set, the backend will still accept the webhook, but **anyone could POST** to that URL (not recommended for production).
+
 ## SQLite database
 
 Messages are stored in a local SQLite file. By default the backend writes to

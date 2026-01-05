@@ -553,6 +553,9 @@ def _is_public_path(path: str) -> bool:
     # Webhook endpoints must remain public for Meta
     if path.startswith("/webhook"):
         return True
+    # Shopify webhooks must remain public (Shopify cannot send Authorization headers).
+    if path.startswith("/shopify/webhook"):
+        return True
     # Delivery app outbound status webhooks must be public (called server-to-server).
     if path.startswith("/delivery/webhook"):
         return True

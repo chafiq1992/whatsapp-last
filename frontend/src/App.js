@@ -249,6 +249,11 @@ export default function App() {
     if (!authReady) return;
     if (isLoginPath) return;
     try { localStorage.setItem('workspace', String(workspace || 'irranova')); } catch {}
+    // Prevent any cross-workspace UI leakage while the new workspace loads.
+    setActiveUser(null);
+    setConversations([]);
+    setCatalogProducts({});
+    setProducts([]);
     loadConversations().then(cached => {
       if (cached.length > 0) {
         setConversations(cached);

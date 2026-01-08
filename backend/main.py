@@ -157,6 +157,41 @@ MAX_CATALOG_ITEMS = 30
 RATE_LIMIT_DELAY = 0
 CATALOG_CACHE_TTL_SEC = 15 * 60
 
+def _safe_cache_token(value: str) -> str:
+    """Safe, short token for filenames/keys (avoid path traversal / weird chars)."""
+    try:
+        s = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip())
+        s = s.strip("_")
+        return (s[:64] or "default")
+    except Exception:
+        return "default"
+
+def _catalog_cache_file_for(workspace: str, catalog_id: str | None = None) -> str:
+    """Return a per-workspace (and per-catalog) cache filename."""
+    ws = _safe_cache_token(workspace)
+    cid = _safe_cache_token(catalog_id or "")
+    # Keep the legacy name for default workspace with no catalog_id override
+    if ws == _safe_cache_token(DEFAULT_WORKSPACE) and not cid:
+        return CATALOG_CACHE_FILE
+    return f"catalog_cache_{ws}{'_' + cid if cid else ''}.json"
+
+async def _get_effective_catalog_id(workspace: str | None = None) -> str:
+    """Resolve catalog_id for a workspace (DB override -> env per-workspace -> global env)."""
+    ws = _coerce_workspace(workspace or get_current_workspace())
+    try:
+        cfg = await message_processor._get_inbox_env(ws)  # uses short TTL cache
+        cid = str((cfg or {}).get("catalog_id") or "").strip()
+        if cid:
+            return cid
+    except Exception:
+        pass
+    try:
+        suf = re.sub(r"[^A-Z0-9]+", "_", str(ws or "").strip().upper())
+        cid2 = str(os.getenv(f"CATALOG_ID_{suf}", "") or "").strip()
+        return cid2 or str(CATALOG_ID or "").strip()
+    except Exception:
+        return str(CATALOG_ID or "").strip()
+
 # Backwards-compatibility shim for tests and existing imports expecting `main.config`
 try:
     from types import SimpleNamespace
@@ -1418,7 +1453,7 @@ class WorkspaceWhatsAppRouter:
 
             return response.json()
 
-    async def send_catalog_products(self, user_id: str, product_ids: List[str]) -> List[Dict[str, Any]]:
+    async def send_catalog_products(self, user_id: str, product_ids: List[str], catalog_id: str | None = None) -> List[Dict[str, Any]]:
         """Send multiple catalog products in chunks, with clear bilingual part labels."""
         results = []
         # Pre-split to compute part numbers and item ranges
@@ -1450,7 +1485,7 @@ class WorkspaceWhatsAppRouter:
                     "header": {"type": "text", "text": header_text},
                     "body": {"text": body_text},
                     "action": {
-                        "catalog_id": CATALOG_ID,
+                        "catalog_id": str(catalog_id or CATALOG_ID),
                         "sections": [
                             {
                                 "title": section_title,
@@ -1467,7 +1502,7 @@ class WorkspaceWhatsAppRouter:
             results.append(result)
         return results
 
-    async def send_single_catalog_item(self, user_id: str, product_retailer_id: str, caption: str = "") -> Dict[str, Any]:
+    async def send_single_catalog_item(self, user_id: str, product_retailer_id: str, caption: str = "", catalog_id: str | None = None) -> Dict[str, Any]:
         """Send a single catalog item (interactive) with optional caption."""
         data = {
             "messaging_product": "whatsapp",
@@ -1477,7 +1512,7 @@ class WorkspaceWhatsAppRouter:
                 "type": "product",
                 "body": {"text": caption or "Découvrez ce produit !\nتفقد هذا المنتج!"},
                 "action": {
-                    "catalog_id": CATALOG_ID,
+                    "catalog_id": str(catalog_id or CATALOG_ID),
                     "product_retailer_id": product_retailer_id
                 }
             }
@@ -1564,7 +1599,10 @@ class WorkspaceWhatsAppRouter:
 
     async def send_full_catalog(self, user_id: str, caption: str = "") -> List[Dict[str, Any]]:
         """Send the entire catalog to a user, optionally with a caption."""
-        products = catalog_manager.get_cached_products()
+        ws = get_current_workspace()
+        cid = await _get_effective_catalog_id(ws)
+        cache_file = _catalog_cache_file_for(ws, cid)
+        products = catalog_manager.get_cached_products(cache_file=cache_file)
         product_ids = [p.get("retailer_id") for p in products if p.get("retailer_id")]
 
         if caption:
@@ -1573,11 +1611,14 @@ class WorkspaceWhatsAppRouter:
         if not product_ids:
             return []
 
-        return await self.send_catalog_products(user_id, product_ids)
+        return await self.send_catalog_products(user_id, product_ids, catalog_id=cid)
 
     async def send_full_set(self, user_id: str, set_id: str, caption: str = "") -> List[Dict[str, Any]]:
         """Send all products for a specific set in chunks."""
-        products = await CatalogManager.get_products_for_set(set_id)
+        ws = get_current_workspace()
+        cid = await _get_effective_catalog_id(ws)
+        cache_file = _catalog_cache_file_for(ws, cid)
+        products = await CatalogManager.get_products_for_set(set_id, limit=60, catalog_id=cid, cache_file=cache_file)
         product_ids = [p.get("retailer_id") for p in products if p.get("retailer_id")]
 
         if caption:
@@ -1586,7 +1627,7 @@ class WorkspaceWhatsAppRouter:
         if not product_ids:
             return []
 
-        return await self.send_catalog_products(user_id, product_ids)
+        return await self.send_catalog_products(user_id, product_ids, catalog_id=cid)
     
     async def send_media_message(
         self,
@@ -3987,7 +4028,10 @@ class WorkspaceDatabaseRouter:
         # If an admin added a new workspace at runtime, lazily create its DB manager
         # so data stays isolated even without a restart.
         try:
-            if ENABLE_MULTI_WORKSPACE and ws and ws != DEFAULT_WORKSPACE:
+            # NOTE: We intentionally allow lazy tenant creation even when ENABLE_MULTI_WORKSPACE=0.
+            # In that mode, the default workspace continues to use the legacy DB_PATH,
+            # but additional workspaces get their own derived tenant DB so inbox data/settings never leak.
+            if ws and ws != DEFAULT_WORKSPACE:
                 db_url = (TENANT_DB_URLS or {}).get(ws) or (TENANT_DB_URLS or {}).get(DEFAULT_WORKSPACE) or DATABASE_URL
                 db_path = (TENANT_DB_PATHS or {}).get(ws) or _derive_tenant_db_path(DB_PATH, ws)
                 try:
@@ -4129,7 +4173,9 @@ class MessageProcessor:
             "allowed_phone_number_ids": ["..."],
             "survey_test_numbers": ["2126..."],  (digits only)
             "auto_reply_test_numbers": ["2126..."], (digits only)
-            "waba_id": "1234567890"
+            "waba_id": "1234567890",
+            "catalog_id": "1234567890",
+            "phone_number_id": "1234567890"
           }
         """
         ws = _coerce_workspace(workspace or get_current_workspace())
@@ -4145,6 +4191,19 @@ class MessageProcessor:
         allowed_default: set[str] = set(ALLOWED_PHONE_NUMBER_IDS or set())
         survey_default: set[str] = set(SURVEY_TEST_NUMBERS or set())
         auto_reply_default: set[str] = set(AUTO_REPLY_TEST_NUMBERS or set())
+        # Defaults for new fields
+        catalog_default: str = ""
+        phone_default: str = ""
+        try:
+            # Allow per-workspace env override: CATALOG_ID_<WS>
+            suf = re.sub(r"[^A-Z0-9]+", "_", str(ws or "").strip().upper())
+            catalog_default = str(os.getenv(f"CATALOG_ID_{suf}", "") or "").strip() or str(CATALOG_ID or "").strip()
+        except Exception:
+            catalog_default = str(CATALOG_ID or "").strip()
+        try:
+            phone_default = str((WHATSAPP_CONFIG_BY_WORKSPACE or {}).get(ws, {}).get("phone_number_id") or "").strip() or str(PHONE_NUMBER_ID or "").strip()
+        except Exception:
+            phone_default = str(PHONE_NUMBER_ID or "").strip()
 
         # Overrides from DB (optional)
         overrides: dict = {}
@@ -4174,6 +4233,8 @@ class MessageProcessor:
         allowed_effective = set([str(x).strip() for x in allowed_override_raw if str(x).strip()]) if allowed_override_raw else allowed_default
         survey_effective = set([_digits_only(str(x).strip()) for x in survey_override_raw if str(x).strip()]) if survey_override_raw else survey_default
         auto_reply_effective = set([_digits_only(str(x).strip()) for x in auto_reply_override_raw if str(x).strip()]) if auto_reply_override_raw else auto_reply_default
+        catalog_effective = str((overrides or {}).get("catalog_id") or "").strip() or catalog_default or None
+        phone_effective = str((overrides or {}).get("phone_number_id") or "").strip() or phone_default or None
 
         out = {
             "workspace": ws,
@@ -4181,6 +4242,8 @@ class MessageProcessor:
             "survey_test_numbers": survey_effective,
             "auto_reply_test_numbers": auto_reply_effective,
             "waba_id": str((overrides or {}).get("waba_id") or "").strip() or None,
+            "catalog_id": catalog_effective,
+            "phone_number_id": phone_effective,
             "overrides": overrides,
         }
         try:
@@ -4536,8 +4599,14 @@ class MessageProcessor:
                     if not retailer_id:
                         raise Exception("Missing product_retailer_id for catalog_item")
                     try:
+                        cid = None
+                        try:
+                            env_cfg = await self._get_inbox_env(get_current_workspace())
+                            cid = (env_cfg or {}).get("catalog_id") or None
+                        except Exception:
+                            cid = None
                         wa_response = await self.whatsapp_messenger.send_single_catalog_item(
-                            user_id, str(retailer_id), caption
+                            user_id, str(retailer_id), caption, catalog_id=cid
                         )
                         # After interactive is delivered, optionally send bilingual prompt as a reply
                         if message.get("needs_bilingual_prompt"):
@@ -4571,7 +4640,9 @@ class MessageProcessor:
                     except Exception as _exc:
                         # Fallback: try to send first image from cached catalog for visibility
                         try:
-                            products = catalog_manager.get_cached_products()
+                            ws = get_current_workspace()
+                            cid = await _get_effective_catalog_id(ws)
+                            products = catalog_manager.get_cached_products(cache_file=_catalog_cache_file_for(ws, cid))
                         except Exception:
                             products = []
                         img_url = None
@@ -6388,9 +6459,11 @@ class MessageProcessor:
             score += 0.2
         return min(score, 1.0)
 
-    def _best_catalog_match(self, text: str) -> Optional[dict]:
+    async def _best_catalog_match(self, text: str) -> Optional[dict]:
         try:
-            products = catalog_manager.get_cached_products()
+            ws = get_current_workspace()
+            cid = await _get_effective_catalog_id(ws)
+            products = catalog_manager.get_cached_products(cache_file=_catalog_cache_file_for(ws, cid))
         except Exception:
             products = []
         if not products:
@@ -6474,7 +6547,9 @@ class MessageProcessor:
             except Exception:
                 resolved_variant_id, resolved_variant = None, None
             try:
-                products = catalog_manager.get_cached_products()
+                ws = get_current_workspace()
+                cid = await _get_effective_catalog_id(ws)
+                products = catalog_manager.get_cached_products(cache_file=_catalog_cache_file_for(ws, cid))
             except Exception:
                 products = []
             if products:
@@ -6526,7 +6601,7 @@ class MessageProcessor:
                 return
 
         # 2) Fallback to name-based best match using score threshold
-        product = self._best_catalog_match(text)
+        product = await self._best_catalog_match(text)
         if not product:
             return
         images = product.get("images") or []
@@ -6594,17 +6669,22 @@ async def lookup_phone(user_id: str) -> Optional[str]:
     return None
 
 # Initialize managers
+_tenant_managers: Dict[str, DatabaseManager] = {}
 if ENABLE_MULTI_WORKSPACE:
-    _tenant_managers: Dict[str, DatabaseManager] = {}
     for _ws in (WORKSPACES or [DEFAULT_WORKSPACE]):
         _w = _coerce_workspace(_ws)
         # Prefer workspace Postgres URL (Supabase). Fallback to SQLite per-tenant path.
         _url = (TENANT_DB_URLS or {}).get(_w) or None
         _path = (TENANT_DB_PATHS or {}).get(_w) or DB_PATH
         _tenant_managers[_w] = DatabaseManager(db_path=_path, db_url=_url)
-    db_manager = WorkspaceDatabaseRouter(_tenant_managers)
 else:
-    db_manager = DatabaseManager()
+    # Keep legacy behavior for the default workspace (existing data stays in DB_PATH / DATABASE_URL),
+    # but still route by workspace using lazy tenant DB managers for other workspaces.
+    _tenant_managers[_coerce_workspace(DEFAULT_WORKSPACE)] = DatabaseManager(
+        db_path=DB_PATH,
+        db_url=(DATABASE_URL or None),
+    )
+db_manager = WorkspaceDatabaseRouter(_tenant_managers)
 
 # Shared auth/settings DB (agents, refresh tokens, tag options) lives on the default DATABASE_URL (irrakids)
 # as requested. Fallback to AUTH_DB_PATH/SQLite when DATABASE_URL is not configured.
@@ -7051,15 +7131,19 @@ async def startup():
         print(f"Webhook worker startup failed: {exc}")
     # Catalog cache: avoid blocking startup in production
     try:
+        # Use the default workspace's catalog id on startup; other workspaces refresh on demand.
+        ws0 = _coerce_workspace(DEFAULT_WORKSPACE)
+        cid0 = await _get_effective_catalog_id(ws0)
+        cache_file0 = _catalog_cache_file_for(ws0, cid0)
         # Try hydrate from GCS quickly if missing
-        if not os.path.exists(CATALOG_CACHE_FILE):
+        if not os.path.exists(cache_file0):
             try:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None,
                     download_file_from_gcs,
-                    CATALOG_CACHE_FILE,
-                    CATALOG_CACHE_FILE,
+                    cache_file0,
+                    cache_file0,
                 )
             except Exception:
                 pass
@@ -7067,7 +7151,7 @@ async def startup():
         # In tests, refresh synchronously so assertions can observe the file
         if os.getenv("PYTEST_CURRENT_TEST"):
             try:
-                count = await catalog_manager.refresh_catalog_cache()
+                count = await catalog_manager.refresh_catalog_cache(cid0, cache_file0)
                 print(f"Catalog cache created with {count} items (sync in tests)")
             except Exception as exc:
                 print(f"Catalog cache refresh failed (tests): {exc}")
@@ -7075,7 +7159,7 @@ async def startup():
             # In prod, refresh in background to avoid startup timeouts
             async def _refresh_cache_bg():
                 try:
-                    count = await catalog_manager.refresh_catalog_cache()
+                    count = await catalog_manager.refresh_catalog_cache(cid0, cache_file0)
                     print(f"Catalog cache created with {count} items")
                 except Exception as exc:
                     print(f"Catalog cache refresh failed: {exc}")
@@ -8210,6 +8294,8 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "survey_test_numbers": sorted(list(cfg.get("survey_test_numbers") or [])),
             "auto_reply_test_numbers": sorted(list(cfg.get("auto_reply_test_numbers") or [])),
             "waba_id": cfg.get("waba_id") or "",
+            "catalog_id": cfg.get("catalog_id") or "",
+            "phone_number_id": cfg.get("phone_number_id") or "",
             "overrides": cfg.get("overrides") or {},
         }
     except Exception:
@@ -8218,6 +8304,8 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "allowed_phone_number_ids": sorted(list(ALLOWED_PHONE_NUMBER_IDS or set())),
             "survey_test_numbers": sorted(list(SURVEY_TEST_NUMBERS or set())),
             "auto_reply_test_numbers": sorted(list(AUTO_REPLY_TEST_NUMBERS or set())),
+            "catalog_id": str(CATALOG_ID or "").strip(),
+            "phone_number_id": str(PHONE_NUMBER_ID or "").strip(),
             "overrides": {},
         }
 
@@ -8245,6 +8333,8 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     survey = [_digits_only(str(x).strip()) for x in _as_list(payload.get("survey_test_numbers")) if str(x).strip()]
     auto_reply = [_digits_only(str(x).strip()) for x in _as_list(payload.get("auto_reply_test_numbers")) if str(x).strip()]
     waba_id = str((payload or {}).get("waba_id") or "").strip()
+    catalog_id = str((payload or {}).get("catalog_id") or "").strip()
+    phone_number_id = str((payload or {}).get("phone_number_id") or "").strip()
 
     # Normalize: dedupe while keeping stable order
     def _dedupe(xs: list[str]) -> list[str]:
@@ -8262,6 +8352,8 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         "survey_test_numbers": _dedupe(survey),
         "auto_reply_test_numbers": _dedupe(auto_reply),
         "waba_id": waba_id,
+        "catalog_id": catalog_id,
+        "phone_number_id": phone_number_id,
     }
     await db_manager.set_setting("inbox_env", stored)
     # Bust cache for immediate effect
@@ -9981,7 +10073,8 @@ async def send_catalog_item_endpoint(
     _: None = Depends(_optional_rate_limit_text),
 ):
     customer_phone = await lookup_phone(user_id) or user_id
-    response = await messenger.send_single_catalog_item(customer_phone, product_retailer_id, caption)
+    cid = await _get_effective_catalog_id(get_current_workspace())
+    response = await messenger.send_single_catalog_item(customer_phone, product_retailer_id, caption, catalog_id=cid)
     return {"status": "ok", "response": response}
 
 
@@ -10056,12 +10149,19 @@ async def send_catalog_set_all_endpoint(
 @app.get("/catalog-sets")
 async def get_catalog_sets():
     try:
-        sets = await CatalogManager.get_catalog_sets()
+        ws = get_current_workspace()
+        cid = await _get_effective_catalog_id(ws)
+        sets = await CatalogManager.get_catalog_sets(catalog_id=cid)
         return sets
     except Exception as exc:
         print(f"Error fetching catalog sets: {exc}")
         # Fallback to All Products
-        return [{"id": CATALOG_ID, "name": "All Products"}]
+        try:
+            ws = get_current_workspace()
+            cid = await _get_effective_catalog_id(ws)
+        except Exception:
+            cid = str(CATALOG_ID or "").strip()
+        return [{"id": cid, "name": "All Products"}]
 
 
 @app.get("/catalog-all-products")
@@ -10071,14 +10171,18 @@ async def get_catalog_products_endpoint(force_refresh: bool = False, background_
     Important: do NOT block this endpoint on a full remote refresh (can exceed Cloud Run timeouts),
     instead trigger a background refresh and serve stale cache immediately.
     """
+    ws = get_current_workspace()
+    cid = await _get_effective_catalog_id(ws)
+    cache_file = _catalog_cache_file_for(ws, cid)
+
     # Refresh cache if forced or stale/missing; otherwise serve cached for speed
     need_refresh = bool(force_refresh)
     try:
-        if not os.path.exists(CATALOG_CACHE_FILE):
+        if not os.path.exists(cache_file):
             need_refresh = True
         else:
             import time as _time
-            age_sec = _time.time() - os.path.getmtime(CATALOG_CACHE_FILE)
+            age_sec = _time.time() - os.path.getmtime(cache_file)
             if age_sec > CATALOG_CACHE_TTL_SEC:
                 need_refresh = True
     except Exception:
@@ -10088,21 +10192,24 @@ async def get_catalog_products_endpoint(force_refresh: bool = False, background_
         try:
             # Fire-and-forget refresh to avoid request timeouts.
             if background_tasks is not None:
-                background_tasks.add_task(catalog_manager.refresh_catalog_cache)
+                background_tasks.add_task(catalog_manager.refresh_catalog_cache, cid, cache_file)
             else:
-                asyncio.create_task(catalog_manager.refresh_catalog_cache())
+                asyncio.create_task(catalog_manager.refresh_catalog_cache(cid, cache_file))
         except Exception as exc:
             logging.getLogger(__name__).warning("Catalog cache refresh scheduling failed: %s", exc)
 
     # Always serve current cache (may be stale, but fast).
-    return catalog_manager.get_cached_products() or []
+    return catalog_manager.get_cached_products(cache_file=cache_file) or []
 
 
 @app.get("/catalog-set-products")
 async def get_catalog_set_products(set_id: str, limit: int = 60):
     """Return products for the requested set (or full catalog)."""
     try:
-        products = await CatalogManager.get_products_for_set(set_id, limit=limit)
+        ws = get_current_workspace()
+        cid = await _get_effective_catalog_id(ws)
+        cache_file = _catalog_cache_file_for(ws, cid)
+        products = await CatalogManager.get_products_for_set(set_id, limit=limit, catalog_id=cid, cache_file=cache_file)
         print(f"Catalog: returning {len(products)} products for set_id={set_id}")
         return products
     except Exception as exc:
@@ -10112,14 +10219,19 @@ async def get_catalog_set_products(set_id: str, limit: int = 60):
 @app.api_route("/refresh-catalog-cache", methods=["GET", "POST"])
 async def refresh_catalog_cache_endpoint(background_tasks: BackgroundTasks):
     # Kick off a background refresh to avoid request timeouts
-    background_tasks.add_task(catalog_manager.refresh_catalog_cache)
-    return {"status": "started"}
+    ws = get_current_workspace()
+    cid = await _get_effective_catalog_id(ws)
+    cache_file = _catalog_cache_file_for(ws, cid)
+    background_tasks.add_task(catalog_manager.refresh_catalog_cache, cid, cache_file)
+    return {"status": "started", "workspace": ws, "catalog_id": cid}
 
 
 @app.get("/all-catalog-products")
 async def get_all_catalog_products():
     try:
-        products = await CatalogManager.get_catalog_products()
+        ws = get_current_workspace()
+        cid = await _get_effective_catalog_id(ws)
+        products = await CatalogManager.get_catalog_products(catalog_id=cid)
         return products
     except Exception as e:
         print(f"Error fetching catalog: {e}")
@@ -10552,13 +10664,16 @@ class CatalogManager:
     _SET_CACHE_TTL_SEC: int = 15 * 60
 
     @staticmethod
-    def _set_cache_filename(set_id: str) -> str:
-        return f"catalog_set_{set_id}.json"
+    def _set_cache_filename(set_id: str, catalog_id: str | None = None) -> str:
+        # Include catalog_id to avoid cross-workspace collisions if different catalogs reuse set ids.
+        cid = _safe_cache_token(catalog_id or "")
+        sid = _safe_cache_token(set_id)
+        return f"catalog_{cid + '_' if cid else ''}set_{sid}.json"
 
     @staticmethod
-    def _load_persisted_set(set_id: str) -> list[dict]:
+    def _load_persisted_set(set_id: str, catalog_id: str | None = None) -> list[dict]:
         """Load a persisted set cache from local disk or GCS if present."""
-        filename = CatalogManager._set_cache_filename(set_id)
+        filename = CatalogManager._set_cache_filename(set_id, catalog_id=catalog_id)
         try:
             if not os.path.exists(filename):
                 try:
@@ -10575,9 +10690,9 @@ class CatalogManager:
             return []
 
     @staticmethod
-    async def _persist_set_async(set_id: str, products: list[dict]) -> None:
+    async def _persist_set_async(set_id: str, products: list[dict], catalog_id: str | None = None) -> None:
         """Persist set products to local disk and upload to GCS (best-effort)."""
-        filename = CatalogManager._set_cache_filename(set_id)
+        filename = CatalogManager._set_cache_filename(set_id, catalog_id=catalog_id)
         try:
             with open(filename, "w", encoding="utf8") as f:
                 json.dump(products, f, ensure_ascii=False)
@@ -10589,18 +10704,19 @@ class CatalogManager:
             pass
 
     @staticmethod
-    async def get_catalog_sets() -> List[Dict[str, Any]]:
+    async def get_catalog_sets(catalog_id: str | None = None) -> List[Dict[str, Any]]:
         """Return available product sets (collections) for the configured catalog.
 
         Graph API: /{catalog_id}/product_sets?fields=id,name
         """
-        url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{CATALOG_ID}/product_sets"
+        cid = str(catalog_id or CATALOG_ID or "").strip()
+        url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{cid}/product_sets"
         params = {"fields": "id,name", "limit": 200}
         headers = await get_whatsapp_headers()
 
         # Always include the whole catalog as a fallback option
-        result: List[Dict[str, Any]] = [{"id": CATALOG_ID, "name": "All Products"}]
-        seen: set[str] = {CATALOG_ID}
+        result: List[Dict[str, Any]] = [{"id": cid, "name": "All Products"}]
+        seen: set[str] = {cid}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             while url:
@@ -10622,9 +10738,10 @@ class CatalogManager:
         return result
 
     @staticmethod
-    async def get_catalog_products() -> List[Dict[str, Any]]:
+    async def get_catalog_products(catalog_id: str | None = None) -> List[Dict[str, Any]]:
         products: List[Dict[str, Any]] = []
-        url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{CATALOG_ID}/products"
+        cid = str(catalog_id or CATALOG_ID or "").strip()
+        url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{cid}/products"
         params = {
             # Ask Graph for image URLs explicitly to ensure we receive usable links
             "fields": "retailer_id,name,price,images{url},availability,quantity",
@@ -10644,24 +10761,27 @@ class CatalogManager:
         return products
 
     @staticmethod
-    async def get_products_for_set(set_id: str, limit: int = 60) -> List[Dict[str, Any]]:
+    async def get_products_for_set(set_id: str, limit: int = 60, catalog_id: str | None = None, cache_file: str | None = None) -> List[Dict[str, Any]]:
         """Return products for a specific product set.
 
         Graph API: /{product_set_id}/products
         Fallback: fetch entire catalog if set_id equals the catalog id.
         """
+        cid = str(catalog_id or CATALOG_ID or "").strip()
+        cache_file = cache_file or CATALOG_CACHE_FILE
+        cache_key = f"{cid}:{str(set_id or '').strip()}"
         # If requesting the full catalog, serve from on-disk cache instantly
-        if not set_id or set_id == CATALOG_ID:
-            cached = catalog_manager.get_cached_products()
+        if not set_id or str(set_id).strip() == cid:
+            cached = catalog_manager.get_cached_products(cache_file=cache_file)
             if cached:
                 return cached[: max(1, int(limit))]
             # Fallback to live fetch if cache empty; also persist to cache for next requests
-            products_live = await CatalogManager.get_catalog_products()
+            products_live = await CatalogManager.get_catalog_products(catalog_id=cid)
             try:
-                with open(CATALOG_CACHE_FILE, "w", encoding="utf8") as f:
+                with open(cache_file, "w", encoding="utf8") as f:
                     json.dump(products_live, f, ensure_ascii=False)
                 try:
-                    await upload_file_to_gcs(CATALOG_CACHE_FILE)
+                    await upload_file_to_gcs(cache_file)
                 except Exception as _exc:
                     print(f"GCS upload failed after live fetch: {_exc}")
             except Exception as _exc:
@@ -10671,7 +10791,7 @@ class CatalogManager:
         # Serve from persisted cache if fresh
         use_persisted = False
         try:
-            filename = CatalogManager._set_cache_filename(set_id)
+            filename = CatalogManager._set_cache_filename(set_id, catalog_id=cid)
             if os.path.exists(filename):
                 import time as _time
                 if (_time.time() - os.path.getmtime(filename)) < CatalogManager._SET_CACHE_TTL_SEC:
@@ -10680,15 +10800,15 @@ class CatalogManager:
             use_persisted = False
 
         if use_persisted:
-            persisted = CatalogManager._load_persisted_set(set_id)
+            persisted = CatalogManager._load_persisted_set(set_id, catalog_id=cid)
             if persisted:
                 return persisted[: max(1, int(limit))]
 
         # Serve from in-memory cache if fresh (warm instance)
         import time as _time
-        ts = CatalogManager._SET_CACHE_TS.get(set_id)
+        ts = CatalogManager._SET_CACHE_TS.get(cache_key)
         if ts and (_time.time() - ts) < CatalogManager._SET_CACHE_TTL_SEC:
-            cached_list = CatalogManager._SET_CACHE.get(set_id, [])
+            cached_list = CatalogManager._SET_CACHE.get(cache_key, [])
             if cached_list:
                 return cached_list[: max(1, int(limit))]
 
@@ -10713,10 +10833,10 @@ class CatalogManager:
                 params = None
         # Store in memory and persist for fast subsequent responses across instances
         try:
-            CatalogManager._SET_CACHE[set_id] = products
-            CatalogManager._SET_CACHE_TS[set_id] = _time.time()
+            CatalogManager._SET_CACHE[cache_key] = products
+            CatalogManager._SET_CACHE_TS[cache_key] = _time.time()
             try:
-                await CatalogManager._persist_set_async(set_id, products)
+                await CatalogManager._persist_set_async(set_id, products, catalog_id=cid)
             except Exception:
                 pass
         except Exception:
@@ -10775,35 +10895,37 @@ class CatalogManager:
         }
 
     @staticmethod
-    async def refresh_catalog_cache() -> int:
-        products = await CatalogManager.get_catalog_products()
-        with open(CATALOG_CACHE_FILE, "w", encoding="utf8") as f:
+    async def refresh_catalog_cache(catalog_id: str | None = None, cache_file: str | None = None) -> int:
+        cid = str(catalog_id or CATALOG_ID or "").strip()
+        cache_file = cache_file or CATALOG_CACHE_FILE
+        products = await CatalogManager.get_catalog_products(catalog_id=cid)
+        with open(cache_file, "w", encoding="utf8") as f:
             json.dump(products, f, ensure_ascii=False)
         try:
-            await upload_file_to_gcs(CATALOG_CACHE_FILE)
-            await upload_file_to_gcs(CATALOG_CACHE_FILE)
+            await upload_file_to_gcs(cache_file)
         except Exception as exc:
             print(f"GCS upload failed: {exc}")
         return len(products)
 
     @staticmethod
-    def get_cached_products() -> List[Dict[str, Any]]:
-        if not os.path.exists(CATALOG_CACHE_FILE):
+    def get_cached_products(cache_file: str | None = None) -> List[Dict[str, Any]]:
+        cache_file = cache_file or CATALOG_CACHE_FILE
+        if not os.path.exists(cache_file):
             try:
                 download_file_from_gcs(
-                    CATALOG_CACHE_FILE, CATALOG_CACHE_FILE
+                    cache_file, cache_file
                 )
             except Exception:
                 return []
         # If file exists but is empty or invalid, return empty list gracefully
         try:
-            if os.path.getsize(CATALOG_CACHE_FILE) == 0:
+            if os.path.getsize(cache_file) == 0:
                 return []
         except Exception:
             return []
 
         try:
-            with open(CATALOG_CACHE_FILE, "r", encoding="utf8") as f:
+            with open(cache_file, "r", encoding="utf8") as f:
                 products = json.load(f)
         except Exception:
             return []

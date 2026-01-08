@@ -37,6 +37,8 @@ export default function AutomationSettingsPage() {
     survey_test_numbers: '',
     auto_reply_test_numbers: '',
     waba_id: '',
+    catalog_id: '',
+    phone_number_id: '',
   });
   const [savingEnv, setSavingEnv] = useState(false);
 
@@ -75,6 +77,8 @@ export default function AutomationSettingsPage() {
       survey_test_numbers: join(d.survey_test_numbers),
       auto_reply_test_numbers: join(d.auto_reply_test_numbers),
       waba_id: String(d.waba_id || ''),
+      catalog_id: String(d.catalog_id || ''),
+      phone_number_id: String(d.phone_number_id || ''),
     });
   };
 
@@ -163,6 +167,8 @@ export default function AutomationSettingsPage() {
         survey_test_numbers: envDraft.survey_test_numbers,
         auto_reply_test_numbers: envDraft.auto_reply_test_numbers,
         waba_id: envDraft.waba_id,
+        catalog_id: envDraft.catalog_id,
+        phone_number_id: envDraft.phone_number_id,
       }, { headers: { 'X-Workspace': ws } });
       await loadInboxEnv(ws);
     } catch (e) {
@@ -355,6 +361,14 @@ export default function AutomationSettingsPage() {
               <div className="border rounded bg-white">
                 <div className="px-3 py-2 border-b text-sm font-medium">Inbox environment (per workspace)</div>
                 <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="md:col-span-2">
+                    <div className="text-xs text-slate-500 mb-1">Catalog ID</div>
+                    <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.catalog_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, catalog_id: e.target.value }))} />
+                  </div>
+                  <div className="md:col-span-2">
+                    <div className="text-xs text-slate-500 mb-1">Phone Number ID (for this workspace inbox)</div>
+                    <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.phone_number_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, phone_number_id: e.target.value }))} />
+                  </div>
                   <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">WhatsApp Business Account ID (WABA ID)</div>
                     <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.waba_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, waba_id: e.target.value }))} />

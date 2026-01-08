@@ -322,10 +322,18 @@ export default function AutomationStudio({ onClose }) {
   const [rulesError, setRulesError] = useState("");
   const [ruleStats, setRuleStats] = useState({});
   const [editorOpen, setEditorOpen] = useState(false);
+  const [workspaceOptions, setWorkspaceOptions] = useState([]);
+
+  const currentWorkspace = (() => {
+    try { return (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch { return 'irranova'; }
+  })();
+
   const [draft, setDraft] = useState({
     id: "",
     name: "",
     enabled: true,
+    workspaceScope: "current", // 'current' | 'all' | 'selected'
+    workspaces: [],
     keywords: "",
     replyText: "",
     tag: "",
@@ -467,6 +475,22 @@ export default function AutomationStudio({ onClose }) {
     loadInboxEnv();
     // Templates are optional; don't block page load if not configured.
     loadTemplates();
+    // Load available workspaces for per-rule scoping UI (best-effort).
+    (async () => {
+      try {
+        const res = await api.get('/app-config');
+        const list = Array.isArray(res?.data?.workspaces) ? res.data.workspaces : [];
+        const norm = list
+          .map((w) => ({
+            id: String(w?.id || '').trim().toLowerCase(),
+            label: String(w?.label || '').trim(),
+          }))
+          .filter((w) => w.id);
+        setWorkspaceOptions(norm);
+      } catch {
+        setWorkspaceOptions([]);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -650,6 +674,8 @@ export default function AutomationStudio({ onClose }) {
               id: "",
               name: "",
               enabled: true,
+              workspaceScope: "current",
+              workspaces: [],
               keywords: "",
               replyText: "",
               tag: "",
@@ -732,6 +758,18 @@ export default function AutomationStudio({ onClose }) {
               id: String(r.id || ""),
               name: String(r.name || ""),
               enabled: !!r.enabled,
+              ...(function () {
+                try {
+                  const ws = (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova';
+                  const scopes = Array.isArray(r?.workspaces) ? r.workspaces.map((x) => String(x || '').trim().toLowerCase()).filter(Boolean) : null;
+                  if (!scopes || scopes.length === 0) return { workspaceScope: "current", workspaces: [] };
+                  if (scopes.includes('*')) return { workspaceScope: "all", workspaces: ['*'] };
+                  if (scopes.length === 1 && scopes[0] === ws) return { workspaceScope: "current", workspaces: [] };
+                  return { workspaceScope: "selected", workspaces: scopes };
+                } catch {
+                  return { workspaceScope: "current", workspaces: [] };
+                }
+              })(),
               keywords: kws.join(", "),
               replyText: String(aText?.text || ""),
               tag: String(aTag?.tag || ""),
@@ -777,6 +815,8 @@ export default function AutomationStudio({ onClose }) {
           {editorOpen && (
             <RuleEditor
               draft={draft}
+              workspaceOptions={workspaceOptions}
+              currentWorkspace={currentWorkspace}
               templates={templates}
               templatesLoading={templatesLoading}
               templatesError={templatesError}
@@ -807,6 +847,20 @@ export default function AutomationStudio({ onClose }) {
                     .split(/\r?\n|,/g)
                     .map((x) => x.trim())
                     .filter(Boolean);
+                const ruleWorkspaces = (() => {
+                  try {
+                    const scope = String(draft.workspaceScope || 'current').toLowerCase();
+                    if (scope === 'all') return ['*'];
+                    if (scope === 'selected') {
+                      const list = Array.isArray(draft.workspaces) ? draft.workspaces : [];
+                      const cleaned = list.map((x) => String(x || '').trim().toLowerCase()).filter(Boolean);
+                      return cleaned.length ? cleaned : [currentWorkspace];
+                    }
+                    return [currentWorkspace];
+                  } catch {
+                    return [currentWorkspace];
+                  }
+                })();
 
                 if (draft.actionMode === "order_confirm") {
                   const tn = String(draft.templateName || "").trim();
@@ -915,6 +969,7 @@ export default function AutomationStudio({ onClose }) {
                   id: newId,
                   name: draft.name || "WhatsApp Auto-reply",
                   enabled: !!draft.enabled,
+                  workspaces: ruleWorkspaces,
                   cooldown_seconds: Number(draft.cooldownSeconds || 0),
                   trigger:
                     draft.triggerSource === "shopify"
@@ -1465,7 +1520,7 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
   );
 }
 
-function RuleEditor({ draft, templates, templatesLoading, templatesError, saving, onClose, onChange, onSave }) {
+function RuleEditor({ draft, workspaceOptions, currentWorkspace, templates, templatesLoading, templatesError, saving, onClose, onChange, onSave }) {
   const shopifyTopics = [
     { topic: "draft_orders/create", label: "Shopify: Draft Order Created (draft_orders/create)" },
     { topic: "orders/create", label: "Shopify: New Order (orders/create)" },
@@ -1517,6 +1572,70 @@ function RuleEditor({ draft, templates, templatesLoading, templatesError, saving
           <div className="md:col-span-2">
             <div className="text-xs text-slate-500 mb-1">Name</div>
             <input className="w-full border rounded px-2 py-1" value={draft.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="e.g. Auto-reply price" />
+          </div>
+
+          <div className="md:col-span-2">
+            <div className="text-xs text-slate-500 mb-1">Workspaces</div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className={`px-2 py-1 border rounded text-sm ${String(draft.workspaceScope || 'current') === 'current' ? "bg-blue-50 border-blue-200" : ""}`}
+                onClick={() => onChange({ workspaceScope: 'current', workspaces: [] })}
+                title="Only run this automation in the currently selected workspace"
+              >
+                Current only ({String(currentWorkspace || 'irranova').toUpperCase()})
+              </button>
+              <button
+                type="button"
+                className={`px-2 py-1 border rounded text-sm ${String(draft.workspaceScope || '') === 'all' ? "bg-blue-50 border-blue-200" : ""}`}
+                onClick={() => onChange({ workspaceScope: 'all', workspaces: ['*'] })}
+                title="Run in all workspaces"
+              >
+                All workspaces
+              </button>
+              <button
+                type="button"
+                className={`px-2 py-1 border rounded text-sm ${String(draft.workspaceScope || '') === 'selected' ? "bg-blue-50 border-blue-200" : ""}`}
+                onClick={() => {
+                  const ws = String(currentWorkspace || 'irranova').trim().toLowerCase();
+                  const list = Array.isArray(draft.workspaces) ? draft.workspaces : [];
+                  const next = list.length ? list : [ws];
+                  onChange({ workspaceScope: 'selected', workspaces: next });
+                }}
+                title="Pick specific workspaces"
+              >
+                Selected…
+              </button>
+            </div>
+            {String(draft.workspaceScope || '') === 'selected' && (
+              <div className="mt-2 border rounded p-2 bg-slate-50">
+                <div className="text-[11px] text-slate-500 mb-2">Select workspaces this rule should run on:</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {(Array.isArray(workspaceOptions) && workspaceOptions.length ? workspaceOptions : [{ id: 'irranova', label: 'IRRANOVA' }, { id: 'irrakids', label: 'IRRAKIDS' }]).map((w) => {
+                    const id = String(w?.id || '').trim().toLowerCase();
+                    if (!id) return null;
+                    const checked = Array.isArray(draft.workspaces) && draft.workspaces.map((x)=>String(x||'').trim().toLowerCase()).includes(id);
+                    return (
+                      <label key={`ws-scope:${id}`} className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const prev = Array.isArray(draft.workspaces) ? draft.workspaces.map((x)=>String(x||'').trim().toLowerCase()).filter(Boolean) : [];
+                            const next = e.target.checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id);
+                            onChange({ workspaces: next });
+                          }}
+                        />
+                        <span className="truncate">{String(w?.label || id)}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-2">
+                  If none selected, it will default to current workspace.
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="md:col-span-2">

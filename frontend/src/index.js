@@ -6,15 +6,39 @@ import StudioPage from './StudioPage';
 import AutomationSettingsPage from './AutomationSettingsPage';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-const hash = window.location.hash || '';
-const path = window.location.pathname || '';
-const isStudio = (hash && hash.includes('/automation-studio')) || path === '/automation-studio' || path.startsWith('/automation-studio/');
-const isAutomationSettings = (hash && hash.includes('/automation-settings')) || path === '/automation-settings' || path.startsWith('/automation-settings/');
-const isSettings = (hash && hash.includes('/settings')) || path === '/settings' || path.startsWith('/settings/');
 
-root.render(
-  (isSettings || isAutomationSettings) ? <AutomationSettingsPage /> : (isStudio ? <StudioPage /> : <App />)
-);
+function getRoute() {
+  try {
+    const hash = window.location.hash || '';
+    const path = window.location.pathname || '';
+    const isStudio = (hash && hash.includes('/automation-studio')) || path === '/automation-studio' || path.startsWith('/automation-studio/');
+    const isAutomationSettings = (hash && hash.includes('/automation-settings')) || path === '/automation-settings' || path.startsWith('/automation-settings/');
+    const isSettings = (hash && hash.includes('/settings')) || path === '/settings' || path.startsWith('/settings/');
+    if (isSettings || isAutomationSettings) return 'settings';
+    if (isStudio) return 'studio';
+    return 'app';
+  } catch {
+    return 'app';
+  }
+}
+
+function RouterRoot() {
+  const [route, setRoute] = React.useState(getRoute());
+
+  React.useEffect(() => {
+    const onChange = () => setRoute(getRoute());
+    window.addEventListener('hashchange', onChange);
+    window.addEventListener('popstate', onChange);
+    return () => {
+      window.removeEventListener('hashchange', onChange);
+      window.removeEventListener('popstate', onChange);
+    };
+  }, []);
+
+  return route === 'settings' ? <AutomationSettingsPage /> : (route === 'studio' ? <StudioPage /> : <App />);
+}
+
+root.render(<RouterRoot />);
 
 // If you want to start measuring performance in your app, pass a function
 // to log results (for example: reportWebVitals(console.log))

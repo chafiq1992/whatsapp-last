@@ -220,6 +220,8 @@ _CURRENT_WORKSPACE: ContextVar[str] = ContextVar("current_workspace", default=DE
 # Extra workspaces added at runtime (admin settings). These are stored in the shared auth/settings DB
 # and loaded on startup (best-effort). They allow adding workspaces without redeploying.
 DYNAMIC_WORKSPACES: set[str] = set()
+_AUTOMATION_RULES_V2_INIT_DONE: bool = False
+_AUTOMATION_RULES_V2_INIT_LOCK: asyncio.Lock = asyncio.Lock()
 
 def _all_workspaces_set() -> set[str]:
     try:
@@ -232,6 +234,14 @@ def _all_workspaces_set() -> set[str]:
         pass
     # never return empty
     return base or {DEFAULT_WORKSPACE}
+
+def _normalize_workspace_id(raw: str) -> str:
+    try:
+        s = str(raw or "").strip().lower()
+        s = re.sub(r"[^a-z0-9_-]+", "", s)
+        return s
+    except Exception:
+        return ""
 
 def get_current_workspace() -> str:
     try:
@@ -4034,6 +4044,83 @@ class MessageProcessor:
         # Best-effort in-memory cache for inbox environment overrides (workspace-scoped)
         self._inbox_env_cache: dict[str, tuple[float, dict]] = {}
 
+    async def _ensure_automation_rules_v2(self) -> list[dict]:
+        """Ensure the global automation rules store exists in the shared auth/settings DB.
+
+        - New canonical key: auth_db_manager setting "automation_rules_v2"
+        - Backwards compatibility: migrate existing per-workspace "automation_rules" into v2
+          (each migrated rule becomes scoped to the workspace it came from).
+        """
+        global _AUTOMATION_RULES_V2_INIT_DONE
+        async with _AUTOMATION_RULES_V2_INIT_LOCK:
+            if _AUTOMATION_RULES_V2_INIT_DONE:
+                try:
+                    raw = await auth_db_manager.get_setting("automation_rules_v2")
+                    data = json.loads(raw) if raw else []
+                    return data if isinstance(data, list) else []
+                except Exception:
+                    return []
+
+            # 1) Try load existing v2
+            try:
+                raw = await auth_db_manager.get_setting("automation_rules_v2")
+                data = json.loads(raw) if raw else []
+                if isinstance(data, list) and len(data) > 0:
+                    _AUTOMATION_RULES_V2_INIT_DONE = True
+                    return data
+            except Exception:
+                pass
+
+            # 2) Migrate from per-workspace v1 store: tenant DB setting "automation_rules"
+            merged: dict[str, dict] = {}
+            for ws in sorted(list(_all_workspaces_set())):
+                w = _normalize_workspace_id(ws)
+                if not w:
+                    continue
+                tok = None
+                try:
+                    tok = _CURRENT_WORKSPACE.set(_coerce_workspace(w))
+                    raw = await db_manager.get_setting("automation_rules")
+                    rules = json.loads(raw) if raw else []
+                    if not isinstance(rules, list):
+                        rules = []
+                except Exception:
+                    rules = []
+                finally:
+                    if tok is not None:
+                        try:
+                            _CURRENT_WORKSPACE.reset(tok)
+                        except Exception:
+                            pass
+                for r in rules or []:
+                    if not isinstance(r, dict):
+                        continue
+                    rid = str(r.get("id") or "").strip()
+                    if not rid:
+                        continue
+                    existing = merged.get(rid)
+                    if not existing:
+                        rr = dict(r)
+                        rr.setdefault("workspaces", [w])
+                        merged[rid] = rr
+                    else:
+                        # Merge workspace scopes
+                        try:
+                            s = set([_normalize_workspace_id(x) for x in (existing.get("workspaces") or []) if _normalize_workspace_id(x)])
+                            s.add(w)
+                            existing["workspaces"] = sorted(list(s))
+                        except Exception:
+                            existing["workspaces"] = [w]
+
+            out = list(merged.values())
+            try:
+                # Persist migration for future calls
+                await auth_db_manager.set_setting("automation_rules_v2", out)
+            except Exception:
+                pass
+            _AUTOMATION_RULES_V2_INIT_DONE = True
+            return out
+
     async def _get_inbox_env(self, workspace: str | None = None) -> dict:
         """Return effective inbox environment settings (DB overrides layered on top of env defaults).
 
@@ -5346,7 +5433,7 @@ class MessageProcessor:
             pass
 
     async def _load_automation_rules(self, workspace: str) -> list[dict]:
-        """Load automation rules from settings store (per-workspace) with a small in-memory cache."""
+        """Load automation rules (global store, filtered by workspace) with a small in-memory cache."""
         ws = _coerce_workspace(workspace or DEFAULT_WORKSPACE)
         now = time.time()
         try:
@@ -5356,19 +5443,33 @@ class MessageProcessor:
         except Exception:
             pass
         try:
-            raw = await self.db_manager.get_setting("automation_rules")
-            rules = json.loads(raw) if raw else []
-            if not isinstance(rules, list):
-                rules = []
+            rules_all = await self._ensure_automation_rules_v2()
+            if not isinstance(rules_all, list):
+                rules_all = []
         except Exception:
-            rules = []
+            rules_all = []
         # normalize to list[dict]
         cleaned: list[dict] = []
-        for r in rules or []:
+        for r in rules_all or []:
             if not isinstance(r, dict):
                 continue
             rid = str(r.get("id") or "").strip()
             if not rid:
+                continue
+            # Workspace scope: if missing, treat as current workspace only (backwards compat)
+            scopes = r.get("workspaces")
+            applies = False
+            try:
+                if scopes is None:
+                    applies = True  # legacy rules are stored per-workspace; migration should add scope, but keep safe
+                elif isinstance(scopes, list):
+                    s = set([_normalize_workspace_id(x) for x in scopes if _normalize_workspace_id(x)])
+                    applies = ("*" in s) or (ws in s)
+                else:
+                    applies = True
+            except Exception:
+                applies = True
+            if not applies:
                 continue
             cleaned.append(r)
         try:
@@ -7795,13 +7896,16 @@ async def set_tag_options_endpoint(payload: dict = Body(...), _: dict = Depends(
     return {"ok": True, "count": len(norm)}
 
 
-# ---- Automation rules (workspace-scoped) ----
+# ---- Automation rules (global store, scoped per rule) ----
 @app.get("/automation/rules")
 async def get_automation_rules_endpoint(_: dict = Depends(require_admin)):
-    """Return saved automation rules for the current workspace."""
-    raw = await db_manager.get_setting("automation_rules")
+    """Return saved automation rules (shared store).
+
+    Each rule may include:
+      - workspaces: ["*"] for all workspaces, or ["irranova","irrakids"] for selected workspaces.
+    """
     try:
-        rules = json.loads(raw) if raw else []
+        rules = await message_processor._ensure_automation_rules_v2()
         if not isinstance(rules, list):
             rules = []
     except Exception:
@@ -7811,12 +7915,13 @@ async def get_automation_rules_endpoint(_: dict = Depends(require_admin)):
 
 @app.post("/automation/rules")
 async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
-    """Replace automation rules for the current workspace."""
+    """Replace automation rules in the shared store (scoped per rule)."""
     rules = payload.get("rules")
     if not isinstance(rules, list):
         raise HTTPException(status_code=400, detail="rules must be a list")
 
     cleaned: list[dict] = []
+    current_ws = _coerce_workspace(get_current_workspace())
     for r in rules:
         if not isinstance(r, dict):
             continue
@@ -7860,6 +7965,35 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
             "condition": cond,
             "actions": actions,
         }
+        # Workspace scope
+        ws_scope = r.get("workspaces")
+        scopes: list[str] = []
+        try:
+            if ws_scope is None:
+                scopes = [current_ws]
+            elif isinstance(ws_scope, str):
+                v = ws_scope.strip().lower()
+                if v in ("*", "all", "all_workspaces"):
+                    scopes = ["*"]
+                else:
+                    scopes = [s for s in [_normalize_workspace_id(x) for x in re.split(r"[,\n\r]+", v)] if s]
+            elif isinstance(ws_scope, list):
+                scopes = [_normalize_workspace_id(x) for x in ws_scope if _normalize_workspace_id(x)]
+            else:
+                scopes = [current_ws]
+        except Exception:
+            scopes = [current_ws]
+        if "*" in scopes:
+            scopes = ["*"]
+        if not scopes:
+            scopes = [current_ws]
+        # Keep only known workspaces unless using "*"
+        if scopes != ["*"]:
+            allowed = _all_workspaces_set()
+            scopes = [s for s in scopes if s in allowed]
+            if not scopes:
+                scopes = [current_ws]
+        out_rule["workspaces"] = scopes
         if test_phones:
             out_rule["test_phone_numbers"] = test_phones
         cleaned.append(out_rule)
@@ -7867,11 +8001,10 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
     if len(cleaned) > 200:
         cleaned = cleaned[:200]
 
-    await db_manager.set_setting("automation_rules", cleaned)
-    # Bust cache for immediate effect in webhook-triggered tasks
+    await auth_db_manager.set_setting("automation_rules_v2", cleaned)
+    # Bust caches for immediate effect in webhook-triggered tasks
     try:
-        ws = _coerce_workspace(get_current_workspace())
-        message_processor._automation_rules_cache.pop(ws, None)
+        message_processor._automation_rules_cache.clear()
     except Exception:
         pass
     return {"ok": True, "count": len(cleaned)}
@@ -7883,8 +8016,7 @@ async def get_automation_rules_stats_endpoint(_: dict = Depends(require_admin)):
     ws = get_current_workspace()
     # Always return something usable by the UI
     try:
-        raw = await db_manager.get_setting("automation_rules")
-        rules = json.loads(raw) if raw else []
+        rules = await message_processor._ensure_automation_rules_v2()
         if not isinstance(rules, list):
             rules = []
     except Exception:
@@ -7893,16 +8025,38 @@ async def get_automation_rules_stats_endpoint(_: dict = Depends(require_admin)):
     rds = getattr(redis_manager, "redis_client", None)
     # Prefer durable DB stats
     try:
-        ids = [str((r or {}).get("id") or "").strip() for r in (rules or []) if str((r or {}).get("id") or "").strip()]
+        # Only compute stats for rules that apply to this workspace (or are global).
+        ids = []
+        for r in (rules or []):
+            try:
+                rid = str((r or {}).get("id") or "").strip()
+                if not rid:
+                    continue
+                scopes = (r or {}).get("workspaces")
+                if scopes is None:
+                    ids.append(rid)
+                    continue
+                if isinstance(scopes, list):
+                    s = set([_normalize_workspace_id(x) for x in scopes if _normalize_workspace_id(x)])
+                    if ("*" in s) or (_coerce_workspace(ws) in s):
+                        ids.append(rid)
+                    continue
+                # unknown shape -> include
+                ids.append(rid)
+            except Exception:
+                continue
         out = await db_manager.get_automation_rule_stats(ids)
     except Exception:
         out = {}
 
     # Optionally merge Redis stats (if any) on top (useful for realtime even if DB is slightly behind)
+    ids_set = set(ids or [])
     for r in rules or []:
         try:
             rid = str((r or {}).get("id") or "").strip()
             if not rid:
+                continue
+            if ids_set and rid not in ids_set:
                 continue
             stats = out.get(rid) or {"triggers": 0, "messages_sent": 0, "tags_added": 0, "last_trigger_ts": None}
             if rds:
@@ -8011,15 +8165,6 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
 
 
 # ---- Workspace registry + per-workspace UI settings (admin) ----
-
-def _normalize_workspace_id(raw: str) -> str:
-    try:
-        s = str(raw or "").strip().lower()
-        # Keep IDs URL/header safe and consistent with existing env usage.
-        s = re.sub(r"[^a-z0-9_-]+", "", s)
-        return s
-    except Exception:
-        return ""
 
 async def _load_workspace_registry() -> list[dict]:
     """Load admin-managed workspace registry from shared auth/settings DB."""

@@ -314,7 +314,8 @@ function makeEdge(from, fromPort, to, toPort) {
 
 export default function AutomationStudio({ onClose }) {
   // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
-  const [mode, setMode] = useState("simple"); // 'simple' | 'env' | 'canvas'
+  // Settings are now in a dedicated page (/#/automation-settings).
+  const [mode, setMode] = useState("simple"); // keep internal state for legacy paths
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesSaving, setRulesSaving] = useState(false);
@@ -609,26 +610,13 @@ export default function AutomationStudio({ onClose }) {
           <span className="text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-700">Beta</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="hidden sm:flex items-center gap-1 mr-2">
-            <button
-              className={`px-2 py-1 border rounded text-sm ${mode === "simple" ? "bg-blue-50 border-blue-200" : ""}`}
-              onClick={() => setMode("simple")}
-            >
-              Simple (WhatsApp)
-            </button>
-            <button
-              className={`px-2 py-1 border rounded text-sm ${mode === "env" ? "bg-blue-50 border-blue-200" : ""}`}
-              onClick={() => setMode("env")}
-            >
-              Environment
-            </button>
-            <button
-              className={`px-2 py-1 border rounded text-sm ${mode === "canvas" ? "bg-blue-50 border-blue-200" : ""}`}
-              onClick={() => setMode("canvas")}
-            >
-              Canvas (demo)
-            </button>
-          </div>
+          <button
+            className="px-2 py-1 border rounded text-sm"
+            onClick={() => { try { window.location.href = '/#/automation-settings'; } catch {} }}
+            title="Automation settings"
+          >
+            Settings
+          </button>
           <button
             className="px-2 py-1 border rounded text-sm"
             onClick={simulate}

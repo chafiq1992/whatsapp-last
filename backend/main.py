@@ -217,10 +217,26 @@ if DEFAULT_WORKSPACE not in WORKSPACES:
 
 _CURRENT_WORKSPACE: ContextVar[str] = ContextVar("current_workspace", default=DEFAULT_WORKSPACE)
 
+# Extra workspaces added at runtime (admin settings). These are stored in the shared auth/settings DB
+# and loaded on startup (best-effort). They allow adding workspaces without redeploying.
+DYNAMIC_WORKSPACES: set[str] = set()
+
+def _all_workspaces_set() -> set[str]:
+    try:
+        base = set((WORKSPACES or []) + [DEFAULT_WORKSPACE])
+    except Exception:
+        base = {DEFAULT_WORKSPACE}
+    try:
+        base |= set(DYNAMIC_WORKSPACES or set())
+    except Exception:
+        pass
+    # never return empty
+    return base or {DEFAULT_WORKSPACE}
+
 def get_current_workspace() -> str:
     try:
         w = str(_CURRENT_WORKSPACE.get() or DEFAULT_WORKSPACE).strip().lower()
-        return w if w in WORKSPACES else DEFAULT_WORKSPACE
+        return w if w in _all_workspaces_set() else DEFAULT_WORKSPACE
     except Exception:
         return DEFAULT_WORKSPACE
 
@@ -242,7 +258,7 @@ except Exception:
 
 def _coerce_workspace(value: str | None) -> str:
     v = str(value or "").strip().lower()
-    return v if v in WORKSPACES else DEFAULT_WORKSPACE
+    return v if v in _all_workspaces_set() else DEFAULT_WORKSPACE
 
 def _workspace_from_request(request: Request) -> str:
     # Header preferred, query param fallback
@@ -552,12 +568,6 @@ def _is_public_path(path: str) -> bool:
         return True
     # Webhook endpoints must remain public for Meta
     if path.startswith("/webhook"):
-        return True
-    # Shopify webhooks must remain public (Shopify cannot send Authorization headers).
-    if path.startswith("/shopify/webhook"):
-        return True
-    # Legacy/compat Shopify webhook endpoints (no Authorization header either).
-    if path.startswith("/shopify/webhooks"):
         return True
     # Delivery app outbound status webhooks must be public (called server-to-server).
     if path.startswith("/delivery/webhook"):
@@ -1347,45 +1357,13 @@ class WorkspaceWhatsAppRouter:
         context_message_id: str | None = None,
     ) -> dict:
         """Send a WhatsApp template message via Graph API."""
-        def _sanitize_components(raw: list[dict] | None) -> list[dict] | None:
-            """WhatsApp rejects template text params with empty string text (error 131008).
-
-            Ensure every parameter of type 'text' has a non-empty value.
-            """
-            if not raw:
-                return raw
-            if not isinstance(raw, list):
-                return None
-            out: list[dict] = []
-            for comp in raw:
-                if not isinstance(comp, dict):
-                    continue
-                c2 = dict(comp)
-                params = c2.get("parameters")
-                if isinstance(params, list):
-                    new_params: list[dict] = []
-                    for p in params:
-                        if not isinstance(p, dict):
-                            continue
-                        p2 = dict(p)
-                        if str(p2.get("type") or "").strip().lower() == "text":
-                            txt = p2.get("text")
-                            txt_s = str(txt if txt is not None else "").strip()
-                            # Use "-" instead of empty string; WhatsApp treats "" as missing.
-                            p2["text"] = txt_s if txt_s else "-"
-                        new_params.append(p2)
-                    c2["parameters"] = new_params
-                out.append(c2)
-            return out
-
         url = f"{self.base_url}/messages"
         tpl = {
             "name": str(template_name or "").strip(),
             "language": {"code": str(language or "en").strip() or "en"},
         }
-        safe_components = _sanitize_components(components)
-        if safe_components:
-            tpl["components"] = safe_components
+        if components:
+            tpl["components"] = components
         payload = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -3996,6 +3974,26 @@ class WorkspaceDatabaseRouter:
         m = self._managers.get(ws)
         if m:
             return m
+        # If an admin added a new workspace at runtime, lazily create its DB manager
+        # so data stays isolated even without a restart.
+        try:
+            if ENABLE_MULTI_WORKSPACE and ws and ws != DEFAULT_WORKSPACE:
+                db_url = (TENANT_DB_URLS or {}).get(ws) or (TENANT_DB_URLS or {}).get(DEFAULT_WORKSPACE) or DATABASE_URL
+                db_path = (TENANT_DB_PATHS or {}).get(ws) or _derive_tenant_db_path(DB_PATH, ws)
+                try:
+                    TENANT_DB_PATHS[ws] = db_path
+                except Exception:
+                    pass
+                try:
+                    # Keep a string entry; DatabaseManager will normalize/ignore invalid URLs.
+                    TENANT_DB_URLS[ws] = str(db_url or "")
+                except Exception:
+                    pass
+                m = DatabaseManager(db_path=db_path, db_url=db_url)
+                self._managers[ws] = m
+                return m
+        except Exception:
+            pass
         m2 = self._managers.get(DEFAULT_WORKSPACE)
         if m2:
             return m2
@@ -5170,34 +5168,6 @@ class MessageProcessor:
                 reply_id = (btn.get("id") or lst.get("id") or "").strip()
                 message_obj["type"] = "text"
                 message_obj["message"] = title or "[interactive_reply]"
-                # Order confirmation automation flow (Shopify-triggered): if a pending flow exists,
-                # run it and skip default interactive acknowledgment.
-                try:
-                    ws = get_current_workspace()
-                except Exception:
-                    ws = DEFAULT_WORKSPACE
-                try:
-                    handled_oc = await self._try_handle_order_confirmation_automation(
-                        sender,
-                        title=title or "",
-                        reply_id=reply_id or "",
-                        workspace=ws,
-                    )
-                except Exception:
-                    handled_oc = False
-                if handled_oc:
-                    # Persist the textual reply bubble first (so agents see what was clicked)
-                    await self.connection_manager.send_to_user(sender, {
-                        "type": "message_received",
-                        "data": message_obj
-                    })
-                    await self.connection_manager.broadcast_to_admins(
-                        {"type": "message_received", "data": message_obj}, exclude_user=sender
-                    )
-                    db_data = {k: v for k, v in message_obj.items() if k != "id"}
-                    await self.redis_manager.cache_message(sender, db_data)
-                    await self.db_manager.upsert_message(db_data)
-                    return
                 # Route survey interactions before generic acknowledgment
                 if reply_id.startswith("survey_"):
                     # Persist the textual reply bubble first
@@ -5449,183 +5419,6 @@ class MessageProcessor:
         except Exception:
             return str(s or "")
 
-    def _render_template_components(self, components: Any, ctx: dict) -> list[dict]:
-        """Render {{ ... }} variables inside WhatsApp template components.
-
-        This is needed because automations store the Graph API component JSON, and
-        users expect values like {{ customer.phone }} to be resolved at runtime.
-        """
-        if not isinstance(components, list):
-            return []
-        out: list[dict] = []
-        for comp in components:
-            if not isinstance(comp, dict):
-                continue
-            c2 = dict(comp)
-            params = c2.get("parameters")
-            if isinstance(params, list):
-                new_params: list[dict] = []
-                for p in params:
-                    if not isinstance(p, dict):
-                        continue
-                    p2 = dict(p)
-                    ptype = str(p2.get("type") or "").strip().lower()
-                    if ptype == "text":
-                        p2["text"] = self._render_template(str(p2.get("text") or ""), ctx)
-                    elif ptype in ("image", "video", "document"):
-                        blob = p2.get(ptype)
-                        if isinstance(blob, dict):
-                            b2 = dict(blob)
-                            if "link" in b2:
-                                b2["link"] = self._render_template(str(b2.get("link") or ""), ctx)
-                            p2[ptype] = b2
-                    new_params.append(p2)
-                c2["parameters"] = new_params
-            out.append(c2)
-        return out
-
-    async def _try_handle_order_confirmation_automation(
-        self,
-        user_id: str,
-        *,
-        title: str,
-        reply_id: str,
-        workspace: str,
-    ) -> bool:
-        """Continue a pending order-confirmation automation flow on a button/list click."""
-        try:
-            ws = _coerce_workspace(workspace or DEFAULT_WORKSPACE)
-            rules = await self._load_automation_rules(ws)
-            if not rules:
-                return False
-
-            uid = str(user_id or "").strip()
-            if not uid:
-                return False
-
-            def _norm_ar(s: str) -> str:
-                t = (s or "").strip()
-                try:
-                    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-                except Exception:
-                    pass
-                return t
-
-            tnorm = _norm_ar(title or "")
-            rid = str(reply_id or "").strip()
-
-            for rule in rules:
-                if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
-                    continue
-                trig = rule.get("trigger") or {}
-                if not isinstance(trig, dict) or str(trig.get("source") or "").lower() != "shopify":
-                    continue
-
-                actions = rule.get("actions") or []
-                if isinstance(actions, dict):
-                    actions = [actions]
-                if not isinstance(actions, list):
-                    actions = []
-
-                oc_action = next(
-                    (a for a in actions if isinstance(a, dict) and str(a.get("type") or "").lower() in ("order_confirmation_flow", "order_confirm_flow")),
-                    None,
-                )
-                if not oc_action:
-                    continue
-
-                state_key = f"automation:order_confirm:{ws}:{uid}:{str(rule.get('id') or '')}"
-                state = await self.redis_manager.get_json(state_key)
-                if not isinstance(state, dict):
-                    continue
-
-                cfg = state.get("cfg") if isinstance(state.get("cfg"), dict) else {}
-
-                confirm_ids = {str(x).strip() for x in (cfg.get("confirm_ids") or []) if str(x).strip()}
-                change_ids = {str(x).strip() for x in (cfg.get("change_ids") or []) if str(x).strip()}
-                talk_ids = {str(x).strip() for x in (cfg.get("talk_ids") or []) if str(x).strip()}
-
-                confirm_titles = {_norm_ar(str(x)) for x in (cfg.get("confirm_titles") or []) if str(x).strip()}
-                change_titles = {_norm_ar(str(x)) for x in (cfg.get("change_titles") or []) if str(x).strip()}
-                talk_titles = {_norm_ar(str(x)) for x in (cfg.get("talk_titles") or []) if str(x).strip()}
-
-                branch: str | None = None
-                if rid and rid in confirm_ids:
-                    branch = "confirm"
-                elif rid and rid in change_ids:
-                    branch = "change"
-                elif rid and rid in talk_ids:
-                    branch = "talk"
-                elif tnorm and tnorm in confirm_titles:
-                    branch = "confirm"
-                elif tnorm and tnorm in change_titles:
-                    branch = "change"
-                elif tnorm and tnorm in talk_titles:
-                    branch = "talk"
-                else:
-                    continue
-
-                audio_url = ""
-                if branch == "confirm":
-                    audio_url = str(cfg.get("confirm_audio_url") or "")
-                elif branch == "change":
-                    audio_url = str(cfg.get("change_audio_url") or "")
-                elif branch == "talk":
-                    audio_url = str(cfg.get("talk_audio_url") or "")
-
-                if audio_url.strip():
-                    await self.process_outgoing_message({
-                        "user_id": uid,
-                        "type": "audio",
-                        "from_me": True,
-                        "url": audio_url.strip(),
-                        "message": audio_url.strip(),
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "agent_username": "automation",
-                    })
-
-                if branch == "confirm" and bool(cfg.get("send_items", True)):
-                    items = state.get("items") if isinstance(state.get("items"), list) else []
-                    max_items = max(1, int(cfg.get("max_items") or 10))
-                    sent = 0
-                    for it in items:
-                        if sent >= max_items:
-                            break
-                        if not isinstance(it, dict):
-                            continue
-                        variant_id = str(it.get("variant_id") or "").strip()
-                        caption = str(it.get("caption") or "").strip()
-                        if not variant_id:
-                            continue
-                        await self.process_outgoing_message({
-                            "user_id": uid,
-                            "type": "catalog_item",
-                            "from_me": True,
-                            "product_retailer_id": variant_id,
-                            "caption": caption,
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "agent_username": "automation",
-                        })
-                        sent += 1
-                        await asyncio.sleep(0.15)
-
-                # Clear state after handling to prevent double-send
-                try:
-                    if getattr(self.redis_manager, "redis_client", None):
-                        await self.redis_manager.redis_client.delete(state_key)  # type: ignore[union-attr]
-                    else:
-                        try:
-                            self.redis_manager._mem_json.pop(state_key, None)  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                return True
-        except Exception:
-            return False
-        return False
-
     async def _run_simple_automations(self, user_id: str, incoming_text: str, message_obj: dict | None = None, workspace: str | None = None) -> None:
         """Execute enabled simple automation rules for an inbound WhatsApp text message."""
         ws_token = None
@@ -5774,11 +5567,11 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = self._render_template_components(act.get("components") or [], ctx)
+                            comps = act.get("components") or []
                             if not tname:
                                 continue
                             # Provide a visible bubble to the inbox (message preview) while sending the template.
-                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
+                            preview = str(act.get("preview") or f"[template] {tname}")
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",
@@ -6025,10 +5818,12 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = self._render_template_components(act.get("components") or [], ctx)
+                            comps = act.get("components") or []
+                            if not isinstance(comps, list):
+                                comps = []
                             if not (to_id and tname):
                                 continue
-                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
+                            preview = str(act.get("preview") or f"[template] {tname}")
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",
@@ -6042,116 +5837,6 @@ class MessageProcessor:
                             })
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
-                            except Exception:
-                                pass
-                        elif at in ("order_confirmation_flow", "order_confirm_flow"):
-                            # Start a multi-step order confirmation flow (Shopify -> WA template -> button click -> branch).
-                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
-                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
-                            lang = str(act.get("language") or "en").strip() or "en"
-                            comps = self._render_template_components(act.get("components") or [], ctx)
-                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
-
-                            if to_id and tname:
-                                await self.process_outgoing_message({
-                                    "user_id": to_id,
-                                    "type": "text",
-                                    "from_me": True,
-                                    "message": preview,
-                                    "timestamp": datetime.utcnow().isoformat(),
-                                    "agent_username": "automation",
-                                    "template_name": tname,
-                                    "template_language": lang,
-                                    "template_components": comps,
-                                })
-                                try:
-                                    await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
-                                except Exception:
-                                    pass
-
-                            # Build items list from order payload (best-effort, up to 20)
-                            items_out: list[dict] = []
-                            try:
-                                order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
-                                line_items = (order_obj.get("line_items") or []) if isinstance(order_obj, dict) else []
-                                for li in (line_items or [])[:20]:
-                                    if not isinstance(li, dict):
-                                        continue
-                                    vid = li.get("variant_id")
-                                    if not vid:
-                                        continue
-                                    qty = li.get("quantity")
-                                    try:
-                                        qstr = str(int(qty)) if qty is not None else ""
-                                    except Exception:
-                                        qstr = str(qty or "")
-                                    props = {}
-                                    try:
-                                        for p in (li.get("properties") or []):
-                                            if not isinstance(p, dict):
-                                                continue
-                                            n = str(p.get("name") or "").strip().lower()
-                                            v = str(p.get("value") or "").strip()
-                                            if n:
-                                                props[n] = v
-                                    except Exception:
-                                        props = {}
-                                    size = props.get("size") or props.get("المقاس") or None
-                                    color = props.get("color") or props.get("اللون") or None
-                                    if not (size and color):
-                                        vt = str(li.get("variant_title") or "").strip()
-                                        if vt and "/" in vt:
-                                            parts = [s.strip() for s in vt.split("/") if s.strip()]
-                                            if len(parts) >= 1 and not size:
-                                                size = parts[0]
-                                            if len(parts) >= 2 and not color:
-                                                color = parts[1]
-                                    price = str(li.get("price") or "").strip()
-                                    lines = []
-                                    if color:
-                                        lines.append(f"اللون: {color}")
-                                    if size:
-                                        lines.append(f"المقاس: {size}")
-                                    if qstr:
-                                        lines.append(f"الكمية: {qstr}")
-                                    if price:
-                                        lines.append(f"السعر: {price}")
-                                    caption = "\n".join(lines)
-                                    items_out.append({"variant_id": str(vid), "caption": caption})
-                            except Exception:
-                                items_out = []
-
-                            cfg = {
-                                "confirm_titles": act.get("confirm_titles") or ["تأكيد الطلب", "تاكيد الطلب"],
-                                "change_titles": act.get("change_titles") or ["تغيير المعلومات", "تغير المعلومات"],
-                                "talk_titles": act.get("talk_titles") or ["تكلم مع العميل", "تكلّم مع العميل"],
-                                "confirm_ids": act.get("confirm_ids") or [],
-                                "change_ids": act.get("change_ids") or [],
-                                "talk_ids": act.get("talk_ids") or [],
-                                "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
-                                "change_audio_url": str(act.get("change_audio_url") or ""),
-                                "talk_audio_url": str(act.get("talk_audio_url") or ""),
-                                "send_items": bool(act.get("send_items", True)),
-                                "max_items": int(act.get("max_items") or 10),
-                            }
-
-                            # Cache state for later click continuation (3 days)
-                            try:
-                                uid = str(to_id or phone_digits or "").strip()
-                                if uid:
-                                    state_key = f"automation:order_confirm:{ws}:{uid}:{str(rule.get('id') or '')}"
-                                    await self.redis_manager.set_json(
-                                        state_key,
-                                        {
-                                            "rule_id": str(rule.get("id") or ""),
-                                            "topic": topic_norm,
-                                            "order_id": str(data.get("id") or ""),
-                                            "ts": datetime.utcnow().isoformat(),
-                                            "cfg": cfg,
-                                            "items": items_out,
-                                        },
-                                        ttl=3 * 24 * 3600,
-                                    )
                             except Exception:
                                 pass
                 except Exception as exc:
@@ -6341,10 +6026,12 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = self._render_template_components(act.get("components") or [], ctx)
+                            comps = act.get("components") or []
+                            if not isinstance(comps, list):
+                                comps = []
                             if not (to_id and tname):
                                 continue
-                            preview = self._render_template(str(act.get("preview") or f"[template] {tname}"), ctx)
+                            preview = str(act.get("preview") or f"[template] {tname}")
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",
@@ -7111,6 +6798,22 @@ async def startup():
     try:
         # 1) Shared auth/settings DB
         await asyncio.wait_for(auth_db_manager.init_db(), timeout=30.0)
+
+        # Best-effort: load dynamic workspace registry (admin-managed) from shared settings DB.
+        # This allows /app-config + request routing to recognize newly added workspaces without redeploy.
+        try:
+            raw = await auth_db_manager.get_setting("workspace_registry")
+            data = json.loads(raw) if raw else []
+            if isinstance(data, list):
+                for item in data:
+                    try:
+                        ws = str((item or {}).get("id") or "").strip().lower()
+                        if ws:
+                            DYNAMIC_WORKSPACES.add(ws)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
         # 2) Tenant DB(s) (log per-workspace failures explicitly so we can spot misconfigured NOVA DBs)
         tenant_errors: list[tuple[str, str]] = []
@@ -8307,6 +8010,214 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}
 
 
+# ---- Workspace registry + per-workspace UI settings (admin) ----
+
+def _normalize_workspace_id(raw: str) -> str:
+    try:
+        s = str(raw or "").strip().lower()
+        # Keep IDs URL/header safe and consistent with existing env usage.
+        s = re.sub(r"[^a-z0-9_-]+", "", s)
+        return s
+    except Exception:
+        return ""
+
+async def _load_workspace_registry() -> list[dict]:
+    """Load admin-managed workspace registry from shared auth/settings DB."""
+    try:
+        raw = await auth_db_manager.get_setting("workspace_registry")
+        data = json.loads(raw) if raw else []
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+async def _save_workspace_registry(items: list[dict]) -> None:
+    try:
+        await auth_db_manager.set_setting("workspace_registry", items)
+    except Exception:
+        return
+
+def _workspace_meta_from_registry(registry: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for item in registry or []:
+        if not isinstance(item, dict):
+            continue
+        ws = _normalize_workspace_id(item.get("id") or "")
+        if not ws:
+            continue
+        out[ws] = {
+            "label": str(item.get("label") or "").strip(),
+            "short": str(item.get("short") or "").strip(),
+        }
+    return out
+
+@app.get("/admin/workspaces")
+async def admin_list_workspaces(_: dict = Depends(require_admin)):
+    """List workspaces with UI metadata (env + DB registry)."""
+    reg = await _load_workspace_registry()
+    meta = _workspace_meta_from_registry(reg)
+    all_ws = sorted(list(_all_workspaces_set()))
+    # Ensure registry workspaces are included even if not loaded yet
+    for w in meta.keys():
+        if w not in all_ws:
+            all_ws.append(w)
+    all_ws = sorted(set([_normalize_workspace_id(w) for w in all_ws if _normalize_workspace_id(w)]))
+    # Update in-memory dynamic set
+    try:
+        for w in all_ws:
+            if w not in WORKSPACES:
+                DYNAMIC_WORKSPACES.add(w)
+    except Exception:
+        pass
+    items = []
+    for w in all_ws:
+        items.append({
+            "id": w,
+            "label": meta.get(w, {}).get("label") or w.upper(),
+            "short": meta.get(w, {}).get("short") or w.upper()[:4],
+            "source": "env" if w in WORKSPACES else "db",
+        })
+    return {
+        "default": DEFAULT_WORKSPACE,
+        "workspaces": items,
+        "registry": reg,
+    }
+
+@app.post("/admin/workspaces")
+async def admin_upsert_workspace(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Add/update a workspace in the DB registry. Optionally copy settings from another workspace."""
+    ws_id = _normalize_workspace_id((payload or {}).get("id") or "")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="Missing workspace id")
+    label = str((payload or {}).get("label") or "").strip()
+    short = str((payload or {}).get("short") or "").strip()
+    copy_from = _normalize_workspace_id((payload or {}).get("copy_from") or "")
+
+    reg = await _load_workspace_registry()
+    # Upsert by id
+    next_reg: list[dict] = []
+    found = False
+    for item in reg or []:
+        if not isinstance(item, dict):
+            continue
+        if _normalize_workspace_id(item.get("id") or "") == ws_id:
+            found = True
+            next_reg.append({
+                "id": ws_id,
+                "label": label or str(item.get("label") or "").strip(),
+                "short": short or str(item.get("short") or "").strip(),
+            })
+        else:
+            next_reg.append(item)
+    if not found:
+        next_reg.append({"id": ws_id, "label": label, "short": short})
+    await _save_workspace_registry(next_reg)
+
+    # Update in-memory list for request routing
+    try:
+        if ws_id not in WORKSPACES:
+            DYNAMIC_WORKSPACES.add(ws_id)
+    except Exception:
+        pass
+
+    # Ensure tenant DB manager exists (so settings can be stored per workspace)
+    try:
+        _ = db_manager._mgr(ws_id)  # type: ignore[attr-defined]
+        # Best-effort init schema for the new workspace DB (SQLite)
+        try:
+            tok = _CURRENT_WORKSPACE.set(_coerce_workspace(ws_id))
+            await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
+        finally:
+            try:
+                _CURRENT_WORKSPACE.reset(tok)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Optionally copy per-workspace settings
+    copied: dict[str, bool] = {}
+    if copy_from and copy_from != ws_id:
+        try:
+            # Copy inbox_env + catalog_filters from source -> dest
+            src_mgr = db_manager._mgr(copy_from)  # type: ignore[attr-defined]
+            dst_mgr = db_manager._mgr(ws_id)      # type: ignore[attr-defined]
+            try:
+                raw_env = await src_mgr.get_setting("inbox_env")
+                if raw_env:
+                    await dst_mgr.set_setting("inbox_env", json.loads(raw_env))
+                    copied["inbox_env"] = True
+            except Exception:
+                copied["inbox_env"] = False
+            try:
+                raw_cf = await src_mgr.get_setting("catalog_filters")
+                if raw_cf:
+                    await dst_mgr.set_setting("catalog_filters", json.loads(raw_cf))
+                    copied["catalog_filters"] = True
+            except Exception:
+                copied["catalog_filters"] = False
+        except Exception:
+            pass
+
+    return {"ok": True, "id": ws_id, "label": label, "short": short, "copied": copied}
+
+
+@app.get("/admin/catalog-filters")
+async def get_catalog_filters_admin(_: dict = Depends(require_admin)):
+    """Get catalog filter buttons for the current workspace (DB override if present)."""
+    ws = get_current_workspace()
+    try:
+        raw = await db_manager.get_setting("catalog_filters")
+        data = json.loads(raw) if raw else None
+        if isinstance(data, list) and len(data) >= 2:
+            return {"workspace": ws, "catalogFilters": data}
+    except Exception:
+        pass
+    # Fallback to the same defaults as /app-config (env + safe defaults)
+    try:
+        def _env_ws(name: str) -> str:
+            suf = re.sub(r"[^A-Z0-9]+", "_", str(ws or "").strip().upper())
+            v = os.getenv(f"{name}_{suf}", "")
+            if v is not None and str(v).strip() != "":
+                return str(v)
+            return str(os.getenv(name, "") or "")
+
+        def _read_filter(suffix: str):
+            label = _env_ws(f"CATALOG_FILTER_{suffix}_LABEL").strip()
+            query = _env_ws(f"CATALOG_FILTER_{suffix}_QUERY").strip()
+            match = (_env_ws(f"CATALOG_FILTER_{suffix}_MATCH") or "includes").strip().lower()
+            if label and query:
+                return {
+                    "label": label,
+                    "query": query,
+                    "match": "startsWith" if match in ("start", "startswith", "starts_with", "startsWith") else "includes",
+                }
+            return None
+        fA = _read_filter("A") or {"label": "Girls", "query": "girls", "match": "includes"}
+        fB = _read_filter("B") or {"label": "Boys", "query": "boys", "match": "includes"}
+        fall = {"label": (_env_ws("CATALOG_FILTER_ALL_LABEL") or "All").strip() or "All", "type": "all"}
+        return {"workspace": ws, "catalogFilters": [fA, fB, fall]}
+    except Exception:
+        return {"workspace": ws, "catalogFilters": [
+            {"label": "Girls", "query": "girls", "match": "includes"},
+            {"label": "Boys", "query": "boys", "match": "includes"},
+            {"label": "All", "type": "all"},
+        ]}
+
+
+@app.post("/admin/catalog-filters")
+async def set_catalog_filters_admin(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Set catalog filter buttons for the current workspace (stored in DB)."""
+    ws = get_current_workspace()
+    filters = None
+    if isinstance(payload, dict):
+        filters = payload.get("catalogFilters") if "catalogFilters" in payload else payload.get("filters")
+    if not isinstance(filters, list) or len(filters) < 2:
+        raise HTTPException(status_code=400, detail="catalogFilters must be a list (2-3 items)")
+    # Store as-is (frontend expects this exact structure)
+    await db_manager.set_setting("catalog_filters", filters)
+    return {"ok": True, "workspace": ws, "saved": filters}
+
+
 @app.get("/admin/whatsapp/templates")
 async def list_whatsapp_templates_endpoint(_: dict = Depends(require_admin)):
     """List WhatsApp message templates for the current workspace (WABA ID required)."""
@@ -8378,28 +8289,10 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
         body = await request.body()
 
         # Verify HMAC if secret configured
-        secret_ws_raw = os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "") or ""
-        secret_global_raw = os.getenv("SHOPIFY_WEBHOOK_SECRET", "") or ""
-        secret = (secret_ws_raw or secret_global_raw).strip()
-        secret_source = (
-            "workspace"
-            if (secret_ws_raw or "").strip()
-            else ("global" if (secret_global_raw or "").strip() else "none")
-        )
-        # Safe debug log: helps confirm which secret the runtime actually sees (never logs the secret value).
-        try:
-            logging.getLogger(__name__).info(
-                "Shopify webhook received (workspace=%s topic=%s shop=%s secret_source=%s secret_len=%s hmac_header_len=%s body_len=%s)",
-                ws,
-                (request.headers.get("X-Shopify-Topic") or "").strip(),
-                (request.headers.get("X-Shopify-Shop-Domain") or "").strip(),
-                secret_source,
-                len(secret or ""),
-                len((request.headers.get("X-Shopify-Hmac-Sha256") or "").strip() or ""),
-                len(body or b""),
-            )
-        except Exception:
-            pass
+        secret = (
+            os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "")
+            or os.getenv("SHOPIFY_WEBHOOK_SECRET", "")
+        ).strip()
         if secret:
             hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
             from .shopify_webhook import verify_shopify_webhook_hmac
@@ -8449,93 +8342,6 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
             _CURRENT_WORKSPACE.reset(ws_token)
         except Exception:
             pass
-
-
-@app.post("/shopify/webhooks/orders/create")
-async def shopify_orders_create_webhook_legacy(request: Request):
-    """Compatibility endpoint for older Shopify webhook URLs.
-
-    Some deployments (and the older `whatsapp_confermation` project) used:
-      POST /shopify/webhooks/orders/create
-
-    Shopify always signs the raw request body with:
-      X-Shopify-Hmac-Sha256 = base64(hmac_sha256(secret, raw_body))
-
-    This endpoint verifies the HMAC (if a secret is configured) and then forwards
-    the event into the existing Shopify automation pipeline (same as /shopify/webhook/{workspace}).
-
-    Workspace resolution:
-    - Prefer `?workspace=<ws>` (Shopify allows query strings in webhook URLs)
-    - Otherwise, best-effort infer from `X-Shopify-Shop-Domain`
-    - Fallback to DEFAULT_WORKSPACE
-    """
-    ws = DEFAULT_WORKSPACE
-    ws_token = None
-    try:
-        # 1) Try explicit workspace from query param/header (header unlikely for Shopify).
-        ws = _coerce_workspace(_workspace_from_request(request))
-
-        # 2) Best-effort infer from shop domain when multi-workspace is enabled.
-        try:
-            shop_domain = (request.headers.get("X-Shopify-Shop-Domain") or "").strip().lower()
-        except Exception:
-            shop_domain = ""
-        if ENABLE_MULTI_WORKSPACE and (ws == DEFAULT_WORKSPACE) and shop_domain:
-            for cand in (WORKSPACES or []):
-                if cand and cand in shop_domain:
-                    ws = _coerce_workspace(cand)
-                    break
-
-        ws_token = _CURRENT_WORKSPACE.set(ws)
-
-        body = await request.body()
-
-        # Secret precedence:
-        # - Per-workspace SHOPIFY_WEBHOOK_SECRET_<WS>
-        # - Global SHOPIFY_WEBHOOK_SECRET
-        # - Legacy per-project secrets (kept for compatibility with older configs)
-        secret_ws = (os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "") or "").strip()
-        secret_global = (os.getenv("SHOPIFY_WEBHOOK_SECRET", "") or "").strip()
-        legacy = ""
-        if ws == "irrakids":
-            legacy = (os.getenv("IRRAKIDS_WEBHOOK_SECRET", "") or "").strip()
-        elif ws == "irranova":
-            legacy = (os.getenv("IRRANOVA_WEBHOOK_SECRET", "") or "").strip()
-        secret = (secret_ws or secret_global or legacy).strip()
-
-        if secret:
-            hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
-            from .shopify_webhook import verify_shopify_webhook_hmac
-
-            ok, _dbg = verify_shopify_webhook_hmac(secret, body, hmac_header)
-            if not ok:
-                raise HTTPException(status_code=401, detail="Invalid Shopify webhook HMAC")
-        else:
-            logging.getLogger(__name__).warning(
-                "SHOPIFY_WEBHOOK_SECRET not set; accepting Shopify webhook without verification (workspace=%s)", ws
-            )
-
-        # Topic: prefer Shopify header, fallback to orders/create.
-        topic = (request.headers.get("X-Shopify-Topic") or "").strip() or "orders/create"
-
-        try:
-            payload = json.loads((body or b"{}").decode("utf-8") or "{}")
-        except Exception:
-            payload = {}
-
-        # Process asynchronously (fast ACK to Shopify).
-        try:
-            asyncio.create_task(message_processor._run_shopify_automations(topic, payload, workspace=ws))
-        except Exception:
-            pass
-
-        return {"ok": True, "workspace": ws, "topic": topic, "compat": True}
-    finally:
-        if ws_token is not None:
-            try:
-                _CURRENT_WORKSPACE.reset(ws_token)
-            except Exception:
-                pass
 
 
 @app.post("/delivery/webhook/{workspace}")
@@ -9481,6 +9287,170 @@ async def index_page():
         return HTMLResponse(content=html)
     except Exception:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+# Runtime app configuration for the frontend (allows env-based overrides per workspace)
+@app.get("/app-config")
+async def app_config(request: Request):
+    """
+    Lightweight runtime config consumed by the React frontend.
+
+    Supports:
+    - Multi-workspace workspace list + labels (for UI workspace switcher)
+    - Catalog filter buttons (labels + match rules), optionally workspace-specific
+
+    Workspace-specific overrides:
+      - WORKSPACE_LABEL_<WS>
+      - WORKSPACE_SHORT_<WS>
+      - CATALOG_FILTER_A_LABEL_<WS>, CATALOG_FILTER_A_QUERY_<WS>, CATALOG_FILTER_A_MATCH_<WS>
+      - CATALOG_FILTER_B_LABEL_<WS>, CATALOG_FILTER_B_QUERY_<WS>, CATALOG_FILTER_B_MATCH_<WS>
+      - CATALOG_FILTER_ALL_LABEL_<WS>
+
+    Global fallbacks (when no workspace-specific overrides are present):
+      - WORKSPACE_LABELS="ws1=Label One,ws2=Label Two"
+      - WORKSPACE_SHORTS="ws1=ONE,ws2=TWO"
+      - CATALOG_FILTER_A_LABEL, CATALOG_FILTER_A_QUERY, CATALOG_FILTER_A_MATCH
+      - CATALOG_FILTER_B_LABEL, CATALOG_FILTER_B_QUERY, CATALOG_FILTER_B_MATCH
+      - CATALOG_FILTER_ALL_LABEL
+    """
+    try:
+        ws = get_current_workspace()
+        # Load admin-managed workspace labels from shared settings DB (best-effort).
+        registry_meta: dict[str, dict] = {}
+        try:
+            raw_reg = await auth_db_manager.get_setting("workspace_registry")
+            reg = json.loads(raw_reg) if raw_reg else []
+            if isinstance(reg, list):
+                for item in reg:
+                    if not isinstance(item, dict):
+                        continue
+                    wid = _normalize_workspace_id(item.get("id") or "")
+                    if not wid:
+                        continue
+                    registry_meta[wid] = {
+                        "label": str(item.get("label") or "").strip(),
+                        "short": str(item.get("short") or "").strip(),
+                    }
+                    # Ensure it is accepted for request routing (no redeploy needed)
+                    try:
+                        if wid not in WORKSPACES:
+                            DYNAMIC_WORKSPACES.add(wid)
+                    except Exception:
+                        pass
+        except Exception:
+            registry_meta = {}
+
+        def _ws_suffix(w: str) -> str:
+            return re.sub(r"[^A-Z0-9]+", "_", str(w or "").strip().upper())
+
+        def _parse_kv_env(var_name: str) -> dict:
+            raw = os.getenv(var_name, "") or ""
+            out: dict[str, str] = {}
+            for part in raw.split(","):
+                part = part.strip()
+                if not part or "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                k = k.strip().lower()
+                v = v.strip()
+                if k:
+                    out[k] = v
+            return out
+
+        _labels = _parse_kv_env("WORKSPACE_LABELS")
+        _shorts = _parse_kv_env("WORKSPACE_SHORTS")
+
+        def _short_default(label: str, w: str) -> str:
+            s = (label or w or "").strip().upper()
+            s = re.sub(r"[^A-Z0-9]+", "", s)
+            return (s[:4] or (str(w or "").strip().upper()[:4] or "WS"))
+
+        def _workspace_label(w: str) -> str:
+            suf = _ws_suffix(w)
+            return (
+                os.getenv(f"WORKSPACE_LABEL_{suf}", "")
+                or str((registry_meta.get(str(w or "").strip().lower()) or {}).get("label") or "").strip()
+                or _labels.get(str(w or "").strip().lower(), "")
+                or str(w or "").strip().upper()
+            )
+
+        def _workspace_short(w: str, label: str) -> str:
+            suf = _ws_suffix(w)
+            return (
+                os.getenv(f"WORKSPACE_SHORT_{suf}", "")
+                or str((registry_meta.get(str(w or "").strip().lower()) or {}).get("short") or "").strip()
+                or _shorts.get(str(w or "").strip().lower(), "")
+                or _short_default(label, w)
+            )
+
+        def _env_ws(name: str) -> str:
+            suf = _ws_suffix(ws)
+            # workspace-specific override first
+            v = os.getenv(f"{name}_{suf}", "")
+            if v is not None and str(v).strip() != "":
+                return str(v)
+            return str(os.getenv(name, "") or "")
+
+        def _read_filter(suffix: str):
+            label = _env_ws(f"CATALOG_FILTER_{suffix}_LABEL").strip()
+            query = _env_ws(f"CATALOG_FILTER_{suffix}_QUERY").strip()
+            match = (_env_ws(f"CATALOG_FILTER_{suffix}_MATCH") or "includes").strip().lower()
+            if label and query:
+                return {
+                    "label": label,
+                    "query": query,
+                    "match": "startsWith" if match in ("start", "startswith", "starts_with", "startsWith") else "includes",
+                }
+            return None
+
+        # Prefer DB overrides for catalog filters (admin-managed per workspace).
+        db_filters = None
+        try:
+            raw_cf = await db_manager.get_setting("catalog_filters")
+            tmp = json.loads(raw_cf) if raw_cf else None
+            if isinstance(tmp, list) and len(tmp) >= 2:
+                db_filters = tmp
+        except Exception:
+            db_filters = None
+
+        if db_filters:
+            filters = db_filters
+        else:
+            fA = _read_filter("A") or {"label": "Girls", "query": "girls", "match": "includes"}
+            fB = _read_filter("B") or {"label": "Boys", "query": "boys", "match": "includes"}
+            fall_label = (_env_ws("CATALOG_FILTER_ALL_LABEL") or "All").strip() or "All"
+            fall = {"label": fall_label, "type": "all"}
+            filters = [fA, fB, fall]
+
+        ws_list = []
+        for w in sorted(list(_all_workspaces_set() | set(registry_meta.keys()))):
+            ww = _normalize_workspace_id(w)
+            if not ww:
+                continue
+            label = _workspace_label(ww)
+            ws_list.append({"id": ww, "label": label, "short": _workspace_short(ww, label)})
+
+        return {
+            "workspace": ws,
+            "defaultWorkspace": DEFAULT_WORKSPACE,
+            "workspaces": ws_list,
+            "catalogFilters": filters,
+        }
+    except Exception:
+        # Safe defaults on any failure
+        try:
+            ws = get_current_workspace()
+        except Exception:
+            ws = DEFAULT_WORKSPACE
+        return {
+            "workspace": ws,
+            "defaultWorkspace": DEFAULT_WORKSPACE,
+            "workspaces": [{"id": w, "label": str(w).upper(), "short": str(w).upper()[:4]} for w in (WORKSPACES or [DEFAULT_WORKSPACE])],
+            "catalogFilters": [
+                {"label": "Girls", "query": "girls", "match": "includes"},
+                {"label": "Boys", "query": "boys", "match": "includes"},
+                {"label": "All", "type": "all"},
+            ],
+        }
 
 # Serve hashed main bundle filenames for safety even if HTML references are stale
 @app.get("/static/js/{filename}")

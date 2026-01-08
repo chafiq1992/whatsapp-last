@@ -23,6 +23,7 @@ export default function MiniSidebar({
 	const dropdownRef = useRef(null);
   const [showNewChat, setShowNewChat] = useState(false);
   const [newChatValue, setNewChatValue] = useState('');
+  const [workspacesConfig, setWorkspacesConfig] = useState({ workspaces: [], defaultWorkspace: '' });
 
 	useEffect(() => {
 		(async () => {
@@ -32,6 +33,34 @@ export default function MiniSidebar({
 			} catch {}
 		})();
 	}, []);
+
+  // Load runtime config for workspace catalog (labels + available workspaces)
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await api.get('/app-config');
+        const data = res?.data || {};
+        const list = Array.isArray(data.workspaces) ? data.workspaces : [];
+        const norm = list
+          .map((w) => ({
+            id: String(w?.id || '').trim().toLowerCase(),
+            label: String(w?.label || '').trim(),
+            short: String(w?.short || '').trim(),
+          }))
+          .filter((w) => w.id);
+        if (!alive) return;
+        setWorkspacesConfig({
+          workspaces: norm,
+          defaultWorkspace: String(data.defaultWorkspace || '').trim().toLowerCase(),
+        });
+      } catch {
+        if (!alive) return;
+        setWorkspacesConfig({ workspaces: [], defaultWorkspace: '' });
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -113,26 +142,61 @@ export default function MiniSidebar({
     }
   };
 
+  const workspaces = useMemo(() => {
+    const fromCfg = (workspacesConfig?.workspaces || []).filter(Boolean);
+    if (fromCfg.length) return fromCfg;
+    // fallback to legacy two-workspace setup
+    return [
+      { id: 'irranova', label: 'IRRANOVA', short: 'NOVA' },
+      { id: 'irrakids', label: 'IRRAKIDS', short: 'KIDS' },
+    ];
+  }, [workspacesConfig]);
+
+  const currentWorkspaceObj = useMemo(() => {
+    const ws = String(workspace || '').trim().toLowerCase();
+    return workspaces.find((w) => w.id === ws) || null;
+  }, [workspaces, workspace]);
+
+  const nextWorkspaceId = useMemo(() => {
+    try {
+      const ws = String(workspace || '').trim().toLowerCase();
+      const idx = workspaces.findIndex((w) => w.id === ws);
+      const next = workspaces[(idx >= 0 ? (idx + 1) : 0) % Math.max(1, workspaces.length)];
+      return String(next?.id || '').trim().toLowerCase();
+    } catch {
+      return '';
+    }
+  }, [workspaces, workspace]);
+
+  const workspaceButtonText = (() => {
+    const s = String(currentWorkspaceObj?.short || currentWorkspaceObj?.label || workspace || '').trim();
+    if (!s) return 'WS';
+    return s.length > 5 ? s.slice(0, 5).toUpperCase() : s.toUpperCase();
+  })();
+
 	return (
 		<div className="w-16 bg-gray-900 border-r border-gray-800 h-full flex flex-col items-center justify-between py-3 relative">
 			{/* Upper section */}
 			<div className="flex flex-col items-center gap-3">
         <button
           type="button"
-          title={`Switch workspace (current: ${String(workspace || '').toUpperCase()})`}
+          title={`Switch workspace (current: ${String(currentWorkspaceObj?.label || workspace || '').toUpperCase()})`}
           onClick={() => {
             try {
-              const next = String(workspace || '').toLowerCase() === 'irrakids' ? 'irranova' : 'irrakids';
-              if (typeof onSwitchWorkspace === 'function') onSwitchWorkspace(next);
+              const next = nextWorkspaceId || '';
+              if (next && typeof onSwitchWorkspace === 'function') onSwitchWorkspace(next);
             } catch {}
           }}
           className={`w-12 h-10 rounded-xl flex items-center justify-center text-xs font-extrabold tracking-widest border transition-colors ${
-            String(workspace || '').toLowerCase() === 'irrakids'
-              ? 'bg-[#004AAD] text-white border-[#004AAD]'
-              : 'bg-green-700 text-white border-green-700'
+            (() => {
+              const idx = workspaces.findIndex((w) => w.id === String(workspace || '').toLowerCase());
+              if (idx === 1) return 'bg-[#004AAD] text-white border-[#004AAD]';
+              if (idx === 0) return 'bg-green-700 text-white border-green-700';
+              return 'bg-gray-800 text-white border-gray-700';
+            })()
           }`}
         >
-          {String(workspace || '').toLowerCase() === 'irrakids' ? 'KIDS' : 'NOVA'}
+          {workspaceButtonText}
         </button>
 				<button
 					type="button"

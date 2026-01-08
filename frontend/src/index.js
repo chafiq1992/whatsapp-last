@@ -3,14 +3,16 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.js';
 import StudioPage from './StudioPage';
+import AutomationSettingsPage from './AutomationSettingsPage';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 const hash = window.location.hash || '';
 const path = window.location.pathname || '';
 const isStudio = (hash && hash.includes('/automation-studio')) || path === '/automation-studio' || path.startsWith('/automation-studio/');
+const isAutomationSettings = (hash && hash.includes('/automation-settings')) || path === '/automation-settings' || path.startsWith('/automation-settings/');
 
 root.render(
-  isStudio ? <StudioPage /> : <App />
+  isAutomationSettings ? <AutomationSettingsPage /> : (isStudio ? <StudioPage /> : <App />)
 );
 
 // If you want to start measuring performance in your app, pass a function

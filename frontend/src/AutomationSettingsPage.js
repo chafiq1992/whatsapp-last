@@ -43,6 +43,7 @@ export default function AutomationSettingsPage() {
     access_token: '',
     access_token_present: false,
     access_token_hint: '',
+    access_token_source: '',
   });
   const [savingEnv, setSavingEnv] = useState(false);
 
@@ -90,6 +91,7 @@ export default function AutomationSettingsPage() {
       access_token: '',
       access_token_present: Boolean(d.access_token_present),
       access_token_hint: String(d.access_token_hint || ''),
+      access_token_source: String(d.access_token_source || ''),
     });
   };
 
@@ -181,6 +183,7 @@ export default function AutomationSettingsPage() {
         catalog_id: envDraft.catalog_id,
         phone_number_id: envDraft.phone_number_id,
         ...(envDraft.access_token ? { access_token: envDraft.access_token } : {}),
+        ...(envDraft.access_token_source === 'env' ? { clear_access_token: true } : {}),
       }, { headers: { 'X-Workspace': ws } });
       await loadInboxEnv(ws);
     } catch (e) {
@@ -423,15 +426,43 @@ export default function AutomationSettingsPage() {
                 <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">WhatsApp Access Token</div>
+                    <div className="flex items-center gap-2 mb-2">
+                      <label className="text-xs text-slate-600 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={String(envDraft.access_token_source || 'env') === 'env'}
+                          onChange={(e) => {
+                            const useEnv = !!e.target.checked;
+                            setEnvDraft((d) => ({
+                              ...d,
+                              access_token: '',
+                              access_token_source: useEnv ? 'env' : 'db',
+                            }));
+                          }}
+                        />
+                        Use Cloud Run secret token (recommended)
+                      </label>
+                      <span className="text-[11px] text-slate-500">
+                        Current: <span className="font-mono">{envDraft.access_token_source || 'env'}</span>
+                        {envDraft.access_token_hint ? <> • …{envDraft.access_token_hint}</> : null}
+                      </span>
+                    </div>
                     <input
                       type="password"
                       className="w-full border rounded px-2 py-1 font-mono text-xs"
                       value={envDraft.access_token || ''}
                       onChange={(e)=>setEnvDraft((d)=>({ ...d, access_token: e.target.value }))}
-                      placeholder={envDraft.access_token_present ? `Saved (…${envDraft.access_token_hint || ''}) — leave blank to keep` : 'Paste token here'}
+                      disabled={String(envDraft.access_token_source || 'env') === 'env'}
+                      placeholder={
+                        String(envDraft.access_token_source || 'env') === 'env'
+                          ? 'Using Cloud Run secret token'
+                          : (envDraft.access_token_present ? `Saved (…${envDraft.access_token_hint || ''}) — leave blank to keep` : 'Paste token here')
+                      }
                     />
                     <div className="text-[11px] text-slate-500 mt-1">
-                      {envDraft.access_token_present ? 'Token is stored. Leave empty to keep it unchanged.' : 'Required for this workspace to send WhatsApp messages.'}
+                      {String(envDraft.access_token_source || 'env') === 'env'
+                        ? 'Token comes from Cloud Run secret env; not stored in DB.'
+                        : (envDraft.access_token_present ? 'Token is stored in DB. Leave empty to keep it unchanged.' : 'Required for this workspace to send WhatsApp messages.')}
                     </div>
                   </div>
                   <div className="md:col-span-2">

@@ -8399,9 +8399,15 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
     """Return effective inbox env settings (DB overrides layered on env defaults)."""
     cfg = await message_processor._get_inbox_env(get_current_workspace())
     try:
-        tok = str(cfg.get("access_token") or "").strip()
-        tok_present = bool(tok and not _is_placeholder_token(tok))
-        tok_hint = (tok[-4:] if tok_present and len(tok) >= 4 else "")
+        overrides = cfg.get("overrides") if isinstance(cfg.get("overrides"), dict) else {}
+        db_tok = str((overrides or {}).get("access_token") or "").strip()
+        eff_tok = str(cfg.get("access_token") or "").strip()
+
+        db_tok_present = bool(db_tok and not _is_placeholder_token(db_tok))
+        env_tok_present = (not db_tok_present) and bool(eff_tok and not _is_placeholder_token(eff_tok))
+        tok_present = bool(db_tok_present or env_tok_present)
+        tok_source = "db" if db_tok_present else ("env" if env_tok_present else "missing")
+        tok_hint = (db_tok[-4:] if db_tok_present and len(db_tok) >= 4 else "")
         return {
             "workspace": cfg.get("workspace") or get_current_workspace(),
             "allowed_phone_number_ids": sorted(list(cfg.get("allowed_phone_number_ids") or [])),
@@ -8411,6 +8417,7 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "catalog_id": cfg.get("catalog_id") or "",
             "phone_number_id": cfg.get("phone_number_id") or "",
             "access_token_present": tok_present,
+            "access_token_source": tok_source,
             "access_token_hint": tok_hint,
             "overrides": cfg.get("overrides") or {},
         }
@@ -8452,6 +8459,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     catalog_id = str((payload or {}).get("catalog_id") or "").strip()
     phone_number_id = str((payload or {}).get("phone_number_id") or "").strip()
     access_token_in = str((payload or {}).get("access_token") or "").strip()
+    clear_access_token = bool((payload or {}).get("clear_access_token"))
 
     # Normalize: dedupe while keeping stable order
     def _dedupe(xs: list[str]) -> list[str]:
@@ -8464,7 +8472,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
             out.append(x)
         return out
 
-    # Preserve existing access_token unless explicitly provided (security: do not echo token back in GET).
+    # Preserve existing access_token unless explicitly provided or explicitly cleared.
     existing_token = ""
     try:
         raw_prev = await db_manager.get_setting(_ws_setting_key("inbox_env", get_current_workspace()))
@@ -8481,7 +8489,11 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         "waba_id": waba_id,
         "catalog_id": catalog_id,
         "phone_number_id": phone_number_id,
-        **({"access_token": access_token_in} if access_token_in else ({"access_token": existing_token} if existing_token else {})),
+        **(
+            {}
+            if clear_access_token
+            else ({"access_token": access_token_in} if access_token_in else ({"access_token": existing_token} if existing_token else {}))
+        ),
     }
     ws_now = get_current_workspace()
     await db_manager.set_setting(_ws_setting_key("inbox_env", ws_now), stored)

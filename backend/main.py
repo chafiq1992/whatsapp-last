@@ -8697,6 +8697,82 @@ async def list_whatsapp_templates_endpoint(_: dict = Depends(require_admin)):
         return {"workspace": get_current_workspace(), "waba_id": waba_id, "templates": out}
 
 
+@app.post("/admin/whatsapp/templates")
+async def create_whatsapp_template_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Create (submit for review) a WhatsApp message template for the current workspace."""
+    ws = get_current_workspace()
+    cfg = await message_processor._get_inbox_env(ws)
+    waba_id = str((cfg or {}).get("waba_id") or "").strip()
+    if not waba_id:
+        raise HTTPException(status_code=400, detail="Missing waba_id (set it in Automation → Environment)")
+
+    # Use the workspace WhatsApp access token
+    try:
+        token = message_processor.whatsapp_messenger._client(ws).access_token  # type: ignore[attr-defined]
+    except Exception:
+        token = ACCESS_TOKEN
+    if not token:
+        raise HTTPException(status_code=503, detail="WhatsApp access token not configured")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    name = str(payload.get("name") or "").strip()
+    language = str(payload.get("language") or "").strip()
+    category = str(payload.get("category") or "").strip().upper()
+    components = payload.get("components") or []
+
+    # Meta template name rules (best-effort): lowercase letters, numbers, underscores.
+    if not name:
+        raise HTTPException(status_code=400, detail="Missing template name")
+    if len(name) > 512:
+        raise HTTPException(status_code=400, detail="Template name too long (max 512)")
+    if not re.fullmatch(r"[a-z0-9_]+", name):
+        raise HTTPException(status_code=400, detail="Invalid template name (use lowercase letters, numbers, underscores)")
+
+    if not language:
+        raise HTTPException(status_code=400, detail="Missing language")
+    if category not in ("MARKETING", "UTILITY", "AUTHENTICATION"):
+        raise HTTPException(status_code=400, detail="Invalid category (MARKETING | UTILITY | AUTHENTICATION)")
+
+    if not isinstance(components, list) or any(not isinstance(c, dict) for c in components):
+        raise HTTPException(status_code=400, detail="components must be a list of objects")
+
+    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/message_templates"
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {
+        "name": name,
+        "language": language,
+        "category": category,
+        "components": components,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(url, json=body, headers=headers)
+        if resp.status_code >= 400:
+            try:
+                j = resp.json() or {}
+                # Graph-style error message
+                msg = (((j.get("error") or {}) if isinstance(j, dict) else {}).get("message") or "") if isinstance(j, dict) else ""
+                if msg:
+                    raise HTTPException(status_code=resp.status_code, detail=str(msg)[:800])
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+            try:
+                detail = (resp.text or "")[:800]
+            except Exception:
+                detail = "Template create failed"
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": (resp.text or "")[:1000]}
+        return {"ok": True, "workspace": ws, "waba_id": waba_id, "result": data}
+
+
 @app.post("/shopify/webhook/{workspace}")
 async def shopify_webhook_endpoint(workspace: str, request: Request):
     """Shopify webhook endpoint (one URL per workspace).

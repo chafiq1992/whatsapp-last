@@ -20,6 +20,7 @@ import {
   Trash,
 } from "lucide-react";
 import api from "./api";
+import WhatsAppTemplatesPanel from "./WhatsAppTemplatesPanel";
 
 const NODE_TYPES = {
   TRIGGER: "trigger",
@@ -315,7 +316,7 @@ function makeEdge(from, fromPort, to, toPort) {
 export default function AutomationStudio({ onClose }) {
   // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
   // Settings are now in a dedicated page (/#/automation-settings).
-  const [mode, setMode] = useState("simple"); // keep internal state for legacy paths
+  const [mode, setMode] = useState("simple"); // simple | templates | env | (legacy flow editor)
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesSaving, setRulesSaving] = useState(false);
@@ -640,6 +641,12 @@ export default function AutomationStudio({ onClose }) {
               onClick={() => setMode("simple")}
             >
               Automation
+            </button>
+            <button
+              className={`px-2 py-1 border rounded text-sm ${mode === "templates" ? "bg-blue-50 border-blue-200" : ""}`}
+              onClick={() => setMode("templates")}
+            >
+              WhatsApp Templates
             </button>
             <button
               className={`px-2 py-1 border rounded text-sm ${mode === "env" ? "bg-blue-50 border-blue-200" : ""}`}
@@ -1004,6 +1011,13 @@ export default function AutomationStudio({ onClose }) {
             />
           )}
         </SimpleAutomations>
+      ) : mode === "templates" ? (
+        <WhatsAppTemplatesPanel
+          templates={templates}
+          loading={templatesLoading}
+          error={templatesError}
+          onRefresh={loadTemplates}
+        />
       ) : mode === "env" ? (
         <InboxEnvSettings
           loading={envLoading}

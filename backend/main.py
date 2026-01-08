@@ -9008,6 +9008,51 @@ async def create_whatsapp_template_endpoint(payload: dict = Body(...), _: dict =
         return {"ok": True, "workspace": ws, "waba_id": waba_id, "result": data}
 
 
+@app.post("/admin/whatsapp/templates/header-image-upload")
+async def upload_template_header_image_endpoint(
+    file: UploadFile = File(...),
+    _: dict = Depends(require_admin),
+):
+    """Upload a WhatsApp template header image to GCS and return a public URL (for Meta template samples)."""
+    try:
+        ct = (getattr(file, "content_type", None) or "").lower()
+        name = str(getattr(file, "filename", "") or "header").strip()
+        ext = (Path(name).suffix or "").lower()
+
+        allowed_ext = {".jpg", ".jpeg", ".png", ".webp"}
+        allowed_ct = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
+        if ext and ext not in allowed_ext:
+            raise HTTPException(status_code=400, detail="Unsupported image type. Use JPG, PNG, or WEBP.")
+        if ct and ct not in allowed_ct:
+            raise HTTPException(status_code=400, detail="Unsupported image content-type. Use image/jpeg, image/png, or image/webp.")
+
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty file")
+        if len(content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Image too large (max 5MB)")
+
+        MEDIA_DIR.mkdir(exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_ext = ext if ext in allowed_ext else (".png" if ct.endswith("png") else ".jpg")
+        filename = f"tpl_header_{ts}_{uuid.uuid4().hex[:10]}{safe_ext}"
+        file_path = MEDIA_DIR / filename
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(content)
+
+        try:
+            url = await upload_file_to_gcs(str(file_path), content_type=(ct or None))
+        except Exception as exc:
+            print(f"GCS upload failed for template header upload (fallback to /media): {exc}")
+            url = f"/media/{filename}"
+
+        return {"ok": True, "url": url, "filename": filename}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+
 @app.post("/shopify/webhook/{workspace}")
 async def shopify_webhook_endpoint(workspace: str, request: Request):
     """Shopify webhook endpoint (one URL per workspace).

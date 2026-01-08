@@ -610,47 +610,26 @@ export default function AutomationStudio({ onClose }) {
           <span className="text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-700">Beta</span>
         </div>
         <div className="flex items-center gap-2">
+          <div className="hidden sm:flex items-center gap-1 mr-2">
+            <button
+              className={`px-2 py-1 border rounded text-sm ${mode === "simple" ? "bg-blue-50 border-blue-200" : ""}`}
+              onClick={() => setMode("simple")}
+            >
+              Automation
+            </button>
+            <button
+              className={`px-2 py-1 border rounded text-sm ${mode === "env" ? "bg-blue-50 border-blue-200" : ""}`}
+              onClick={() => setMode("env")}
+            >
+              Environment
+            </button>
+          </div>
           <button
             className="px-2 py-1 border rounded text-sm"
-            onClick={() => { try { window.location.href = '/#/automation-settings'; } catch {} }}
-            title="Automation settings"
+            onClick={() => { try { window.location.href = '/#/settings'; } catch {} }}
+            title="Settings"
           >
             Settings
-          </button>
-          <button
-            className="px-2 py-1 border rounded text-sm"
-            onClick={simulate}
-            disabled={running}
-          >
-            <span className="inline-flex items-center gap-1"><Play className="w-4 h-4" />Test run</span>
-          </button>
-          <button
-            className="px-2 py-1 border rounded text-sm"
-            onClick={() => {
-              if (mode === "simple") {
-                persistRules(rules);
-              } else if (mode === "env") {
-                saveInboxEnv();
-              } else {
-                alert("Canvas draft saved locally (simple rules are the real backend integration).");
-              }
-            }}
-          >
-            <span className="inline-flex items-center gap-1"><Save className="w-4 h-4" />Save draft</span>
-          </button>
-          <button
-            className="px-2 py-1 rounded text-sm bg-blue-600 text-white"
-            onClick={() => {
-              if (mode === "simple") {
-                persistRules(rules);
-              } else if (mode === "env") {
-                saveInboxEnv();
-              } else {
-                alert("Canvas publish is not wired. Use Simple mode to run real WhatsApp automations.");
-              }
-            }}
-          >
-            <span className="inline-flex items-center gap-1"><CirclePlay className="w-4 h-4" />Publish</span>
           </button>
           {onClose && (
             <button className="ml-2 px-2 py-1 border rounded text-sm" onClick={onClose}>Close</button>

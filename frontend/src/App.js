@@ -10,7 +10,6 @@ import { loadConversations, saveConversations } from './chatStorage';
 import { AudioProvider } from './AudioManager';
 import GlobalAudioBar from './GlobalAudioBar';
 // Lazy load heavy panels (must be declared after all import declarations)
-const AdminDashboard = React.lazy(() => import('./AdminDashboard'));
 const ShopifyIntegrationsPanel = React.lazy(() => import('./ShopifyIntegrationsPanel'));
 const Login = React.lazy(() => import('./Login'));
 
@@ -51,7 +50,6 @@ export default function App() {
   const [adminWsConnected, setAdminWsConnected] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
   const [showInternalPanel, setShowInternalPanel] = useState(false);
-  const [showAdmin, setShowAdmin] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loadingConversations, setLoadingConversations] = useState(false);
   const [authReady, setAuthReady] = useState(false);
@@ -637,7 +635,7 @@ export default function App() {
           onSetShowArchive={setShowArchive}
           onToggleInternal={() => setShowInternalPanel((v) => !v)}
           onSelectInternalAgent={(username)=> { setActiveUser({ user_id: `dm:${username}`, name: `@${username}` }); setShowInternalPanel(false); }}
-          onOpenSettings={() => setShowAdmin(true)}
+          onOpenSettings={() => { try { window.location.href = '/#/settings'; } catch {} }}
           onOpenAutomation={() => { window.open('/#/automation-studio', '_blank', 'noopener,noreferrer'); }}
           currentAgent={currentAgent}
           isAdmin={isAdmin}
@@ -707,11 +705,6 @@ export default function App() {
           <ShopifyIntegrationsPanel activeUser={activeUser} currentAgent={currentAgent} />
         </Suspense>
       </div>
-      {showAdmin && (
-        <Suspense fallback={<div className="p-3 text-sm text-gray-300">Loading settings…</div>}>
-          <AdminDashboard onClose={() => setShowAdmin(false)} isAdmin={isAdmin} currentAgent={currentAgent} workspace={workspace} />
-        </Suspense>
-      )}
     </div>
     </AudioProvider>
   );

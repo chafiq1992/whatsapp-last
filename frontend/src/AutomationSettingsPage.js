@@ -206,7 +206,7 @@ export default function AutomationSettingsPage() {
       <header className="h-12 px-3 flex items-center justify-between border-b bg-white/70 backdrop-blur sticky top-0 z-50">
         <div className="flex items-center gap-2">
           <button className="px-3 py-1.5 text-sm bg-gray-800 text-white rounded" onClick={() => (window.location.href = '/#/automation-studio')}>
-            ← Back to Automation
+            Automation
           </button>
           <button className="px-3 py-1.5 text-sm bg-gray-200 text-gray-900 rounded border border-gray-300" onClick={() => (window.location.href = '/')}>
             Inbox

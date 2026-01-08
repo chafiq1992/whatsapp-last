@@ -10,9 +10,10 @@ const hash = window.location.hash || '';
 const path = window.location.pathname || '';
 const isStudio = (hash && hash.includes('/automation-studio')) || path === '/automation-studio' || path.startsWith('/automation-studio/');
 const isAutomationSettings = (hash && hash.includes('/automation-settings')) || path === '/automation-settings' || path.startsWith('/automation-settings/');
+const isSettings = (hash && hash.includes('/settings')) || path === '/settings' || path.startsWith('/settings/');
 
 root.render(
-  isAutomationSettings ? <AutomationSettingsPage /> : (isStudio ? <StudioPage /> : <App />)
+  (isSettings || isAutomationSettings) ? <AutomationSettingsPage /> : (isStudio ? <StudioPage /> : <App />)
 );
 
 // If you want to start measuring performance in your app, pass a function

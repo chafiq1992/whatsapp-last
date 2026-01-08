@@ -1861,6 +1861,8 @@ class DatabaseManager:
         self._agent_auth_cache: Dict[str, dict] = {}
         # Columns allowed in the messages table (except auto-increment id)
         self.message_columns = {
+            # workspace scoping (required for shared Postgres DB isolation)
+            "workspace",
             "wa_message_id",
             "temp_id",
             "user_id",
@@ -2061,9 +2063,12 @@ class DatabaseManager:
     # ── schema ──
     async def init_db(self):
         async with self._conn() as db:
-            base_script = """
+            # IMPORTANT: keep schema compatible with both SQLite and Postgres (we transform a few tokens below).
+            # We include a workspace column for shared-DB multi-workspace isolation.
+            base_script = f"""
                 CREATE TABLE IF NOT EXISTS messages (
                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace      TEXT NOT NULL DEFAULT '{DEFAULT_WORKSPACE}',
                     wa_message_id  TEXT,
                     temp_id        TEXT,
                     user_id        TEXT NOT NULL,
@@ -2203,7 +2208,7 @@ class DatabaseManager:
 
                 -- Idempotency: ensure per-chat uniqueness for wa_message_id and temp_id
                 CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa
-                    ON messages (user_id, wa_message_id);
+                    ON messages (workspace, user_id, wa_message_id);
 
                 -- Orders table used to track payout status
                 CREATE TABLE IF NOT EXISTS orders (
@@ -2334,6 +2339,19 @@ class DatabaseManager:
                 await db.commit()
 
             # Ensure newer columns exist for deployments created before they were added
+            # Workspace isolation
+            await self._add_column_if_missing(db, "messages", "workspace", f"TEXT DEFAULT '{DEFAULT_WORKSPACE}'")
+            try:
+                # Backfill any existing rows missing workspace to DEFAULT_WORKSPACE
+                q = self._convert("UPDATE messages SET workspace = ? WHERE workspace IS NULL OR workspace = ''")
+                if self.use_postgres:
+                    await db.execute(q, DEFAULT_WORKSPACE)
+                else:
+                    await db.execute(q, (DEFAULT_WORKSPACE,))
+                    await db.commit()
+            except Exception:
+                pass
+
             await self._add_column_if_missing(db, "messages", "temp_id", "TEXT")
             await self._add_column_if_missing(db, "messages", "url", "TEXT")
             # reply/reactions columns (idempotent)
@@ -2396,6 +2414,27 @@ class DatabaseManager:
             else:
                 await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_temp_id ON messages (temp_id)")
                 await db.commit()
+
+            # Ensure uniqueness is workspace-scoped (older deployments had uniq_msg_user_wa on (user_id, wa_message_id)).
+            try:
+                if self.use_postgres:
+                    await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa_old")
+                else:
+                    await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa_old")
+                    await db.commit()
+            except Exception:
+                pass
+            try:
+                # Drop and recreate the canonical index name to include workspace.
+                if self.use_postgres:
+                    await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa")
+                    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa ON messages (workspace, user_id, wa_message_id)")
+                else:
+                    await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa")
+                    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa ON messages (workspace, user_id, wa_message_id)")
+                    await db.commit()
+            except Exception:
+                pass
 
     # ── Agents management ──────────────────────────────────────────
     async def create_agent(self, username: str, name: str, password_hash: str, is_admin: int = 0):
@@ -3062,14 +3101,22 @@ class DatabaseManager:
         Insert a new row or update an existing one (found by wa_message_id OR temp_id).
         The status is *only* upgraded – you can't go from 'delivered' ➜ 'sent', etc.
         """
+        # Ensure workspace is always set for isolation (shared Postgres DB).
+        try:
+            data = dict(data or {})
+            if not data.get("workspace"):
+                data["workspace"] = get_current_workspace()
+        except Exception:
+            pass
+
         # Drop any keys not present in the messages table to avoid SQL errors
         data = {k: v for k, v in data.items() if k in self.message_columns}
 
         async with self._conn() as db:
             row = None
             if data.get("wa_message_id") and data.get("user_id"):
-                query = self._convert("SELECT * FROM messages WHERE user_id = ? AND wa_message_id = ?")
-                params = [data["user_id"], data["wa_message_id"]]
+                query = self._convert("SELECT * FROM messages WHERE workspace = ? AND user_id = ? AND wa_message_id = ?")
+                params = [data.get("workspace") or get_current_workspace(), data["user_id"], data["wa_message_id"]]
                 if self.use_postgres:
                     row = await db.fetchrow(query, *params)
                 else:
@@ -3077,8 +3124,8 @@ class DatabaseManager:
                     row = await cur.fetchone()
 
             if not row and data.get("temp_id") and data.get("user_id"):
-                query = self._convert("SELECT * FROM messages WHERE user_id = ? AND temp_id = ?")
-                params = [data["user_id"], data["temp_id"]]
+                query = self._convert("SELECT * FROM messages WHERE workspace = ? AND user_id = ? AND temp_id = ?")
+                params = [data.get("workspace") or get_current_workspace(), data["user_id"], data["temp_id"]]
                 if self.use_postgres:
                     row = await db.fetchrow(query, *params)
                 else:
@@ -3119,11 +3166,11 @@ class DatabaseManager:
                     # If a concurrent insert violated unique (user_id, temp_id|wa_message_id), fall back to update
                     try:
                         if data.get("wa_message_id"):
-                            sel = self._convert("SELECT * FROM messages WHERE user_id = ? AND wa_message_id = ?")
-                            params = [data["user_id"], data["wa_message_id"]]
+                            sel = self._convert("SELECT * FROM messages WHERE workspace = ? AND user_id = ? AND wa_message_id = ?")
+                            params = [data.get("workspace") or get_current_workspace(), data["user_id"], data["wa_message_id"]]
                         else:
-                            sel = self._convert("SELECT * FROM messages WHERE user_id = ? AND temp_id = ?")
-                            params = [data["user_id"], data.get("temp_id")]
+                            sel = self._convert("SELECT * FROM messages WHERE workspace = ? AND user_id = ? AND temp_id = ?")
+                            params = [data.get("workspace") or get_current_workspace(), data["user_id"], data.get("temp_id")]
                         if self.use_postgres:
                             row = await db.fetchrow(sel, *params)
                         else:
@@ -3156,17 +3203,18 @@ class DatabaseManager:
         then reversed in-memory to chronological order for the UI.
         """
         async with self._conn() as db:
+            ws = get_current_workspace()
             if self.use_postgres:
                 # Order by server receive time when available, falling back to original timestamp
                 query = self._convert(
-                    "SELECT * FROM messages WHERE user_id = ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT ? OFFSET ?"
+                    "SELECT * FROM messages WHERE workspace = ? AND user_id = ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT ? OFFSET ?"
                 )
             else:
                 # SQLite: ISO-8601 strings sort correctly lexicographically
                 query = self._convert(
-                    "SELECT * FROM messages WHERE user_id = ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT ? OFFSET ?"
+                    "SELECT * FROM messages WHERE workspace = ? AND user_id = ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT ? OFFSET ?"
                 )
-            params = [user_id, limit, offset]
+            params = [ws, user_id, limit, offset]
             if self.use_postgres:
                 rows = await db.fetch(query, *params)
             else:
@@ -3183,9 +3231,9 @@ class DatabaseManager:
         """
         async with self._conn() as db:
             query = self._convert(
-                "SELECT * FROM messages WHERE user_id = ? AND COALESCE(server_ts, timestamp) > ? ORDER BY COALESCE(server_ts, timestamp) ASC LIMIT ?"
+                "SELECT * FROM messages WHERE workspace = ? AND user_id = ? AND COALESCE(server_ts, timestamp) > ? ORDER BY COALESCE(server_ts, timestamp) ASC LIMIT ?"
             )
-            params = [user_id, since_timestamp, limit]
+            params = [get_current_workspace(), user_id, since_timestamp, limit]
             if self.use_postgres:
                 rows = await db.fetch(query, *params)
             else:
@@ -3201,9 +3249,9 @@ class DatabaseManager:
         """
         async with self._conn() as db:
             query = self._convert(
-                "SELECT * FROM messages WHERE user_id = ? AND COALESCE(server_ts, timestamp) < ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT ?"
+                "SELECT * FROM messages WHERE workspace = ? AND user_id = ? AND COALESCE(server_ts, timestamp) < ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT ?"
             )
-            params = [user_id, before_timestamp, limit]
+            params = [get_current_workspace(), user_id, before_timestamp, limit]
             if self.use_postgres:
                 rows = await db.fetch(query, *params)
             else:
@@ -3274,8 +3322,9 @@ class DatabaseManager:
         temp_id: Optional[str] = None
         async with self._conn() as db:
             try:
-                query = self._convert("SELECT user_id, temp_id, status FROM messages WHERE wa_message_id = ?")
-                params = [wa_message_id]
+                ws = get_current_workspace()
+                query = self._convert("SELECT user_id, temp_id, status FROM messages WHERE workspace = ? AND wa_message_id = ?")
+                params = [ws, wa_message_id]
                 if self.use_postgres:
                     row = await db.fetchrow(query, *params)
                 else:
@@ -3299,8 +3348,9 @@ class DatabaseManager:
 
     async def get_user_for_message(self, wa_message_id: str) -> str | None:
         async with self._conn() as db:
-            query = self._convert("SELECT user_id FROM messages WHERE wa_message_id = ?")
-            params = [wa_message_id]
+            ws = get_current_workspace()
+            query = self._convert("SELECT user_id FROM messages WHERE workspace = ? AND wa_message_id = ?")
+            params = [ws, wa_message_id]
             if self.use_postgres:
                 row = await db.fetchrow(query, *params)
             else:
@@ -3312,9 +3362,9 @@ class DatabaseManager:
         """Return ISO timestamp of the last outbound (from_me=1) message for a user."""
         async with self._conn() as db:
             query = self._convert(
-                "SELECT MAX(COALESCE(server_ts, timestamp)) as t FROM messages WHERE user_id = ? AND from_me = 1"
+                "SELECT MAX(COALESCE(server_ts, timestamp)) as t FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 1"
             )
-            params = [user_id]
+            params = [get_current_workspace(), user_id]
             if self.use_postgres:
                 row = await db.fetchrow(query, *params)
             else:
@@ -3330,9 +3380,9 @@ class DatabaseManager:
         async with self._conn() as db:
             # Use LIKE on caption; fall back to 0 when caption is NULL
             query = self._convert(
-                "SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND from_me = 1 AND type = 'image' AND COALESCE(caption, '') LIKE ?"
+                "SELECT COUNT(*) AS c FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 1 AND type = 'image' AND COALESCE(caption, '') LIKE ?"
             )
-            params = [user_id, "%فاتورتك%"]
+            params = [get_current_workspace(), user_id, "%فاتورتك%"]
             if self.use_postgres:
                 row = await db.fetchrow(query, *params)
                 count = int(row[0]) if row else 0
@@ -3430,17 +3480,18 @@ class DatabaseManager:
     async def mark_messages_as_read(self, user_id: str, message_ids: List[str] | None = None):
         """Mark one or all messages in a conversation as read."""
         async with self._conn() as db:
+            ws = get_current_workspace()
             if message_ids:
                 placeholders = ",".join("?" * len(message_ids))
                 query = self._convert(
-                    f"UPDATE messages SET status='read' WHERE user_id = ? AND wa_message_id IN ({placeholders})"
+                    f"UPDATE messages SET status='read' WHERE workspace = ? AND user_id = ? AND wa_message_id IN ({placeholders})"
                 )
-                params = [user_id, *message_ids]
+                params = [ws, user_id, *message_ids]
             else:
                 query = self._convert(
-                    "UPDATE messages SET status='read' WHERE user_id = ? AND from_me = 0 AND status != 'read'"
+                    "UPDATE messages SET status='read' WHERE workspace = ? AND user_id = ? AND from_me = 0 AND status != 'read'"
                 )
-                params = [user_id]
+                params = [ws, user_id]
             if self.use_postgres:
                 await db.execute(query, *params)
             else:
@@ -3473,6 +3524,7 @@ class DatabaseManager:
         Optimized single-query plan for Postgres; SQLite uses existing per-user aggregation.
         """
         async with self._conn() as db:
+            ws = get_current_workspace()
             # Postgres optimized path
             if self.use_postgres:
                 # Important: keep this fast on large datasets.
@@ -3489,6 +3541,7 @@ class DatabaseManager:
                         status,
                         COALESCE(server_ts, timestamp) AS ts
                       FROM messages
+                      WHERE workspace = ?
                       ORDER BY user_id, COALESCE(server_ts, timestamp) DESC
                     ),
                     page AS (
@@ -3503,7 +3556,7 @@ class DatabaseManager:
                         COUNT(*) FILTER (WHERE from_me = 0 AND status <> 'read') AS unread_count,
                         MAX(COALESCE(server_ts, timestamp)) FILTER (WHERE from_me = 1) AS last_agent_ts
                       FROM messages
-                      WHERE user_id IN (SELECT user_id FROM page)
+                      WHERE workspace = ? AND user_id IN (SELECT user_id FROM page)
                       GROUP BY user_id
                     ),
                     unresponded AS (
@@ -3516,7 +3569,7 @@ class DatabaseManager:
                         ) AS unresponded_count
                       FROM messages m
                       JOIN counts c ON c.user_id = m.user_id
-                      WHERE m.user_id IN (SELECT user_id FROM page)
+                      WHERE m.workspace = ? AND m.user_id IN (SELECT user_id FROM page)
                       GROUP BY m.user_id, c.last_agent_ts
                     )
                     SELECT
@@ -3541,7 +3594,7 @@ class DatabaseManager:
                     ORDER BY p.ts DESC NULLS LAST
                     """
                 )
-                rows = await db.fetch(base, limit, offset)
+                rows = await db.fetch(base, ws, limit, offset, ws, ws)
                 conversations: List[dict] = []
                 for r in rows:
                     # Normalize tags JSON to list
@@ -3588,7 +3641,7 @@ class DatabaseManager:
                 return conversations
 
             # SQLite fallback path (existing logic)
-            cur = await db.execute(self._convert("SELECT DISTINCT user_id FROM messages"))
+            cur = await db.execute(self._convert("SELECT DISTINCT user_id FROM messages WHERE workspace = ?"), (ws,))
             user_rows = await cur.fetchall()
             user_ids = [r["user_id"] for r in user_rows]
 
@@ -3599,9 +3652,9 @@ class DatabaseManager:
 
                 cur = await db.execute(
                     self._convert(
-                        "SELECT message, type, from_me, status, COALESCE(server_ts, timestamp) AS ts FROM messages WHERE user_id = ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT 1"
+                        "SELECT message, type, from_me, status, COALESCE(server_ts, timestamp) AS ts FROM messages WHERE workspace = ? AND user_id = ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT 1"
                     ),
-                    (uid,)
+                    (ws, uid)
                 )
                 last = await cur.fetchone()
                 last_msg = last["message"] if last else None
@@ -3611,26 +3664,26 @@ class DatabaseManager:
                 last_status = last["status"] if last else None
 
                 cur = await db.execute(
-                    self._convert("SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND from_me = 0 AND status != 'read'"),
-                    (uid,)
+                    self._convert("SELECT COUNT(*) AS c FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 0 AND status != 'read'"),
+                    (ws, uid)
                 )
                 unread_row = await cur.fetchone()
                 unread = unread_row["c"]
 
                 cur = await db.execute(
                     self._convert(
-                        "SELECT MAX(COALESCE(server_ts, timestamp)) as t FROM messages WHERE user_id = ? AND from_me = 1"
+                        "SELECT MAX(COALESCE(server_ts, timestamp)) as t FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 1"
                     ),
-                    (uid,)
+                    (ws, uid)
                 )
                 last_agent_row = await cur.fetchone()
                 last_agent = (last_agent_row["t"] or "1970-01-01") if last_agent_row else "1970-01-01"
 
                 cur = await db.execute(
                     self._convert(
-                        "SELECT COUNT(*) AS c FROM messages WHERE user_id = ? AND from_me = 0 AND status = 'read' AND COALESCE(server_ts, timestamp) > ?"
+                        "SELECT COUNT(*) AS c FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 0 AND status = 'read' AND COALESCE(server_ts, timestamp) > ?"
                     ),
-                    (uid, last_agent),
+                    (ws, uid, last_agent),
                 )
                 unr_row = await cur.fetchone()
                 unresponded = unr_row["c"]
@@ -4265,7 +4318,8 @@ class MessageProcessor:
             "auto_reply_test_numbers": ["2126..."], (digits only)
             "waba_id": "1234567890",
             "catalog_id": "1234567890",
-            "phone_number_id": "1234567890"
+            "phone_number_id": "1234567890",
+            "meta_app_id": "1234567890"
           }
         """
         ws = _coerce_workspace(workspace or get_current_workspace())
@@ -4285,6 +4339,7 @@ class MessageProcessor:
         catalog_default: str = ""
         phone_default: str = ""
         token_default: str = ""
+        meta_app_id_default: str = ""
         try:
             # Allow per-workspace env override: CATALOG_ID_<WS>
             suf = re.sub(r"[^A-Z0-9]+", "_", str(ws or "").strip().upper())
@@ -4299,6 +4354,10 @@ class MessageProcessor:
             token_default = str((WHATSAPP_CONFIG_BY_WORKSPACE or {}).get(ws, {}).get("access_token") or "").strip() or str(ACCESS_TOKEN or "").strip()
         except Exception:
             token_default = str(ACCESS_TOKEN or "").strip()
+        try:
+            meta_app_id_default = str(META_APP_ID or "").strip()
+        except Exception:
+            meta_app_id_default = ""
 
         # Overrides from DB (optional)
         overrides: dict = {}
@@ -4334,6 +4393,7 @@ class MessageProcessor:
         catalog_effective = str((overrides or {}).get("catalog_id") or "").strip() or catalog_default or None
         phone_effective = str((overrides or {}).get("phone_number_id") or "").strip() or phone_default or None
         token_effective = str((overrides or {}).get("access_token") or "").strip() or token_default or None
+        meta_app_id_effective = str((overrides or {}).get("meta_app_id") or "").strip() or meta_app_id_default or None
 
         out = {
             "workspace": ws,
@@ -4344,6 +4404,7 @@ class MessageProcessor:
             "catalog_id": catalog_effective,
             "phone_number_id": phone_effective,
             "access_token": token_effective,
+            "meta_app_id": meta_app_id_effective,
             "overrides": overrides,
         }
         try:
@@ -5241,8 +5302,27 @@ class MessageProcessor:
                 hinted_ws = None
 
             # Prefer runtime mapping (can be updated from DB settings). Fallback to env-derived mapping.
-            derived_ws = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else ((RUNTIME_PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or PHONE_ID_TO_WORKSPACE.get(incoming_phone_id)) or DEFAULT_WORKSPACE)
+            ws_from_phone = (RUNTIME_PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or PHONE_ID_TO_WORKSPACE.get(incoming_phone_id))
+            # If a workspace hint was attached by ingress, trust it (after coercion).
+            # Otherwise, route strictly by phone_number_id mapping.
+            derived_ws = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else (_coerce_workspace(ws_from_phone) if ws_from_phone else "")
+            if not derived_ws:
+                # Unknown phone_number_id → do not process into any workspace (prevents leakage).
+                _vlog(f"⏭️ Skipping webhook: unknown phone_number_id={incoming_phone_id}")
+                return
             ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(derived_ws))
+
+            # Strict enforcement: only process if the workspace's configured phone_number_id matches the incoming one.
+            try:
+                env_cfg = await self._get_inbox_env(get_current_workspace())
+                expected_pid = str((env_cfg or {}).get("phone_number_id") or "").strip()
+                if expected_pid and incoming_phone_id and (str(incoming_phone_id).strip() != expected_pid):
+                    _vlog(
+                        f"⏭️ Skipping webhook: phone_number_id mismatch workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
+                    )
+                    return
+            except Exception:
+                pass
 
             # Optional: Filter by phone_number_id allowlist (supports multiple IDs)
             try:
@@ -8416,6 +8496,7 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "waba_id": cfg.get("waba_id") or "",
             "catalog_id": cfg.get("catalog_id") or "",
             "phone_number_id": cfg.get("phone_number_id") or "",
+            "meta_app_id": cfg.get("meta_app_id") or "",
             "access_token_present": tok_present,
             "access_token_source": tok_source,
             "access_token_hint": tok_hint,
@@ -8458,6 +8539,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     waba_id = str((payload or {}).get("waba_id") or "").strip()
     catalog_id = str((payload or {}).get("catalog_id") or "").strip()
     phone_number_id = str((payload or {}).get("phone_number_id") or "").strip()
+    meta_app_id = str((payload or {}).get("meta_app_id") or "").strip()
     access_token_in = str((payload or {}).get("access_token") or "").strip()
     clear_access_token = bool((payload or {}).get("clear_access_token"))
 
@@ -8489,6 +8571,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         "waba_id": waba_id,
         "catalog_id": catalog_id,
         "phone_number_id": phone_number_id,
+        "meta_app_id": meta_app_id,
         **(
             {}
             if clear_access_token

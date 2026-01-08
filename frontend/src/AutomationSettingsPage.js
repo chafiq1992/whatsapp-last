@@ -40,6 +40,7 @@ export default function AutomationSettingsPage() {
     waba_id: '',
     catalog_id: '',
     phone_number_id: '',
+    meta_app_id: '',
     access_token: '',
     access_token_present: false,
     access_token_hint: '',
@@ -88,6 +89,7 @@ export default function AutomationSettingsPage() {
       waba_id: String(d.waba_id || ''),
       catalog_id: String(d.catalog_id || ''),
       phone_number_id: String(d.phone_number_id || ''),
+      meta_app_id: String(d.meta_app_id || ''),
       access_token: '',
       access_token_present: Boolean(d.access_token_present),
       access_token_hint: String(d.access_token_hint || ''),
@@ -182,6 +184,7 @@ export default function AutomationSettingsPage() {
         waba_id: envDraft.waba_id,
         catalog_id: envDraft.catalog_id,
         phone_number_id: envDraft.phone_number_id,
+        meta_app_id: envDraft.meta_app_id,
         ...(envDraft.access_token ? { access_token: envDraft.access_token } : {}),
         ...(envDraft.access_token_source === 'env' ? { clear_access_token: true } : {}),
       }, { headers: { 'X-Workspace': ws } });
@@ -472,6 +475,10 @@ export default function AutomationSettingsPage() {
                   <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">Phone Number ID (for this workspace inbox)</div>
                     <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.phone_number_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, phone_number_id: e.target.value }))} />
+                  </div>
+                  <div className="md:col-span-2">
+                    <div className="text-xs text-slate-500 mb-1">Meta App ID (per workspace)</div>
+                    <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.meta_app_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, meta_app_id: e.target.value }))} />
                   </div>
                   <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">WhatsApp Business Account ID (WABA ID)</div>

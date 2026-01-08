@@ -175,6 +175,11 @@ def _catalog_cache_file_for(workspace: str, catalog_id: str | None = None) -> st
         return CATALOG_CACHE_FILE
     return f"catalog_cache_{ws}{'_' + cid if cid else ''}.json"
 
+def _ws_setting_key(base_key: str, workspace: str | None = None) -> str:
+    """Namespace a settings key by workspace so a shared DB can still isolate settings."""
+    ws = _coerce_workspace(workspace or get_current_workspace())
+    return f"{str(base_key or '').strip()}::{ws}"
+
 async def _get_effective_catalog_id(workspace: str | None = None) -> str:
     """Resolve catalog_id for a workspace (DB override -> env per-workspace -> global env)."""
     ws = _coerce_workspace(workspace or get_current_workspace())
@@ -3634,6 +3639,22 @@ class DatabaseManager:
                 await db.execute(query, params)
                 await db.commit()
 
+    async def delete_setting(self, key: str) -> None:
+        """Delete a settings key (best-effort)."""
+        if not key:
+            return
+        async with self._conn() as db:
+            query = self._convert("DELETE FROM settings WHERE key = ?")
+            params = (key,)
+            try:
+                if self.use_postgres:
+                    await db.execute(query, *params)
+                else:
+                    await db.execute(query, params)
+                    await db.commit()
+            except Exception:
+                return
+
     # ── Automation stats (durable) ────────────────────────────────
     async def _ensure_automation_stats_table(self) -> None:
         """Ensure automation_rule_stats table exists (best-effort)."""
@@ -4208,7 +4229,10 @@ class MessageProcessor:
         # Overrides from DB (optional)
         overrides: dict = {}
         try:
-            raw = await self.db_manager.get_setting("inbox_env")
+            raw = await self.db_manager.get_setting(_ws_setting_key("inbox_env", ws))
+            if (not raw) and ws == _coerce_workspace(DEFAULT_WORKSPACE):
+                # Back-compat: older deployments stored default workspace under the plain key.
+                raw = await self.db_manager.get_setting("inbox_env")
             overrides = json.loads(raw) if raw else {}
         except Exception:
             overrides = {}
@@ -8355,7 +8379,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         "catalog_id": catalog_id,
         "phone_number_id": phone_number_id,
     }
-    await db_manager.set_setting("inbox_env", stored)
+    await db_manager.set_setting(_ws_setting_key("inbox_env", get_current_workspace()), stored)
     # Bust cache for immediate effect
     try:
         ws = _coerce_workspace(get_current_workspace())
@@ -8488,16 +8512,16 @@ async def admin_upsert_workspace(payload: dict = Body(...), _: dict = Depends(re
             src_mgr = db_manager._mgr(copy_from)  # type: ignore[attr-defined]
             dst_mgr = db_manager._mgr(ws_id)      # type: ignore[attr-defined]
             try:
-                raw_env = await src_mgr.get_setting("inbox_env")
+                raw_env = await src_mgr.get_setting(_ws_setting_key("inbox_env", copy_from))
                 if raw_env:
-                    await dst_mgr.set_setting("inbox_env", json.loads(raw_env))
+                    await dst_mgr.set_setting(_ws_setting_key("inbox_env", ws_id), json.loads(raw_env))
                     copied["inbox_env"] = True
             except Exception:
                 copied["inbox_env"] = False
             try:
-                raw_cf = await src_mgr.get_setting("catalog_filters")
+                raw_cf = await src_mgr.get_setting(_ws_setting_key("catalog_filters", copy_from))
                 if raw_cf:
-                    await dst_mgr.set_setting("catalog_filters", json.loads(raw_cf))
+                    await dst_mgr.set_setting(_ws_setting_key("catalog_filters", ws_id), json.loads(raw_cf))
                     copied["catalog_filters"] = True
             except Exception:
                 copied["catalog_filters"] = False
@@ -8507,12 +8531,70 @@ async def admin_upsert_workspace(payload: dict = Body(...), _: dict = Depends(re
     return {"ok": True, "id": ws_id, "label": label, "short": short, "copied": copied}
 
 
+@app.delete("/admin/workspaces/{workspace_id}")
+async def admin_delete_workspace(workspace_id: str, _: dict = Depends(require_admin)):
+    """Delete a workspace from the DB registry and remove its stored settings.
+
+    Notes:
+    - We do NOT allow deleting env-defined workspaces (WORKSPACES) or the DEFAULT_WORKSPACE.
+    - For SQLite tenant DBs, we attempt to delete the derived DB file for that workspace.
+    """
+    ws_id = _normalize_workspace_id(workspace_id or "")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="Missing workspace id")
+    if ws_id == _coerce_workspace(DEFAULT_WORKSPACE):
+        raise HTTPException(status_code=400, detail="Cannot delete default workspace")
+    if ws_id in (WORKSPACES or []):
+        raise HTTPException(status_code=400, detail="Cannot delete env workspace; remove it from WORKSPACES env")
+
+    # Remove from registry
+    reg = await _load_workspace_registry()
+    next_reg = [x for x in (reg or []) if _normalize_workspace_id((x or {}).get("id") or "") != ws_id]
+    await _save_workspace_registry(next_reg)
+
+    # Remove from dynamic set
+    try:
+        DYNAMIC_WORKSPACES.discard(ws_id)
+    except Exception:
+        pass
+
+    # Remove workspace-scoped settings keys (best-effort)
+    deleted_keys: list[str] = []
+    try:
+        for base in ("inbox_env", "catalog_filters"):
+            k = _ws_setting_key(base, ws_id)
+            try:
+                await db_manager.delete_setting(k)
+                deleted_keys.append(k)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Best-effort delete tenant SQLite DB file if present
+    deleted_files: list[str] = []
+    try:
+        p = (TENANT_DB_PATHS or {}).get(ws_id) or _derive_tenant_db_path(DB_PATH, ws_id)
+        if p and str(p).lower().endswith(".db") and os.path.exists(p):
+            try:
+                os.remove(p)
+                deleted_files.append(str(p))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {"ok": True, "deleted": ws_id, "deleted_keys": deleted_keys, "deleted_files": deleted_files}
+
+
 @app.get("/admin/catalog-filters")
 async def get_catalog_filters_admin(_: dict = Depends(require_admin)):
     """Get catalog filter buttons for the current workspace (DB override if present)."""
     ws = get_current_workspace()
     try:
-        raw = await db_manager.get_setting("catalog_filters")
+        raw = await db_manager.get_setting(_ws_setting_key("catalog_filters", ws))
+        if (not raw) and ws == _coerce_workspace(DEFAULT_WORKSPACE):
+            raw = await db_manager.get_setting("catalog_filters")
         data = json.loads(raw) if raw else None
         if isinstance(data, list) and len(data) >= 2:
             return {"workspace": ws, "catalogFilters": data}
@@ -8560,7 +8642,7 @@ async def set_catalog_filters_admin(payload: dict = Body(...), _: dict = Depends
     if not isinstance(filters, list) or len(filters) < 2:
         raise HTTPException(status_code=400, detail="catalogFilters must be a list (2-3 items)")
     # Store as-is (frontend expects this exact structure)
-    await db_manager.set_setting("catalog_filters", filters)
+    await db_manager.set_setting(_ws_setting_key("catalog_filters", ws), filters)
     return {"ok": True, "workspace": ws, "saved": filters}
 
 
@@ -9751,7 +9833,9 @@ async def app_config(request: Request):
         # Prefer DB overrides for catalog filters (admin-managed per workspace).
         db_filters = None
         try:
-            raw_cf = await db_manager.get_setting("catalog_filters")
+            raw_cf = await db_manager.get_setting(_ws_setting_key("catalog_filters", ws))
+            if (not raw_cf) and ws == _coerce_workspace(DEFAULT_WORKSPACE):
+                raw_cf = await db_manager.get_setting("catalog_filters")
             tmp = json.loads(raw_cf) if raw_cf else None
             if isinstance(tmp, list) and len(tmp) >= 2:
                 db_filters = tmp

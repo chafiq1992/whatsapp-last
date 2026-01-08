@@ -204,6 +204,41 @@ export default function AutomationSettingsPage() {
     }
   };
 
+  const deleteWorkspace = async () => {
+    const ws = normalizeWorkspaceId(workspace);
+    if (!ws) return;
+    if (!selectedWsObj || String(selectedWsObj.source || '') !== 'db') {
+      setError('Only DB workspaces can be deleted.');
+      return;
+    }
+    if (ws === normalizeWorkspaceId(reservedDefaultWorkspace())) {
+      setError('Cannot delete default workspace.');
+      return;
+    }
+    const ok1 = window.confirm(`Delete workspace "${ws}" permanently?\n\nThis will remove it from the workspace list and delete its saved settings. This cannot be undone.`);
+    if (!ok1) return;
+    const ok2 = window.confirm(`Final confirmation:\n\nDelete "${ws}" now?`);
+    if (!ok2) return;
+    setSavingWorkspace(true);
+    setError('');
+    try {
+      await api.delete(`/admin/workspaces/${encodeURIComponent(ws)}`);
+      const list = await loadWorkspaces();
+      const next = normalizeWorkspaceId(list?.[0]?.id) || 'irranova';
+      try { localStorage.setItem('workspace', next); } catch {}
+      setWorkspace(next);
+    } catch (e) {
+      setError('Failed to delete workspace.');
+    } finally {
+      setSavingWorkspace(false);
+    }
+  };
+
+  function reservedDefaultWorkspace() {
+    // Best-effort: align with backend DEFAULT_WORKSPACE (fallback).
+    return 'irranova';
+  }
+
   if (!allowed && loading) return null;
   if (!allowed) return null;
 
@@ -317,6 +352,20 @@ export default function AutomationSettingsPage() {
                   <button type="button" className="px-3 py-1.5 rounded bg-gray-800 text-white disabled:opacity-50" disabled={savingWorkspace} onClick={saveWorkspaceMeta}>
                     {savingWorkspace ? 'Saving…' : 'Save workspace'}
                   </button>
+                  {selectedWsObj?.source === 'db' && normalizeWorkspaceId(workspace) !== normalizeWorkspaceId(reservedDefaultWorkspace()) && (
+                    <div className="pt-2 border-t">
+                      <button
+                        type="button"
+                        className="px-3 py-1.5 rounded bg-rose-600 text-white disabled:opacity-50"
+                        disabled={savingWorkspace}
+                        onClick={deleteWorkspace}
+                        title="Permanently delete this workspace"
+                      >
+                        {savingWorkspace ? 'Working…' : 'Delete workspace'}
+                      </button>
+                      <div className="text-[11px] text-rose-700 mt-1">Warning: this is permanent.</div>
+                    </div>
+                  )}
                 </div>
               </div>
 

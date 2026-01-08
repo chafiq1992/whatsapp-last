@@ -25,7 +25,14 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
             challenge = params.get("hub.challenge")
 
             rt.vlog(f"🔐 Webhook verification: mode={mode}, token={token}, challenge={challenge}")
-            if mode == "subscribe" and token == rt.verify_token and challenge:
+            ok_token = False
+            try:
+                ok_token = bool(token) and (
+                    token == rt.verify_token or token in (rt.verify_tokens or set())
+                )
+            except Exception:
+                ok_token = bool(token) and (token == rt.verify_token)
+            if mode == "subscribe" and ok_token and challenge:
                 rt.vlog("✅ Webhook verified successfully")
                 return PlainTextResponse(challenge)
             rt.vlog("❌ Webhook verification failed")
@@ -63,8 +70,10 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                     f"⏭️ Webhook ignored at ingress for phone_number_id {incoming_phone_id} (allowed {sorted(list(rt.allowed_phone_number_ids))[:10]})"
                 )
                 return {"ok": True}
-            ws = rt.phone_id_to_workspace.get(incoming_phone_id) or rt.default_workspace
-            data["_workspace"] = rt.coerce_workspace(ws)
+            # Only attach a workspace hint when we have a concrete mapping.
+            ws = rt.phone_id_to_workspace.get(incoming_phone_id) if incoming_phone_id else None
+            if ws:
+                data["_workspace"] = rt.coerce_workspace(ws)
         except Exception:
             pass
 

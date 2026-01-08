@@ -41,6 +41,7 @@ export default function AutomationSettingsPage() {
     catalog_id: '',
     phone_number_id: '',
     meta_app_id: '',
+    webhook_verify_token: '',
     access_token: '',
     access_token_present: false,
     access_token_hint: '',
@@ -90,6 +91,7 @@ export default function AutomationSettingsPage() {
       catalog_id: String(d.catalog_id || ''),
       phone_number_id: String(d.phone_number_id || ''),
       meta_app_id: String(d.meta_app_id || ''),
+      webhook_verify_token: '',
       access_token: '',
       access_token_present: Boolean(d.access_token_present),
       access_token_hint: String(d.access_token_hint || ''),
@@ -185,6 +187,7 @@ export default function AutomationSettingsPage() {
         catalog_id: envDraft.catalog_id,
         phone_number_id: envDraft.phone_number_id,
         meta_app_id: envDraft.meta_app_id,
+        ...(envDraft.webhook_verify_token ? { webhook_verify_token: envDraft.webhook_verify_token } : {}),
         ...(envDraft.access_token ? { access_token: envDraft.access_token } : {}),
         ...(envDraft.access_token_source === 'env' ? { clear_access_token: true } : {}),
       }, { headers: { 'X-Workspace': ws } });
@@ -479,6 +482,19 @@ export default function AutomationSettingsPage() {
                   <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">Meta App ID (per workspace)</div>
                     <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.meta_app_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, meta_app_id: e.target.value }))} />
+                  </div>
+                  <div className="md:col-span-2">
+                    <div className="text-xs text-slate-500 mb-1">Webhook Verify Token (optional)</div>
+                    <input
+                      type="password"
+                      className="w-full border rounded px-2 py-1 font-mono text-xs"
+                      value={envDraft.webhook_verify_token || ''}
+                      onChange={(e)=>setEnvDraft((d)=>({ ...d, webhook_verify_token: e.target.value }))}
+                      placeholder="Leave empty to keep current"
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Meta verification uses a single token for the webhook URL. This is optional; you can keep using the Cloud Run env token.
+                    </div>
                   </div>
                   <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">WhatsApp Business Account ID (WABA ID)</div>

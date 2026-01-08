@@ -23,6 +23,8 @@ class WebhookRuntime:
 
     # Webhook verification/config
     verify_token: str
+    # Optional: allow multiple verification tokens (e.g., DB-managed) for the same webhook URL.
+    verify_tokens: Set[str]
     meta_app_secret: str
     allowed_phone_number_ids: Set[str]
     phone_id_to_workspace: Dict[str, str]

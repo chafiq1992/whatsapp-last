@@ -734,6 +734,7 @@ except Exception:
 # We seed with env values for backwards compatibility, but DB settings can override per workspace.
 RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE: Dict[str, dict] = dict(WHATSAPP_CONFIG_BY_WORKSPACE or {})
 RUNTIME_PHONE_ID_TO_WORKSPACE: Dict[str, str] = dict(PHONE_ID_TO_WORKSPACE or {})
+RUNTIME_WEBHOOK_VERIFY_TOKENS: set[str] = set([str(VERIFY_TOKEN or "").strip()]) if str(VERIFY_TOKEN or "").strip() else set()
 
 def _is_placeholder_token(tok: str | None) -> bool:
     t = str(tok or "").strip()
@@ -4320,6 +4321,7 @@ class MessageProcessor:
             "catalog_id": "1234567890",
             "phone_number_id": "1234567890",
             "meta_app_id": "1234567890"
+            ,"webhook_verify_token": "..."
           }
         """
         ws = _coerce_workspace(workspace or get_current_workspace())
@@ -4394,6 +4396,7 @@ class MessageProcessor:
         phone_effective = str((overrides or {}).get("phone_number_id") or "").strip() or phone_default or None
         token_effective = str((overrides or {}).get("access_token") or "").strip() or token_default or None
         meta_app_id_effective = str((overrides or {}).get("meta_app_id") or "").strip() or meta_app_id_default or None
+        webhook_verify_token_effective = str((overrides or {}).get("webhook_verify_token") or "").strip() or (str(VERIFY_TOKEN or "").strip() or None)
 
         out = {
             "workspace": ws,
@@ -4405,6 +4408,7 @@ class MessageProcessor:
             "phone_number_id": phone_effective,
             "access_token": token_effective,
             "meta_app_id": meta_app_id_effective,
+            "webhook_verify_token": webhook_verify_token_effective,
             "overrides": overrides,
         }
         try:
@@ -6887,9 +6891,12 @@ webhook_runtime = WebhookRuntime(
     coerce_workspace=_coerce_workspace,
     vlog=_vlog,
     verify_token=VERIFY_TOKEN,
+    verify_tokens=RUNTIME_WEBHOOK_VERIFY_TOKENS,
     meta_app_secret=META_APP_SECRET,
-    allowed_phone_number_ids=set(ALLOWED_PHONE_NUMBER_IDS or set()),
-    phone_id_to_workspace=dict(PHONE_ID_TO_WORKSPACE or {}),
+    # Do NOT block ingress by a static env allowlist; routing is enforced later per-workspace.
+    allowed_phone_number_ids=set(),
+    # Use runtime mapping (DB-driven) so new workspace phone ids work without redeploy.
+    phone_id_to_workspace=RUNTIME_PHONE_ID_TO_WORKSPACE,
     default_workspace=DEFAULT_WORKSPACE,
     use_redis_stream=bool(WEBHOOK_USE_REDIS_STREAM),
     stream_key=WEBHOOK_STREAM_KEY,
@@ -7182,6 +7189,18 @@ async def startup():
             for w in sorted(list(_all_workspaces_set())):
                 try:
                     await _sync_whatsapp_runtime_for_workspace(w)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        # Best-effort: accept DB-provided webhook verify tokens (Meta still uses only one token per URL).
+        try:
+            for w in sorted(list(_all_workspaces_set())):
+                try:
+                    cfg = await message_processor._get_inbox_env(w)
+                    vt = str((cfg.get("overrides") or {}).get("webhook_verify_token") or "").strip()
+                    if vt:
+                        RUNTIME_WEBHOOK_VERIFY_TOKENS.add(vt)
                 except Exception:
                     continue
         except Exception:
@@ -8497,6 +8516,7 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "catalog_id": cfg.get("catalog_id") or "",
             "phone_number_id": cfg.get("phone_number_id") or "",
             "meta_app_id": cfg.get("meta_app_id") or "",
+            "webhook_verify_token_present": bool(str((cfg.get("overrides") or {}).get("webhook_verify_token") or "").strip()),
             "access_token_present": tok_present,
             "access_token_source": tok_source,
             "access_token_hint": tok_hint,
@@ -8540,6 +8560,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     catalog_id = str((payload or {}).get("catalog_id") or "").strip()
     phone_number_id = str((payload or {}).get("phone_number_id") or "").strip()
     meta_app_id = str((payload or {}).get("meta_app_id") or "").strip()
+    webhook_verify_token = str((payload or {}).get("webhook_verify_token") or "").strip()
     access_token_in = str((payload or {}).get("access_token") or "").strip()
     clear_access_token = bool((payload or {}).get("clear_access_token"))
 
@@ -8572,6 +8593,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         "catalog_id": catalog_id,
         "phone_number_id": phone_number_id,
         "meta_app_id": meta_app_id,
+        "webhook_verify_token": webhook_verify_token,
         **(
             {}
             if clear_access_token
@@ -8589,6 +8611,14 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     # Update runtime WhatsApp routing immediately (no redeploy needed).
     try:
         await _sync_whatsapp_runtime_for_workspace(ws_now)
+    except Exception:
+        pass
+    # Update accepted verify tokens for webhook verification (best-effort).
+    try:
+        if webhook_verify_token:
+            RUNTIME_WEBHOOK_VERIFY_TOKENS.add(webhook_verify_token)
+        elif str(VERIFY_TOKEN or "").strip():
+            RUNTIME_WEBHOOK_VERIFY_TOKENS.add(str(VERIFY_TOKEN or "").strip())
     except Exception:
         pass
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}

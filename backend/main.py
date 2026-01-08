@@ -197,6 +197,37 @@ async def _get_effective_catalog_id(workspace: str | None = None) -> str:
     except Exception:
         return str(CATALOG_ID or "").strip()
 
+async def _sync_whatsapp_runtime_for_workspace(workspace: str) -> None:
+    """Load DB-configured WhatsApp creds for a workspace into runtime router + phone map (best-effort)."""
+    ws = _coerce_workspace(workspace)
+    if not ws:
+        return
+    try:
+        cfg = await message_processor._get_inbox_env(ws)
+    except Exception:
+        cfg = {}
+    phone_id = str((cfg or {}).get("phone_number_id") or "").strip()
+    token = str((cfg or {}).get("access_token") or "").strip()
+    # Only update if meaningful; keep env fallback otherwise.
+    try:
+        if phone_id and not _is_placeholder_phone(phone_id):
+            RUNTIME_PHONE_ID_TO_WORKSPACE[phone_id] = ws
+    except Exception:
+        pass
+    try:
+        prev = RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE.get(ws) or {}
+        new_token = token if (token and not _is_placeholder_token(token)) else str(prev.get("access_token") or "")
+        new_phone = phone_id if (phone_id and not _is_placeholder_phone(phone_id)) else str(prev.get("phone_number_id") or "")
+        RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE[ws] = {"access_token": new_token, "phone_number_id": new_phone}
+    except Exception:
+        pass
+    # Update active router client immediately
+    try:
+        if hasattr(message_processor, "whatsapp_messenger") and hasattr(message_processor.whatsapp_messenger, "update_workspace_config"):
+            message_processor.whatsapp_messenger.update_workspace_config(ws, access_token=token or None, phone_number_id=phone_id or None)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
 # Backwards-compatibility shim for tests and existing imports expecting `main.config`
 try:
     from types import SimpleNamespace
@@ -698,6 +729,19 @@ try:
             PHONE_ID_TO_WORKSPACE[pid] = str(w).strip().lower()
 except Exception:
     PHONE_ID_TO_WORKSPACE = {}
+
+# Runtime WhatsApp routing state (can be updated from DB settings without redeploy).
+# We seed with env values for backwards compatibility, but DB settings can override per workspace.
+RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE: Dict[str, dict] = dict(WHATSAPP_CONFIG_BY_WORKSPACE or {})
+RUNTIME_PHONE_ID_TO_WORKSPACE: Dict[str, str] = dict(PHONE_ID_TO_WORKSPACE or {})
+
+def _is_placeholder_token(tok: str | None) -> bool:
+    t = str(tok or "").strip()
+    return (not t) or (t == "your_access_token_here")
+
+def _is_placeholder_phone(pid: str | None) -> bool:
+    p = str(pid or "").strip()
+    return (not p) or (p == "your_phone_number_id")
 
 # When set, only process webhooks for these phone number ids (comma-separated).
 # Defaults to the configured phone_number_id(s) when available.
@@ -1328,8 +1372,10 @@ class RedisManager:
 # WhatsApp API Client
 class WhatsAppMessenger:
     def __init__(self, access_token: str | None = None, phone_number_id: str | None = None):
-        self.access_token = (access_token or ACCESS_TOKEN or "").strip()
-        self.phone_number_id = (phone_number_id or PHONE_NUMBER_ID or "").strip()
+        # Important: only fall back to env when the param is None.
+        # Passing an empty string should NOT silently fall back to env; it should behave as "not configured".
+        self.access_token = (str(ACCESS_TOKEN or "") if access_token is None else str(access_token or "")).strip()
+        self.phone_number_id = (str(PHONE_NUMBER_ID or "") if phone_number_id is None else str(phone_number_id or "")).strip()
         self._rebuild()
 
     def _rebuild(self) -> None:
@@ -1354,6 +1400,28 @@ class WorkspaceWhatsAppRouter:
                 )
             except Exception:
                 continue
+
+    def update_workspace_config(self, workspace: str, access_token: str | None = None, phone_number_id: str | None = None) -> None:
+        """Update in-memory routing for a workspace (used after DB settings save/startup)."""
+        ws = _coerce_workspace(workspace)
+        if not ws:
+            return
+        prev = (self._configs or {}).get(ws) or {}
+        next_cfg = {
+            "access_token": str(access_token if access_token is not None else prev.get("access_token") or "").strip(),
+            "phone_number_id": str(phone_number_id if phone_number_id is not None else prev.get("phone_number_id") or "").strip(),
+        }
+        try:
+            self._configs[ws] = next_cfg
+        except Exception:
+            pass
+        try:
+            self._clients[ws] = WhatsAppMessenger(
+                access_token=str(next_cfg.get("access_token") or ""),
+                phone_number_id=str(next_cfg.get("phone_number_id") or ""),
+            )
+        except Exception:
+            pass
 
     def _client(self, workspace: str | None = None) -> WhatsAppMessenger:
         ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
@@ -4101,7 +4169,8 @@ class MessageProcessor:
         self.connection_manager = connection_manager
         self.redis_manager = redis_manager
         self.db_manager = db_manager
-        self.whatsapp_messenger = WorkspaceWhatsAppRouter(WHATSAPP_CONFIG_BY_WORKSPACE)
+        # Seed routing from env for backwards compat; runtime can be updated from DB settings without redeploy.
+        self.whatsapp_messenger = WorkspaceWhatsAppRouter(RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE)
         self.media_dir = MEDIA_DIR
         self.media_dir.mkdir(exist_ok=True)
         # Best-effort in-memory cache for automation rules (workspace-scoped)
@@ -4215,6 +4284,7 @@ class MessageProcessor:
         # Defaults for new fields
         catalog_default: str = ""
         phone_default: str = ""
+        token_default: str = ""
         try:
             # Allow per-workspace env override: CATALOG_ID_<WS>
             suf = re.sub(r"[^A-Z0-9]+", "_", str(ws or "").strip().upper())
@@ -4225,6 +4295,10 @@ class MessageProcessor:
             phone_default = str((WHATSAPP_CONFIG_BY_WORKSPACE or {}).get(ws, {}).get("phone_number_id") or "").strip() or str(PHONE_NUMBER_ID or "").strip()
         except Exception:
             phone_default = str(PHONE_NUMBER_ID or "").strip()
+        try:
+            token_default = str((WHATSAPP_CONFIG_BY_WORKSPACE or {}).get(ws, {}).get("access_token") or "").strip() or str(ACCESS_TOKEN or "").strip()
+        except Exception:
+            token_default = str(ACCESS_TOKEN or "").strip()
 
         # Overrides from DB (optional)
         overrides: dict = {}
@@ -4259,6 +4333,7 @@ class MessageProcessor:
         auto_reply_effective = set([_digits_only(str(x).strip()) for x in auto_reply_override_raw if str(x).strip()]) if auto_reply_override_raw else auto_reply_default
         catalog_effective = str((overrides or {}).get("catalog_id") or "").strip() or catalog_default or None
         phone_effective = str((overrides or {}).get("phone_number_id") or "").strip() or phone_default or None
+        token_effective = str((overrides or {}).get("access_token") or "").strip() or token_default or None
 
         out = {
             "workspace": ws,
@@ -4268,6 +4343,7 @@ class MessageProcessor:
             "waba_id": str((overrides or {}).get("waba_id") or "").strip() or None,
             "catalog_id": catalog_effective,
             "phone_number_id": phone_effective,
+            "access_token": token_effective,
             "overrides": overrides,
         }
         try:
@@ -5164,7 +5240,8 @@ class MessageProcessor:
             except Exception:
                 hinted_ws = None
 
-            derived_ws = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else (PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or DEFAULT_WORKSPACE)
+            # Prefer runtime mapping (can be updated from DB settings). Fallback to env-derived mapping.
+            derived_ws = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else ((RUNTIME_PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or PHONE_ID_TO_WORKSPACE.get(incoming_phone_id)) or DEFAULT_WORKSPACE)
             ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(derived_ws))
 
             # Optional: Filter by phone_number_id allowlist (supports multiple IDs)
@@ -7020,6 +7097,16 @@ async def startup():
         except Exception:
             pass
 
+        # Best-effort: load WhatsApp routing config from DB per workspace so UI-created workspaces work without env.
+        try:
+            for w in sorted(list(_all_workspaces_set())):
+                try:
+                    await _sync_whatsapp_runtime_for_workspace(w)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         # 2) Tenant DB(s) (log per-workspace failures explicitly so we can spot misconfigured NOVA DBs)
         tenant_errors: list[tuple[str, str]] = []
         if ENABLE_MULTI_WORKSPACE:
@@ -8312,6 +8399,9 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
     """Return effective inbox env settings (DB overrides layered on env defaults)."""
     cfg = await message_processor._get_inbox_env(get_current_workspace())
     try:
+        tok = str(cfg.get("access_token") or "").strip()
+        tok_present = bool(tok and not _is_placeholder_token(tok))
+        tok_hint = (tok[-4:] if tok_present and len(tok) >= 4 else "")
         return {
             "workspace": cfg.get("workspace") or get_current_workspace(),
             "allowed_phone_number_ids": sorted(list(cfg.get("allowed_phone_number_ids") or [])),
@@ -8320,6 +8410,8 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "waba_id": cfg.get("waba_id") or "",
             "catalog_id": cfg.get("catalog_id") or "",
             "phone_number_id": cfg.get("phone_number_id") or "",
+            "access_token_present": tok_present,
+            "access_token_hint": tok_hint,
             "overrides": cfg.get("overrides") or {},
         }
     except Exception:
@@ -8359,6 +8451,7 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     waba_id = str((payload or {}).get("waba_id") or "").strip()
     catalog_id = str((payload or {}).get("catalog_id") or "").strip()
     phone_number_id = str((payload or {}).get("phone_number_id") or "").strip()
+    access_token_in = str((payload or {}).get("access_token") or "").strip()
 
     # Normalize: dedupe while keeping stable order
     def _dedupe(xs: list[str]) -> list[str]:
@@ -8371,6 +8464,16 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
             out.append(x)
         return out
 
+    # Preserve existing access_token unless explicitly provided (security: do not echo token back in GET).
+    existing_token = ""
+    try:
+        raw_prev = await db_manager.get_setting(_ws_setting_key("inbox_env", get_current_workspace()))
+        prev_obj = json.loads(raw_prev) if raw_prev else {}
+        if isinstance(prev_obj, dict):
+            existing_token = str(prev_obj.get("access_token") or "").strip()
+    except Exception:
+        existing_token = ""
+
     stored = {
         "allowed_phone_number_ids": _dedupe(allowed),
         "survey_test_numbers": _dedupe(survey),
@@ -8378,12 +8481,19 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         "waba_id": waba_id,
         "catalog_id": catalog_id,
         "phone_number_id": phone_number_id,
+        **({"access_token": access_token_in} if access_token_in else ({"access_token": existing_token} if existing_token else {})),
     }
-    await db_manager.set_setting(_ws_setting_key("inbox_env", get_current_workspace()), stored)
+    ws_now = get_current_workspace()
+    await db_manager.set_setting(_ws_setting_key("inbox_env", ws_now), stored)
     # Bust cache for immediate effect
     try:
         ws = _coerce_workspace(get_current_workspace())
         message_processor._inbox_env_cache.pop(ws, None)
+    except Exception:
+        pass
+    # Update runtime WhatsApp routing immediately (no redeploy needed).
+    try:
+        await _sync_whatsapp_runtime_for_workspace(ws_now)
     except Exception:
         pass
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}

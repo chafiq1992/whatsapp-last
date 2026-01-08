@@ -15,6 +15,7 @@ export default function AutomationSettingsPage() {
   const [error, setError] = useState('');
 
   const [workspaces, setWorkspaces] = useState([]);
+  const [defaultWorkspace, setDefaultWorkspace] = useState('irranova');
   const [workspace, setWorkspace] = useState(() => {
     try { return (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch { return 'irranova'; }
   });
@@ -39,6 +40,9 @@ export default function AutomationSettingsPage() {
     waba_id: '',
     catalog_id: '',
     phone_number_id: '',
+    access_token: '',
+    access_token_present: false,
+    access_token_hint: '',
   });
   const [savingEnv, setSavingEnv] = useState(false);
 
@@ -49,6 +53,10 @@ export default function AutomationSettingsPage() {
 
   const loadWorkspaces = async () => {
     const res = await api.get('/admin/workspaces');
+    try {
+      const def = normalizeWorkspaceId(res?.data?.default);
+      if (def) setDefaultWorkspace(def);
+    } catch {}
     const list = Array.isArray(res?.data?.workspaces) ? res.data.workspaces : [];
     const norm = list
       .map((w) => ({
@@ -79,6 +87,9 @@ export default function AutomationSettingsPage() {
       waba_id: String(d.waba_id || ''),
       catalog_id: String(d.catalog_id || ''),
       phone_number_id: String(d.phone_number_id || ''),
+      access_token: '',
+      access_token_present: Boolean(d.access_token_present),
+      access_token_hint: String(d.access_token_hint || ''),
     });
   };
 
@@ -169,6 +180,7 @@ export default function AutomationSettingsPage() {
         waba_id: envDraft.waba_id,
         catalog_id: envDraft.catalog_id,
         phone_number_id: envDraft.phone_number_id,
+        ...(envDraft.access_token ? { access_token: envDraft.access_token } : {}),
       }, { headers: { 'X-Workspace': ws } });
       await loadInboxEnv(ws);
     } catch (e) {
@@ -235,8 +247,7 @@ export default function AutomationSettingsPage() {
   };
 
   function reservedDefaultWorkspace() {
-    // Best-effort: align with backend DEFAULT_WORKSPACE (fallback).
-    return 'irranova';
+    return defaultWorkspace || 'irranova';
   }
 
   if (!allowed && loading) return null;
@@ -411,6 +422,19 @@ export default function AutomationSettingsPage() {
                 <div className="px-3 py-2 border-b text-sm font-medium">Inbox environment (per workspace)</div>
                 <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div className="md:col-span-2">
+                    <div className="text-xs text-slate-500 mb-1">WhatsApp Access Token</div>
+                    <input
+                      type="password"
+                      className="w-full border rounded px-2 py-1 font-mono text-xs"
+                      value={envDraft.access_token || ''}
+                      onChange={(e)=>setEnvDraft((d)=>({ ...d, access_token: e.target.value }))}
+                      placeholder={envDraft.access_token_present ? `Saved (…${envDraft.access_token_hint || ''}) — leave blank to keep` : 'Paste token here'}
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      {envDraft.access_token_present ? 'Token is stored. Leave empty to keep it unchanged.' : 'Required for this workspace to send WhatsApp messages.'}
+                    </div>
+                  </div>
+                  <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">Catalog ID</div>
                     <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.catalog_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, catalog_id: e.target.value }))} />
                   </div>
@@ -444,7 +468,7 @@ export default function AutomationSettingsPage() {
 
               {selectedWsObj?.source === 'env' && (
                 <div className="text-xs text-slate-500">
-                  Note: this workspace exists in env (<span className="font-mono">WORKSPACES</span>). Labels/buttons can be overridden here in DB, but WhatsApp credentials still come from env vars.
+                  Note: this workspace exists in env (<span className="font-mono">WORKSPACES</span>). You can still override WhatsApp credentials per workspace here in DB (recommended to avoid redeploys).
                 </div>
               )}
             </div>

@@ -17,10 +17,13 @@ export default function MiniSidebar({
   onSwitchWorkspace,
 }) {
 	const [showDropdown, setShowDropdown] = useState(false);
+  const [showWsDropdown, setShowWsDropdown] = useState(false);
 	const [agents, setAgents] = useState([]);
   const [onlineAgents, setOnlineAgents] = useState([]);
 	const buttonRef = useRef(null);
 	const dropdownRef = useRef(null);
+  const wsButtonRef = useRef(null);
+  const wsDropdownRef = useRef(null);
   const [showNewChat, setShowNewChat] = useState(false);
   const [newChatValue, setNewChatValue] = useState('');
   const [workspacesConfig, setWorkspacesConfig] = useState({ workspaces: [], defaultWorkspace: '' });
@@ -106,6 +109,19 @@ export default function MiniSidebar({
 		return () => document.removeEventListener('mousedown', handler);
 	}, [showDropdown]);
 
+  useEffect(() => {
+    const handler = (e) => {
+      if (!showWsDropdown) return;
+      const t = e.target;
+      if (!wsDropdownRef.current || !wsButtonRef.current) return;
+      if (!wsDropdownRef.current.contains(t) && !wsButtonRef.current.contains(t)) {
+        setShowWsDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showWsDropdown]);
+
 	// Resolve display name for current agent (prefer friendly name if available)
 	const displayName = (() => {
 		try {
@@ -157,17 +173,6 @@ export default function MiniSidebar({
     return workspaces.find((w) => w.id === ws) || null;
   }, [workspaces, workspace]);
 
-  const nextWorkspaceId = useMemo(() => {
-    try {
-      const ws = String(workspace || '').trim().toLowerCase();
-      const idx = workspaces.findIndex((w) => w.id === ws);
-      const next = workspaces[(idx >= 0 ? (idx + 1) : 0) % Math.max(1, workspaces.length)];
-      return String(next?.id || '').trim().toLowerCase();
-    } catch {
-      return '';
-    }
-  }, [workspaces, workspace]);
-
   const workspaceButtonText = (() => {
     const s = String(currentWorkspaceObj?.short || currentWorkspaceObj?.label || workspace || '').trim();
     if (!s) return 'WS';
@@ -178,26 +183,55 @@ export default function MiniSidebar({
 		<div className="w-16 bg-gray-900 border-r border-gray-800 h-full flex flex-col items-center justify-between py-3 relative">
 			{/* Upper section */}
 			<div className="flex flex-col items-center gap-3">
-        <button
-          type="button"
-          title={`Switch workspace (current: ${String(currentWorkspaceObj?.label || workspace || '').toUpperCase()})`}
-          onClick={() => {
-            try {
-              const next = nextWorkspaceId || '';
-              if (next && typeof onSwitchWorkspace === 'function') onSwitchWorkspace(next);
-            } catch {}
-          }}
-          className={`w-12 h-10 rounded-xl flex items-center justify-center text-xs font-extrabold tracking-widest border transition-colors ${
-            (() => {
-              const idx = workspaces.findIndex((w) => w.id === String(workspace || '').toLowerCase());
-              if (idx === 1) return 'bg-[#004AAD] text-white border-[#004AAD]';
-              if (idx === 0) return 'bg-green-700 text-white border-green-700';
-              return 'bg-gray-800 text-white border-gray-700';
-            })()
-          }`}
-        >
-          {workspaceButtonText}
-        </button>
+        <div className="relative">
+          <button
+            ref={wsButtonRef}
+            type="button"
+            title={`Workspace: ${String(currentWorkspaceObj?.label || workspace || '').toUpperCase()}`}
+            onClick={() => setShowWsDropdown(v => !v)}
+            className={`w-12 h-10 rounded-xl flex items-center justify-center text-xs font-extrabold tracking-widest border transition-colors ${
+              (() => {
+                const idx = workspaces.findIndex((w) => w.id === String(workspace || '').toLowerCase());
+                if (idx === 1) return 'bg-[#004AAD] text-white border-[#004AAD]';
+                if (idx === 0) return 'bg-green-700 text-white border-green-700';
+                return 'bg-gray-800 text-white border-gray-700';
+              })()
+            }`}
+          >
+            {workspaceButtonText}
+          </button>
+          {showWsDropdown && (
+            <div
+              ref={wsDropdownRef}
+              className="absolute left-16 top-0 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 w-56 max-h-72 overflow-auto"
+            >
+              <div className="p-2 text-sm text-gray-300 border-b border-gray-800 sticky top-0 bg-gray-900">
+                Workspaces
+              </div>
+              <div className="p-1">
+                {(workspaces || []).map((w) => (
+                  <button
+                    key={`ws:${w.id}`}
+                    type="button"
+                    onClick={() => {
+                      try {
+                        if (typeof onSwitchWorkspace === 'function') onSwitchWorkspace(w.id);
+                        setShowWsDropdown(false);
+                      } catch {}
+                    }}
+                    className={`w-full flex items-center justify-between gap-2 px-2 py-2 hover:bg-gray-800 rounded text-left ${
+                      String(w.id) === String(workspace || '').toLowerCase() ? 'bg-gray-800' : ''
+                    }`}
+                    title={String(w.label || w.id)}
+                  >
+                    <span className="truncate text-gray-200">{String(w.label || w.id)}</span>
+                    <span className="text-xs text-gray-400 font-mono">{String(w.short || '').toUpperCase()}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
 				<button
 					type="button"
 					title="New chat"

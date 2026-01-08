@@ -7898,30 +7898,88 @@ async def set_tag_options_endpoint(payload: dict = Body(...), _: dict = Depends(
 
 # ---- Automation rules (global store, scoped per rule) ----
 @app.get("/automation/rules")
-async def get_automation_rules_endpoint(_: dict = Depends(require_admin)):
-    """Return saved automation rules (shared store).
+async def get_automation_rules_endpoint(request: Request, _: dict = Depends(require_admin)):
+    """Return automation rules for the current workspace by default.
 
-    Each rule may include:
-      - workspaces: ["*"] for all workspaces, or ["irranova","irrakids"] for selected workspaces.
+    Query params:
+      - all=1 : return all rules (admin/debug)
     """
+    ws = _coerce_workspace(get_current_workspace())
+    all_q = ""
     try:
-        rules = await message_processor._ensure_automation_rules_v2()
-        if not isinstance(rules, list):
-            rules = []
+        all_q = str(request.query_params.get("all") or "").strip().lower()
     except Exception:
-        rules = []
-    return rules
+        all_q = ""
+    want_all = all_q in ("1", "true", "yes")
+
+    try:
+        rules_all = await message_processor._ensure_automation_rules_v2()
+        if not isinstance(rules_all, list):
+            rules_all = []
+    except Exception:
+        rules_all = []
+
+    if want_all:
+        return rules_all
+
+    # Filter to rules that apply to this workspace
+    out: list[dict] = []
+    for r in rules_all or []:
+        try:
+            if not isinstance(r, dict):
+                continue
+            scopes = r.get("workspaces")
+            # Missing scopes: treat as current workspace (legacy/migrated safety)
+            if scopes is None:
+                out.append(r)
+                continue
+            if isinstance(scopes, list):
+                s = set([_normalize_workspace_id(x) for x in scopes if _normalize_workspace_id(x)])
+                if ("*" in s) or (ws in s):
+                    out.append(r)
+                continue
+            # Unknown shape -> include (better to show than hide)
+            out.append(r)
+        except Exception:
+            continue
+    return out
 
 
 @app.post("/automation/rules")
-async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
-    """Replace automation rules in the shared store (scoped per rule)."""
+async def set_automation_rules_endpoint(request: Request, payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Save automation rules for the current workspace (merge into global store).
+
+    Default behavior restores the "old method":
+    - The UI edits the workspace's list.
+    - Saving should not overwrite other workspaces' rules.
+    - If a rule is removed from this workspace list, we remove this workspace from its scope
+      (and delete the rule entirely if it no longer applies anywhere).
+
+    Query params:
+      - full=1 : replace the global list entirely (admin/debug)
+    """
     rules = payload.get("rules")
     if not isinstance(rules, list):
         raise HTTPException(status_code=400, detail="rules must be a list")
 
+    full_q = ""
+    try:
+        full_q = str(request.query_params.get("full") or "").strip().lower()
+    except Exception:
+        full_q = ""
+    full_replace = full_q in ("1", "true", "yes")
+
+    ws = _coerce_workspace(get_current_workspace())
+
+    # Load current global store
+    try:
+        existing_all = await message_processor._ensure_automation_rules_v2()
+        if not isinstance(existing_all, list):
+            existing_all = []
+    except Exception:
+        existing_all = []
+
     cleaned: list[dict] = []
-    current_ws = _coerce_workspace(get_current_workspace())
     for r in rules:
         if not isinstance(r, dict):
             continue
@@ -7970,7 +8028,7 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
         scopes: list[str] = []
         try:
             if ws_scope is None:
-                scopes = [current_ws]
+                scopes = [ws]
             elif isinstance(ws_scope, str):
                 v = ws_scope.strip().lower()
                 if v in ("*", "all", "all_workspaces"):
@@ -7980,19 +8038,22 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
             elif isinstance(ws_scope, list):
                 scopes = [_normalize_workspace_id(x) for x in ws_scope if _normalize_workspace_id(x)]
             else:
-                scopes = [current_ws]
+                scopes = [ws]
         except Exception:
-            scopes = [current_ws]
+            scopes = [ws]
         if "*" in scopes:
             scopes = ["*"]
         if not scopes:
-            scopes = [current_ws]
+            scopes = [ws]
         # Keep only known workspaces unless using "*"
         if scopes != ["*"]:
             allowed = _all_workspaces_set()
             scopes = [s for s in scopes if s in allowed]
             if not scopes:
-                scopes = [current_ws]
+                scopes = [ws]
+            # Ensure the current workspace is included (old UX expectation)
+            if ws not in scopes:
+                scopes = [ws] + [s for s in scopes if s != ws]
         out_rule["workspaces"] = scopes
         if test_phones:
             out_rule["test_phone_numbers"] = test_phones
@@ -8001,13 +8062,61 @@ async def set_automation_rules_endpoint(payload: dict = Body(...), _: dict = Dep
     if len(cleaned) > 200:
         cleaned = cleaned[:200]
 
-    await auth_db_manager.set_setting("automation_rules_v2", cleaned)
+    if full_replace:
+        next_all = cleaned
+    else:
+        # Merge by workspace:
+        # - Upsert incoming rules by id
+        # - Any existing rule that applies to this workspace but is missing from incoming list
+        #   will have this workspace removed from its scope (or be deleted if no scopes remain).
+        by_id: dict[str, dict] = {}
+        for r in existing_all or []:
+            if isinstance(r, dict) and str(r.get("id") or "").strip():
+                by_id[str(r.get("id")).strip()] = r
+
+        incoming_ids = set([str(r.get("id") or "").strip() for r in cleaned if str(r.get("id") or "").strip()])
+
+        # Remove this workspace from rules not present anymore
+        for rid, rr in list(by_id.items()):
+            try:
+                scopes = rr.get("workspaces")
+                if scopes is None:
+                    continue
+                if not isinstance(scopes, list):
+                    continue
+                s = [_normalize_workspace_id(x) for x in scopes if _normalize_workspace_id(x)]
+                if "*" in s:
+                    continue  # global rule; don't implicitly remove from a single workspace
+                if ws in s and rid not in incoming_ids:
+                    s2 = [x for x in s if x != ws]
+                    if not s2:
+                        by_id.pop(rid, None)
+                    else:
+                        rr2 = dict(rr)
+                        rr2["workspaces"] = s2
+                        by_id[rid] = rr2
+            except Exception:
+                continue
+
+        # Upsert incoming rules (these may also target other workspaces)
+        for r in cleaned:
+            try:
+                rid = str(r.get("id") or "").strip()
+                if not rid:
+                    continue
+                by_id[rid] = r
+            except Exception:
+                continue
+
+        next_all = list(by_id.values())
+
+    await auth_db_manager.set_setting("automation_rules_v2", next_all)
     # Bust caches for immediate effect in webhook-triggered tasks
     try:
         message_processor._automation_rules_cache.clear()
     except Exception:
         pass
-    return {"ok": True, "count": len(cleaned)}
+    return {"ok": True, "workspace": ws, "count": len(cleaned)}
 
 
 @app.get("/automation/rules/stats")

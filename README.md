@@ -293,8 +293,31 @@ You can install everything with:
 pip install -r backend/requirements.txt -r requirements-test.txt
 ```
 
+If you cannot access the internet, populate the `wheelhouse` directory as
+described below and run `./scripts/install_offline.sh` instead of the command
+above.
+
 Then run the suite with:
 
 ```bash
 pytest
 ```
+
+## Offline Installation
+
+If the environment lacks internet access, pre-download the project dependencies
+on a machine that does:
+
+```bash
+pip download -d wheelhouse -r backend/requirements.txt -r requirements-test.txt
+```
+
+Copy the `wheelhouse` directory to the target machine and execute:
+
+```bash
+./scripts/install_offline.sh
+```
+
+The script installs both runtime and test requirements using only the local
+wheels so `pytest` can run without network connectivity. See
+`wheelhouse/README.md` for more information.

@@ -5452,11 +5452,20 @@ class MessageProcessor:
             try:
                 env_cfg = await self._get_inbox_env(get_current_workspace())
                 allowed_ids = set((env_cfg or {}).get("allowed_phone_number_ids") or set())
+                expected_pid2 = str((env_cfg or {}).get("phone_number_id") or "").strip()
                 if allowed_ids and incoming_phone_id and (incoming_phone_id not in allowed_ids):
-                    _vlog(
-                        f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (allowed {sorted(list(allowed_ids))[:10]})"
-                    )
-                    return
+                    # Safety: if allowlist is misconfigured but the incoming phone_number_id matches this workspace's
+                    # configured phone_number_id, do NOT drop inbound messages (warn and continue).
+                    if expected_pid2 and str(incoming_phone_id).strip() == expected_pid2:
+                        _vlog(
+                            f"⚠️ allowlist mismatch: incoming phone_number_id={incoming_phone_id} matches workspace={get_current_workspace()} phone_number_id "
+                            f"but is not in allowed_phone_number_ids={sorted(list(allowed_ids))[:10]} (allowing message)"
+                        )
+                    else:
+                        _vlog(
+                            f"⏭️ Skipping webhook for phone_number_id {incoming_phone_id} (allowed {sorted(list(allowed_ids))[:10]})"
+                        )
+                        return
             except Exception:
                 pass
 

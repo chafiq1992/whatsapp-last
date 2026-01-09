@@ -7325,6 +7325,20 @@ async def startup():
                     continue
         except Exception:
             pass
+
+        # Best-effort: load persisted phone_number_id -> workspace mapping from shared auth/settings DB.
+        # This makes webhook routing deterministic across Cloud Run instances/restarts even without Redis.
+        try:
+            raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
+            m = json.loads(raw_map) if raw_map else {}
+            if isinstance(m, dict):
+                for pid, ws in list(m.items()):
+                    p = str(pid or "").strip()
+                    w = _coerce_workspace(str(ws or "").strip())
+                    if p and w:
+                        RUNTIME_PHONE_ID_TO_WORKSPACE[p] = w
+        except Exception:
+            pass
         # Best-effort: accept DB-provided webhook verify tokens (Meta still uses only one token per URL).
         try:
             for w in sorted(list(_all_workspaces_set())):

@@ -1852,6 +1852,80 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     try { await navigator.clipboard.writeText(`{{ ${v} }}`); } catch {}
   };
 
+  const availableVarOptions = useMemo(() => {
+    // For template actions, users usually want Shopify order/customer vars even if trigger is WhatsApp.
+    // NOTE: If triggerSource != shopify/delivery, only {{ phone }} and {{ text }} will have values at runtime.
+    try {
+      const base = ["phone", "text"];
+      const topic = String(draft.shopifyTopic || "orders/paid") || "orders/paid";
+      const shop = shopifyVarsByTopic(topic);
+      const shopDefault = shopifyVarsByTopic("orders/paid");
+      const del = DELIVERY_VARS;
+      const combined =
+        draft.triggerSource === "shopify"
+          ? [...base, ...shop]
+          : draft.triggerSource === "delivery"
+            ? [...base, ...del]
+            : [...base, ...shopDefault, ...shop];
+      const seen = new Set();
+      const out = [];
+      for (const x of combined) {
+        const s = String(x || "").trim();
+        if (!s) continue;
+        const k = s.toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(s);
+      }
+      return out;
+    } catch {
+      return ["phone", "text", "order_number", "total_price", "customer.phone", "shipping_address.address1", "shipping_address.city", "order_first_item_image_url"];
+    }
+  }, [draft.triggerSource, draft.shopifyTopic]);
+
+  const selectedTemplate = useMemo(() => {
+    try {
+      const tn = String(draft.templateName || "").trim();
+      if (!tn) return null;
+      return approvedTemplates.find((t) => t && t.name === tn) || null;
+    } catch {
+      return null;
+    }
+  }, [approvedTemplates, draft.templateName]);
+
+  const selectedTemplatePreview = useMemo(() => {
+    try {
+      const tpl = selectedTemplate;
+      if (!tpl) return null;
+      const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+      const header = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+      const body = comps.find((c) => String(c?.type || "").toUpperCase() === "BODY") || null;
+      const footer = comps.find((c) => String(c?.type || "").toUpperCase() === "FOOTER") || null;
+      const buttons = comps.find((c) => String(c?.type || "").toUpperCase() === "BUTTONS") || null;
+      const bodyText = String(body?.text || "").trim();
+      const placeholders = [];
+      const seen = new Set();
+      const re = /\{\{\s*(\d{1,3})\s*\}\}/g;
+      let m;
+      // eslint-disable-next-line no-cond-assign
+      while ((m = re.exec(bodyText))) {
+        const n = String(m[1] || "").trim();
+        if (!n || seen.has(n)) continue;
+        seen.add(n);
+        placeholders.push(n);
+      }
+      return {
+        headerFormat: String(header?.format || "").toUpperCase(),
+        bodyText,
+        footerText: String(footer?.text || "").trim(),
+        buttons: Array.isArray(buttons?.buttons) ? buttons.buttons : [],
+        placeholders,
+      };
+    } catch {
+      return null;
+    }
+  }, [selectedTemplate]);
+
   const steps = [
     { id: 1, label: "Setup", hint: "Name • Workspaces • Trigger" },
     { id: 2, label: "Message", hint: "Send to • Keywords • Actions" },
@@ -2271,15 +2345,6 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
                         const fmt = String(h?.format || "").toUpperCase();
                         if (!["IMAGE", "VIDEO", "DOCUMENT"].includes(fmt)) return null;
-                        const varOptions = (() => {
-                          try {
-                            if (draft.triggerSource === "shopify") return shopifyVarsByTopic(draft.shopifyTopic);
-                            if (draft.triggerSource === "delivery") return DELIVERY_VARS;
-                            return ["phone", "text"];
-                          } catch {
-                            return ["phone", "text"];
-                          }
-                        })();
                         return (
                           <div className="mt-2">
                             <div className="text-xs text-slate-500 mb-1">Header {fmt} URL</div>
@@ -2292,7 +2357,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                             <div className="mt-2">
                               <SingleSelectDropdown
                                 label="Or select a variable"
-                                options={varOptions}
+                                options={availableVarOptions}
                                 value=""
                                 placeholder="Choose variable…"
                                 onChange={(v) => {
@@ -2302,6 +2367,11 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                 }}
                               />
                             </div>
+                            {draft.triggerSource !== "shopify" && draft.triggerSource !== "delivery" && (
+                              <div className="text-[11px] text-amber-700 mt-2">
+                                Note: Shopify variables only have values when the trigger is <b>Shopify webhook</b>. For WhatsApp triggers, only <span className="font-mono">{"{{ phone }}"}</span> and <span className="font-mono">{"{{ text }}"}</span> are populated.
+                              </div>
+                            )}
                             <div className="text-[11px] text-slate-500 mt-1">
                               This template requires a {fmt} header. If you leave it empty, WhatsApp will reject the message (error 132012).
                             </div>
@@ -2312,24 +2382,57 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       }
                     })()}
 
+                    {selectedTemplatePreview && (
+                      <div className="mt-3 border rounded-xl p-3 bg-white">
+                        <div className="text-xs font-semibold text-slate-700">Template preview</div>
+                        {selectedTemplatePreview.headerFormat && (
+                          <div className="text-[11px] text-slate-500 mt-1">
+                            Header: <span className="font-mono">{selectedTemplatePreview.headerFormat}</span>
+                          </div>
+                        )}
+                        {selectedTemplatePreview.bodyText && (
+                          <div className="mt-2">
+                            <div className="text-[11px] text-slate-500 mb-1">Body</div>
+                            <div className="whitespace-pre-wrap text-sm border rounded-lg p-2 bg-slate-50">{selectedTemplatePreview.bodyText}</div>
+                          </div>
+                        )}
+                        {selectedTemplatePreview.placeholders?.length > 0 && (
+                          <div className="mt-2 text-[11px] text-slate-600">
+                            Placeholders in body:{" "}
+                            <span className="font-mono">
+                              {selectedTemplatePreview.placeholders.map((n) => `{{${n}}}`).join(", ")}
+                            </span>
+                          </div>
+                        )}
+                        {selectedTemplatePreview.footerText && (
+                          <div className="mt-2 text-[11px] text-slate-500">
+                            Footer: <span className="whitespace-pre-wrap">{selectedTemplatePreview.footerText}</span>
+                          </div>
+                        )}
+                        {Array.isArray(selectedTemplatePreview.buttons) && selectedTemplatePreview.buttons.length > 0 && (
+                          <div className="mt-2">
+                            <div className="text-[11px] text-slate-500 mb-1">Buttons</div>
+                            <div className="flex flex-wrap gap-2">
+                              {selectedTemplatePreview.buttons.map((b, i) => (
+                                <span key={`tplbtn:${i}`} className="px-2 py-1 rounded border text-xs bg-white">
+                                  {String(b?.text || b?.title || b?.url || b?.type || "button")}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {(Array.isArray(draft.templateVars) && draft.templateVars.length > 0) && (
                       <div className="mt-3">
                         <div className="text-xs text-slate-500 mb-1">Body variables</div>
                         {(() => {
-                          const opts = (() => {
-                            try {
-                              if (draft.triggerSource === "shopify") return shopifyVarsByTopic(draft.shopifyTopic);
-                              if (draft.triggerSource === "delivery") return DELIVERY_VARS;
-                              return ["phone", "text"];
-                            } catch {
-                              return ["phone", "text"];
-                            }
-                          })();
                           return (
                             <div className="mb-2">
                               <SingleSelectDropdown
                                 label="Select a variable to insert"
-                                options={opts}
+                                options={availableVarOptions}
                                 value=""
                                 placeholder="Choose variable…"
                                 onChange={(v) => {
@@ -2359,15 +2462,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                               />
                               <SingleSelectDropdown
                                 label={`Pick var for {{${idx + 1}}}`}
-                                options={(() => {
-                                  try {
-                                    if (draft.triggerSource === "shopify") return shopifyVarsByTopic(draft.shopifyTopic);
-                                    if (draft.triggerSource === "delivery") return DELIVERY_VARS;
-                                    return ["phone", "text"];
-                                  } catch {
-                                    return ["phone", "text"];
-                                  }
-                                })()}
+                                options={availableVarOptions}
                                 value=""
                                 placeholder="Choose…"
                                 onChange={(sel) => {

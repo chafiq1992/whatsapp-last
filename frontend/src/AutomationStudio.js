@@ -324,6 +324,7 @@ export default function AutomationStudio({ onClose }) {
   const [ruleStats, setRuleStats] = useState({});
   const [editorOpen, setEditorOpen] = useState(false);
   const [workspaceOptions, setWorkspaceOptions] = useState([]);
+  const [deliveryStatusOptions, setDeliveryStatusOptions] = useState([]);
 
   const currentWorkspace = (() => {
     try { return (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch { return 'irranova'; }
@@ -488,8 +489,11 @@ export default function AutomationStudio({ onClose }) {
           }))
           .filter((w) => w.id);
         setWorkspaceOptions(norm);
+        const ds = Array.isArray(res?.data?.delivery_statuses) ? res.data.delivery_statuses : [];
+        setDeliveryStatusOptions(ds.map((x) => String(x || "").trim()).filter(Boolean));
       } catch {
         setWorkspaceOptions([]);
+        setDeliveryStatusOptions([]);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -824,6 +828,7 @@ export default function AutomationStudio({ onClose }) {
               draft={draft}
               workspaceOptions={workspaceOptions}
               currentWorkspace={currentWorkspace}
+              deliveryStatusOptions={deliveryStatusOptions}
               templates={templates}
               templatesLoading={templatesLoading}
               templatesError={templatesError}
@@ -1534,7 +1539,168 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
   );
 }
 
-function RuleEditor({ draft, workspaceOptions, currentWorkspace, templates, templatesLoading, templatesError, saving, onClose, onChange, onSave }) {
+function MultiSelectDropdown({ label, options, selected, onChange, placeholder = "Select…" }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const onDoc = (e) => {
+      try {
+        if (!ref.current) return;
+        if (ref.current.contains(e.target)) return;
+        setOpen(false);
+      } catch {}
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const normalizedOptions = useMemo(() => {
+    const arr = Array.isArray(options) ? options : [];
+    const seen = new Set();
+    const out = [];
+    for (const x of arr) {
+      const s = String(x || "").trim();
+      if (!s) continue;
+      const k = s.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(s);
+    }
+    return out;
+  }, [options]);
+
+  const filtered = useMemo(() => {
+    const qq = String(q || "").trim().toLowerCase();
+    if (!qq) return normalizedOptions;
+    return normalizedOptions.filter((x) => x.toLowerCase().includes(qq));
+  }, [normalizedOptions, q]);
+
+  const sel = Array.isArray(selected) ? selected : [];
+  const summary = (() => {
+    if (!sel.length) return placeholder;
+    if (sel.length <= 2) return sel.join(", ");
+    return `${sel.slice(0, 2).join(", ")} +${sel.length - 2}`;
+  })();
+
+  const toggle = (opt) => {
+    const key = String(opt || "").trim();
+    if (!key) return;
+    const exists = sel.map((x) => String(x || "").trim().toLowerCase()).includes(key.toLowerCase());
+    if (exists) {
+      onChange(sel.filter((x) => String(x || "").trim().toLowerCase() !== key.toLowerCase()));
+    } else {
+      onChange([...sel, key]);
+    }
+  };
+
+  return (
+    <div ref={ref} className="relative">
+      <div className="text-xs text-slate-500 mb-1">{label}</div>
+      <button
+        type="button"
+        className="w-full flex items-center justify-between gap-2 border rounded-lg px-3 py-2 text-sm bg-white hover:bg-slate-50"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`truncate ${sel.length ? "text-slate-900" : "text-slate-500"}`}>{summary}</span>
+        <span className="text-slate-400">▾</span>
+      </button>
+      {open && (
+        <div className="absolute mt-2 w-full z-50 bg-white border rounded-xl shadow-lg p-2">
+          <div className="flex items-center gap-2 mb-2">
+            <input
+              className="w-full border rounded-lg px-2 py-1 text-sm"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search…"
+            />
+            <button
+              type="button"
+              className="px-2 py-1 text-sm border rounded-lg hover:bg-slate-50"
+              onClick={() => onChange([])}
+              title="Clear"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="max-h-56 overflow-auto pr-1">
+            {filtered.length === 0 ? (
+              <div className="text-sm text-slate-500 p-2">No matches.</div>
+            ) : (
+              filtered.map((opt) => {
+                const checked = sel.map((x) => String(x || "").trim().toLowerCase()).includes(String(opt).toLowerCase());
+                return (
+                  <label key={`ms:${opt}`} className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-slate-50 text-sm cursor-pointer">
+                    <input type="checkbox" checked={checked} onChange={() => toggle(opt)} />
+                    <span className="truncate">{opt}</span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+          {normalizedOptions.length > 0 && (
+            <div className="mt-2 flex items-center justify-between">
+              <div className="text-xs text-slate-500">{sel.length} selected</div>
+              <button
+                type="button"
+                className="px-2 py-1 text-sm border rounded-lg hover:bg-slate-50"
+                onClick={() => onChange([...normalizedOptions])}
+              >
+                Select all
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusOptions, templates, templatesLoading, templatesError, saving, onClose, onChange, onSave }) {
+  const [step, setStep] = useState(1); // 1..3
+  const [nameTouched, setNameTouched] = useState(false);
+  const initialSnapshotRef = useRef("");
+
+  const safeSnap = (obj) => {
+    try { return JSON.stringify(obj || {}); } catch { return ""; }
+  };
+
+  useEffect(() => {
+    setStep(1);
+    setNameTouched(false);
+    initialSnapshotRef.current = safeSnap(draft);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft?.id]);
+
+  const isDirty = useMemo(() => {
+    try {
+      const cur = safeSnap(draft);
+      const base = initialSnapshotRef.current || "";
+      return !!base && cur !== base;
+    } catch {
+      return false;
+    }
+  }, [draft]);
+
+  const requestClose = () => {
+    try {
+      if (isDirty) {
+        const ok = window.confirm("Discard unsaved changes?");
+        if (!ok) return;
+      }
+    } catch {}
+    onClose();
+  };
+
+  const parseList = (s) =>
+    String(s || "")
+      .split(/\r?\n|,/g)
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+  const deliverySelected = useMemo(() => parseList(draft.deliveryStatuses), [draft.deliveryStatuses]);
+
   const shopifyTopics = [
     { topic: "draft_orders/create", label: "Shopify: Draft Order Created (draft_orders/create)" },
     { topic: "orders/create", label: "Shopify: New Order (orders/create)" },
@@ -1574,97 +1740,603 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, templates, temp
     try { await navigator.clipboard.writeText(`{{ ${v} }}`); } catch {}
   };
 
+  const steps = [
+    { id: 1, label: "Setup", hint: "Name • Workspaces • Trigger" },
+    { id: 2, label: "Message", hint: "Send to • Keywords • Actions" },
+    { id: 3, label: "Branches", hint: "Button click branches" },
+  ];
+
+  const canGoNext = () => {
+    if (step === 1) return true;
+    if (step === 2) return true;
+    return true;
+  };
+
+  const onNext = () => {
+    if (step === 1) {
+      const nm = String(draft.name || "").trim();
+      setNameTouched(true);
+      if (!nm) return;
+    }
+    setStep((s) => Math.min(3, s + 1));
+  };
+
+  const onBack = () => setStep((s) => Math.max(1, s - 1));
+
+  const canSave = useMemo(() => {
+    const nm = String(draft.name || "").trim();
+    if (!nm) return false;
+    const tagOk = !!String(draft.tag || "").trim();
+    if (draft.actionMode === "text") {
+      return tagOk || !!String(draft.replyText || "").trim();
+    }
+    // template / order_confirm require a selected template (tag-only rules are allowed, but rarely intended)
+    return !!String(draft.templateName || "").trim() || tagOk;
+  }, [draft]);
+
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[100]" onClick={onClose}>
-      <div className="w-[680px] max-w-[92vw] bg-white rounded-xl border shadow-xl p-4" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-3">
-          <div className="font-semibold">{draft.id ? "Edit rule" : "New rule"}</div>
-          <button className="px-2 py-1 border rounded text-sm" onClick={onClose}>✕</button>
+    <div className="fixed inset-0 bg-black/40 z-[100] flex items-center justify-center p-3">
+      <div className="w-[780px] max-w-[95vw] bg-white rounded-2xl border shadow-2xl overflow-hidden">
+        <div className="px-4 py-3 border-b bg-white/80 backdrop-blur">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <div className="font-semibold truncate">{draft.id ? "Edit rule" : "New rule"}</div>
+                {isDirty && <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Unsaved</span>}
+              </div>
+              <div className="text-xs text-slate-500 mt-0.5">Build your automation in 3 quick steps.</div>
+            </div>
+            <button className="px-2 py-1 border rounded-lg text-sm hover:bg-slate-50" onClick={requestClose} disabled={saving}>✕</button>
+          </div>
+
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            {steps.map((s) => {
+              const active = step === s.id;
+              const done = step > s.id;
+              return (
+                <button
+                  key={`step:${s.id}`}
+                  type="button"
+                  onClick={() => setStep(s.id)}
+                  className={`text-left px-3 py-2 rounded-xl border transition ${
+                    active ? "bg-indigo-50 border-indigo-200" : (done ? "bg-emerald-50 border-emerald-200" : "bg-white hover:bg-slate-50")
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium">{s.id}. {s.label}</div>
+                    {done ? <span className="text-xs text-emerald-700">Done</span> : <span className="text-xs text-slate-500">{active ? "Current" : ""}</span>}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">{s.hint}</div>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div className="md:col-span-2">
-            <div className="text-xs text-slate-500 mb-1">Name</div>
-            <input className="w-full border rounded px-2 py-1" value={draft.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="e.g. Auto-reply price" />
-          </div>
+        <div className="p-4 max-h-[74vh] overflow-y-auto">
+          {step === 1 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <div className="text-xs text-slate-500 mb-1">Name</div>
+                <input
+                  className={`w-full border rounded-lg px-3 py-2 ${nameTouched && !String(draft.name || "").trim() ? "border-rose-300 bg-rose-50" : ""}`}
+                  value={draft.name}
+                  onChange={(e) => onChange({ name: e.target.value })}
+                  onBlur={() => setNameTouched(true)}
+                  placeholder="e.g. Order confirmation (Delivery statuses)"
+                />
+                {nameTouched && !String(draft.name || "").trim() && (
+                  <div className="text-[11px] text-rose-700 mt-1">Name is required.</div>
+                )}
+              </div>
 
-          <div className="md:col-span-2">
-            <div className="text-xs text-slate-500 mb-1">Workspaces</div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className={`px-2 py-1 border rounded text-sm ${String(draft.workspaceScope || 'current') === 'current' ? "bg-blue-50 border-blue-200" : ""}`}
-                onClick={() => onChange({ workspaceScope: 'current', workspaces: [] })}
-                title="Only run this automation in the currently selected workspace"
-              >
-                Current only ({String(currentWorkspace || 'irranova').toUpperCase()})
-              </button>
-              <button
-                type="button"
-                className={`px-2 py-1 border rounded text-sm ${String(draft.workspaceScope || '') === 'all' ? "bg-blue-50 border-blue-200" : ""}`}
-                onClick={() => onChange({ workspaceScope: 'all', workspaces: ['*'] })}
-                title="Run in all workspaces"
-              >
-                All workspaces
-              </button>
-              <button
-                type="button"
-                className={`px-2 py-1 border rounded text-sm ${String(draft.workspaceScope || '') === 'selected' ? "bg-blue-50 border-blue-200" : ""}`}
-                onClick={() => {
-                  const ws = String(currentWorkspace || 'irranova').trim().toLowerCase();
-                  const list = Array.isArray(draft.workspaces) ? draft.workspaces : [];
-                  const next = list.length ? list : [ws];
-                  onChange({ workspaceScope: 'selected', workspaces: next });
-                }}
-                title="Pick specific workspaces"
-              >
-                Selected…
-              </button>
-            </div>
-            {String(draft.workspaceScope || '') === 'selected' && (
-              <div className="mt-2 border rounded p-2 bg-slate-50">
-                <div className="text-[11px] text-slate-500 mb-2">Select workspaces this rule should run on:</div>
-                <div className="grid grid-cols-2 gap-2">
-                  {(Array.isArray(workspaceOptions) && workspaceOptions.length ? workspaceOptions : [{ id: 'irranova', label: 'IRRANOVA' }, { id: 'irrakids', label: 'IRRAKIDS' }]).map((w) => {
-                    const id = String(w?.id || '').trim().toLowerCase();
-                    if (!id) return null;
-                    const checked = Array.isArray(draft.workspaces) && draft.workspaces.map((x)=>String(x||'').trim().toLowerCase()).includes(id);
-                    return (
-                      <label key={`ws-scope:${id}`} className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) => {
-                            const prev = Array.isArray(draft.workspaces) ? draft.workspaces.map((x)=>String(x||'').trim().toLowerCase()).filter(Boolean) : [];
-                            const next = e.target.checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id);
-                            onChange({ workspaces: next });
-                          }}
-                        />
-                        <span className="truncate">{String(w?.label || id)}</span>
-                      </label>
-                    );
-                  })}
+              <div className="md:col-span-2">
+                <div className="text-xs text-slate-500 mb-1">Workspaces</div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={`px-3 py-2 border rounded-lg text-sm ${String(draft.workspaceScope || 'current') === 'current' ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`}
+                    onClick={() => onChange({ workspaceScope: 'current', workspaces: [] })}
+                    title="Only run this automation in the currently selected workspace"
+                  >
+                    Current only ({String(currentWorkspace || 'irranova').toUpperCase()})
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-3 py-2 border rounded-lg text-sm ${String(draft.workspaceScope || '') === 'all' ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`}
+                    onClick={() => onChange({ workspaceScope: 'all', workspaces: ['*'] })}
+                    title="Run in all workspaces"
+                  >
+                    All workspaces
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-3 py-2 border rounded-lg text-sm ${String(draft.workspaceScope || '') === 'selected' ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`}
+                    onClick={() => {
+                      const ws = String(currentWorkspace || 'irranova').trim().toLowerCase();
+                      const list = Array.isArray(draft.workspaces) ? draft.workspaces : [];
+                      const next = list.length ? list : [ws];
+                      onChange({ workspaceScope: 'selected', workspaces: next });
+                    }}
+                    title="Pick specific workspaces"
+                  >
+                    Selected…
+                  </button>
                 </div>
-                <div className="text-[11px] text-slate-500 mt-2">
-                  If none selected, it will default to current workspace.
+                {String(draft.workspaceScope || '') === 'selected' && (
+                  <div className="mt-2 border rounded-xl p-3 bg-slate-50">
+                    <div className="text-[11px] text-slate-500 mb-2">Select workspaces this rule should run on:</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {(Array.isArray(workspaceOptions) && workspaceOptions.length ? workspaceOptions : [{ id: 'irranova', label: 'IRRANOVA' }, { id: 'irrakids', label: 'IRRAKIDS' }]).map((w) => {
+                        const id = String(w?.id || '').trim().toLowerCase();
+                        if (!id) return null;
+                        const checked = Array.isArray(draft.workspaces) && draft.workspaces.map((x)=>String(x||'').trim().toLowerCase()).includes(id);
+                        return (
+                          <label key={`ws-scope:${id}`} className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                const prev = Array.isArray(draft.workspaces) ? draft.workspaces.map((x)=>String(x||'').trim().toLowerCase()).filter(Boolean) : [];
+                                const next = e.target.checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id);
+                                onChange({ workspaces: next });
+                              }}
+                            />
+                            <span className="truncate">{String(w?.label || id)}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-2">
+                      If none selected, it will default to current workspace.
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="md:col-span-2">
+                <div className="text-xs text-slate-500 mb-1">Trigger</div>
+                <div className="flex flex-wrap gap-2">
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.triggerSource === "whatsapp" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ triggerSource: "whatsapp" })}>
+                    WhatsApp incoming
+                  </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.triggerSource === "shopify" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ triggerSource: "shopify" })}>
+                    Shopify webhook
+                  </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.triggerSource === "delivery" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ triggerSource: "delivery" })}>
+                    Delivery status
+                  </button>
+                </div>
+
+                {draft.triggerSource === "shopify" && (
+                  <div className="mt-3 border rounded-xl p-3 bg-slate-50">
+                    <div className="text-xs font-semibold text-slate-700 mb-2">Shopify settings</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Shopify topic</div>
+                        <select className="w-full border rounded-lg px-3 py-2" value={draft.shopifyTopic || "orders/paid"} onChange={(e) => onChange({ shopifyTopic: e.target.value })}>
+                          {shopifyTopics.map((x) => <option key={x.topic} value={x.topic}>{x.label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Custom topic (optional)</div>
+                        <input
+                          className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                          value={draft.shopifyTopic || ""}
+                          onChange={(e) => onChange({ shopifyTopic: e.target.value })}
+                          placeholder="orders/paid"
+                        />
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-2">
+                      Use the same webhook URL for all topics: <span className="font-mono">/shopify/webhook/{'{workspace}'}</span>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Tagged with (optional)</div>
+                        <input
+                          className="w-full border rounded-lg px-3 py-2"
+                          value={draft.shopifyTaggedWith || ""}
+                          onChange={(e) => onChange({ shopifyTaggedWith: e.target.value })}
+                          placeholder="e.g. vip"
+                        />
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          Uses <span className="font-mono">orders/updated</span> + condition <span className="font-mono">tag_contains</span>.
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Test phone numbers (optional)</div>
+                        <textarea
+                          className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                          rows={3}
+                          value={draft.shopifyTestPhones || ""}
+                          onChange={(e) => onChange({ shopifyTestPhones: e.target.value })}
+                          placeholder={"+212612345678\n+212600000000"}
+                        />
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          If set, this rule only fires when the Shopify payload phone matches one of these numbers.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3">
+                      <div className="text-xs text-slate-500 mb-1">Shopify variables (click to copy)</div>
+                      <div className="flex flex-wrap gap-1">
+                        {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 24).map((v) => (
+                          <button
+                            key={`shopvar:${v}`}
+                            type="button"
+                            className="px-2 py-0.5 rounded border text-xs hover:bg-white"
+                            title="Click to copy"
+                            onClick={() => copyVar(v)}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {draft.triggerSource === "delivery" && (
+                  <div className="mt-3 border rounded-xl p-3 bg-slate-50">
+                    <div className="text-xs font-semibold text-slate-700 mb-2">Delivery settings</div>
+                    <div className="text-xs text-slate-500 mb-1">Delivery event</div>
+                    <div className="w-full border rounded-lg px-3 py-2 bg-white text-sm">
+                      Order status changed <span className="font-mono text-xs">(order_status_changed)</span>
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      The delivery app posts one webhook per status change. Choose which statuses should trigger WhatsApp.
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <MultiSelectDropdown
+                        label="Statuses (optional)"
+                        options={deliveryStatusOptions || []}
+                        selected={deliverySelected}
+                        placeholder="All statuses"
+                        onChange={(arr) => onChange({ deliveryStatuses: (Array.isArray(arr) ? arr : []).join(", ") })}
+                      />
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Test phone numbers (optional)</div>
+                        <textarea
+                          className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                          rows={3}
+                          value={draft.deliveryTestPhones || ""}
+                          onChange={(e) => onChange({ deliveryTestPhones: e.target.value })}
+                          placeholder={"+212612345678\n+212600000000"}
+                        />
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          If set, this rule only fires when the delivery order phone matches one of these numbers.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3">
+                      <div className="text-xs text-slate-500 mb-1">Delivery variables (click to copy)</div>
+                      <div className="flex flex-wrap gap-1">
+                        {DELIVERY_VARS.map((v) => (
+                          <button
+                            key={`delvar:${v}`}
+                            type="button"
+                            className="px-2 py-0.5 rounded border text-xs hover:bg-white"
+                            onClick={() => copyVar(v)}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <div className="text-xs text-slate-500 mb-1">Send to (WhatsApp number)</div>
+                <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.to || "{{ phone }}"} onChange={(e) => onChange({ to: e.target.value })} />
+                <div className="text-[11px] text-slate-500 mt-1">
+                  Use <span className="font-mono">{"{{ phone }}"}</span> (works for WhatsApp + Shopify + Delivery triggers).
                 </div>
               </div>
+
+              <div>
+                <div className="text-xs text-slate-500 mb-1">Keywords (comma separated)</div>
+                <input className="w-full border rounded-lg px-3 py-2" value={draft.keywords} onChange={(e) => onChange({ keywords: e.target.value })} placeholder="price, livraison, سومة" />
+                <div className="text-[11px] text-slate-500 mt-1">If empty, it will match all incoming messages.</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">Cooldown (seconds)</div>
+                <input type="number" className="w-full border rounded-lg px-3 py-2" value={draft.cooldownSeconds} onChange={(e) => onChange({ cooldownSeconds: Number(e.target.value || 0) })} />
+                <div className="text-[11px] text-slate-500 mt-1">Prevents spam replies to the same user.</div>
+              </div>
+
+              <div className="md:col-span-2">
+                <div className="text-xs text-slate-500 mb-1">Action type</div>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode !== "template" && draft.actionMode !== "order_confirm" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "text" })}>
+                    Text
+                  </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "template" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "template" })}>
+                    WhatsApp Template
+                  </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "order_confirm" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "order_confirm" })}>
+                    Confirmation flow
+                  </button>
+                </div>
+
+                {(draft.actionMode === "template" || draft.actionMode === "order_confirm") ? (
+                  <div className="border rounded-xl p-3 bg-slate-50">
+                    {templatesError && <div className="p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{templatesError}</div>}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Template</div>
+                        <select
+                          className="w-full border rounded-lg px-3 py-2"
+                          value={draft.templateName || ""}
+                          onChange={(e) => {
+                            const name = e.target.value;
+                            const tpl = approvedTemplates.find((t) => t.name === name) || null;
+                            const n = inferBodyVarCount(tpl);
+                            const headerFormat = (() => {
+                              try {
+                                const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                                const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+                                return String(h?.format || "").toUpperCase();
+                              } catch {
+                                return "";
+                              }
+                            })();
+                            onChange({
+                              templateName: name,
+                              templateLanguage: String(tpl?.language || draft.templateLanguage || "en"),
+                              templateVars: Array.from({ length: n }, (_, i) => (draft.templateVars?.[i] || "")),
+                              templateHeaderUrl: (["IMAGE", "VIDEO", "DOCUMENT"].includes(headerFormat) ? (draft.templateHeaderUrl || "") : ""),
+                            });
+                          }}
+                          disabled={templatesLoading}
+                        >
+                          <option value="">{templatesLoading ? "Loading…" : "Select template…"}</option>
+                          {approvedTemplates.map((t) => (
+                            <option key={`${t.name}:${t.language}`} value={t.name}>{t.name} ({t.language})</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Language</div>
+                        <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.templateLanguage || "en"} onChange={(e) => onChange({ templateLanguage: e.target.value })} />
+                      </div>
+                    </div>
+
+                    {(() => {
+                      try {
+                        const tn = String(draft.templateName || "").trim();
+                        if (!tn) return null;
+                        const tpl = approvedTemplates.find((t) => t.name === tn) || null;
+                        const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                        const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+                        const fmt = String(h?.format || "").toUpperCase();
+                        if (!["IMAGE", "VIDEO", "DOCUMENT"].includes(fmt)) return null;
+                        return (
+                          <div className="mt-2">
+                            <div className="text-xs text-slate-500 mb-1">Header {fmt} URL</div>
+                            <input
+                              className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                              value={draft.templateHeaderUrl || ""}
+                              onChange={(e) => onChange({ templateHeaderUrl: e.target.value })}
+                              placeholder="https://... (public image/video/pdf URL)"
+                            />
+                            <div className="text-[11px] text-slate-500 mt-1">
+                              This template requires a {fmt} header. If you leave it empty, WhatsApp will reject the message (error 132012).
+                            </div>
+                          </div>
+                        );
+                      } catch {
+                        return null;
+                      }
+                    })()}
+
+                    {(Array.isArray(draft.templateVars) && draft.templateVars.length > 0) && (
+                      <div className="mt-3">
+                        <div className="text-xs text-slate-500 mb-1">Body variables</div>
+                        {draft.triggerSource === "shopify" && (
+                          <div className="mb-2">
+                            <div className="text-[11px] text-slate-500 mb-1">Insert Shopify variable (click to copy)</div>
+                            <div className="flex flex-wrap gap-1">
+                              {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 16).map((v) => (
+                                <button
+                                  key={`shopvar2:${v}`}
+                                  type="button"
+                                  className="px-2 py-0.5 rounded border text-xs hover:bg-white"
+                                  onClick={() => copyVar(v)}
+                                >
+                                  {v}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {draft.triggerSource === "delivery" && (
+                          <div className="mb-2">
+                            <div className="text-[11px] text-slate-500 mb-1">Insert Delivery variable (click to copy)</div>
+                            <div className="flex flex-wrap gap-1">
+                              {DELIVERY_VARS.slice(0, 16).map((v) => (
+                                <button
+                                  key={`delvar2:${v}`}
+                                  type="button"
+                                  className="px-2 py-0.5 rounded border text-xs hover:bg-white"
+                                  onClick={() => copyVar(v)}
+                                >
+                                  {v}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {draft.templateVars.map((v, idx) => (
+                            <input
+                              key={`tplvar:${idx}`}
+                              className="w-full border rounded-lg px-3 py-2"
+                              placeholder={`Var ${idx + 1} (e.g. {{ order_number }})`}
+                              value={v}
+                              onChange={(e) => {
+                                const next = [...draft.templateVars];
+                                next[idx] = e.target.value;
+                                onChange({ templateVars: next });
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="border rounded-xl p-3 bg-slate-50">
+                    <div className="text-xs text-slate-500 mb-1">Auto-reply text</div>
+                    <textarea className="w-full border rounded-lg px-3 py-2" rows={5} value={draft.replyText} onChange={(e) => onChange({ replyText: e.target.value })} placeholder="Type the WhatsApp message to send…" />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Variables: <span className="font-mono">{"{{ phone }}"}</span>, <span className="font-mono">{"{{ text }}"}</span>, <span className="font-mono">{"{{ order_number }}"}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="md:col-span-2">
+                <div className="text-xs text-slate-500 mb-1">Optional tag to add</div>
+                <input className="w-full border rounded-lg px-3 py-2" value={draft.tag} onChange={(e) => onChange({ tag: e.target.value })} placeholder="e.g. Auto" />
+              </div>
+              <div className="md:col-span-2">
+                <label className="text-sm flex items-center gap-2">
+                  <input type="checkbox" checked={!!draft.enabled} onChange={(e) => onChange({ enabled: e.target.checked })} />
+                  Enabled
+                </label>
+              </div>
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="space-y-4">
+              {draft.actionMode !== "order_confirm" ? (
+                <div className="border rounded-xl p-4 bg-slate-50">
+                  <div className="font-semibold">Button click branches</div>
+                  <div className="text-sm text-slate-600 mt-1">
+                    Branches are used in the <span className="font-medium">Confirmation flow</span> because template button labels can differ per template.
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                      onClick={() => onChange({ actionMode: "order_confirm" })}
+                    >
+                      Switch to Confirmation flow
+                    </button>
+                    <button
+                      type="button"
+                      className="px-3 py-2 rounded-lg border hover:bg-white"
+                      onClick={() => setStep(2)}
+                    >
+                      Back to Actions
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="border rounded-xl p-4 bg-white">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-semibold">Button click branches</div>
+                      <div className="text-sm text-slate-600 mt-1">
+                        Add all possible button texts/labels here (different templates can have different button text). Matching by button <span className="font-mono text-xs">id</span> is optional.
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="md:col-span-2">
+                      <div className="text-xs text-slate-500 mb-1">Confirm button titles (one per line)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocConfirmTitles || ""} onChange={(e)=>onChange({ ocConfirmTitles: e.target.value })} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <div className="text-xs text-slate-500 mb-1">Change info button titles (one per line)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocChangeTitles || ""} onChange={(e)=>onChange({ ocChangeTitles: e.target.value })} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <div className="text-xs text-slate-500 mb-1">Talk to agent button titles (one per line)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocTalkTitles || ""} onChange={(e)=>onChange({ ocTalkTitles: e.target.value })} />
+                    </div>
+
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Confirm button IDs (optional)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocConfirmIds || ""} onChange={(e)=>onChange({ ocConfirmIds: e.target.value })} />
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Change button IDs (optional)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocChangeIds || ""} onChange={(e)=>onChange({ ocChangeIds: e.target.value })} />
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Talk button IDs (optional)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocTalkIds || ""} onChange={(e)=>onChange({ ocTalkIds: e.target.value })} />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <div className="text-xs text-slate-500 mb-1">Confirm audio URL (optional)</div>
+                      <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.ocConfirmAudioUrl || ""} onChange={(e)=>onChange({ ocConfirmAudioUrl: e.target.value })} placeholder="https://.../confirm.ogg" />
+                    </div>
+                    <div className="md:col-span-2">
+                      <div className="text-xs text-slate-500 mb-1">Change info audio URL (optional)</div>
+                      <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.ocChangeAudioUrl || ""} onChange={(e)=>onChange({ ocChangeAudioUrl: e.target.value })} placeholder="https://.../change.ogg" />
+                    </div>
+                    <div className="md:col-span-2">
+                      <div className="text-xs text-slate-500 mb-1">Talk to agent audio URL (optional)</div>
+                      <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.ocTalkAudioUrl || ""} onChange={(e)=>onChange({ ocTalkAudioUrl: e.target.value })} placeholder="https://.../talk.ogg" />
+                    </div>
+
+                    <div className="md:col-span-2 flex items-center justify-between gap-3 border rounded-xl p-3 bg-slate-50">
+                      <label className="text-sm flex items-center gap-2">
+                        <input type="checkbox" checked={!!draft.ocSendItems} onChange={(e)=>onChange({ ocSendItems: e.target.checked })} />
+                        Send ordered items after confirm (catalog items)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs text-slate-500">Max items</div>
+                        <input type="number" className="w-24 border rounded-lg px-3 py-2" value={draft.ocMaxItems || 10} onChange={(e)=>onChange({ ocMaxItems: Number(e.target.value || 10) })} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="px-4 py-3 border-t bg-white flex items-center justify-between gap-2">
+          <button className="px-3 py-2 border rounded-lg text-sm hover:bg-slate-50" onClick={requestClose} disabled={saving}>Cancel</button>
+          <div className="flex items-center gap-2">
+            <button className="px-3 py-2 border rounded-lg text-sm hover:bg-slate-50" onClick={onBack} disabled={saving || step === 1}>Back</button>
+            {step < 3 ? (
+              <button className="px-3 py-2 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60" onClick={onNext} disabled={saving || !canGoNext()}>
+                Next
+              </button>
+            ) : (
+              <button className="px-3 py-2 rounded-lg text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60" onClick={onSave} disabled={saving || !canSave}>
+                {saving ? "Saving…" : "Save rule"}
+              </button>
             )}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-          <div className="md:col-span-2">
-            <div className="text-xs text-slate-500 mb-1">Trigger</div>
-            <div className="flex gap-2">
-              <button className={`px-2 py-1 border rounded text-sm ${draft.triggerSource === "whatsapp" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ triggerSource: "whatsapp" })}>
-                WhatsApp incoming
-              </button>
-              <button className={`px-2 py-1 border rounded text-sm ${draft.triggerSource === "shopify" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ triggerSource: "shopify" })}>
-                Shopify webhook
-              </button>
-              <button className={`px-2 py-1 border rounded text-sm ${draft.triggerSource === "delivery" ? "bg-blue-50 border-blue-200" : ""}`} onClick={() => onChange({ triggerSource: "delivery" })}>
-                Delivery status
-              </button>
-            </div>
+/*
+  Legacy RuleEditor UI removed in favor of 3-step wizard.
+*/
+
+/*
             {draft.triggerSource === "shopify" && (
               <div className="mt-2">
                 <div className="text-xs text-slate-500 mb-1">Shopify topic</div>
@@ -1729,64 +2401,6 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, templates, temp
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1">
                     Variables support dotted paths like <span className="font-mono">{"{{ customer.phone }}"}</span>.
-                  </div>
-                </div>
-              </div>
-            )}
-            {draft.triggerSource === "delivery" && (
-              <div className="mt-2">
-                <div className="text-xs text-slate-500 mb-1">Delivery event</div>
-                <div className="w-full border rounded px-2 py-1 bg-slate-50 text-sm">
-                  Order status changed <span className="font-mono text-xs">(order_status_changed)</span>
-                </div>
-                <div className="text-[11px] text-slate-500 mt-1">
-                  The delivery app posts one webhook per status change (same URL). You can filter which statuses should send WhatsApp.
-                </div>
-
-                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
-                  <div>
-                    <div className="text-xs text-slate-500 mb-1">Statuses (optional, comma separated)</div>
-                    <input
-                      className="w-full border rounded px-2 py-1"
-                      value={draft.deliveryStatuses || ""}
-                      onChange={(e) => onChange({ deliveryStatuses: e.target.value })}
-                      placeholder="En cours, Rescheduled, Livré, Paid, Returned…"
-                    />
-                    <div className="text-[11px] text-slate-500 mt-1">
-                      If empty, it will match all status changes.
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-slate-500 mb-1">Test phone numbers (optional)</div>
-                    <textarea
-                      className="w-full border rounded px-2 py-1 font-mono text-xs"
-                      rows={3}
-                      value={draft.deliveryTestPhones || ""}
-                      onChange={(e) => onChange({ deliveryTestPhones: e.target.value })}
-                      placeholder={"+212612345678\n+212600000000"}
-                    />
-                    <div className="text-[11px] text-slate-500 mt-1">
-                      If set, this rule only fires when the delivery order phone matches one of these numbers.
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-2">
-                  <div className="text-xs text-slate-500 mb-1">Delivery variables (click to copy)</div>
-                  <div className="flex flex-wrap gap-1">
-                    {DELIVERY_VARS.map((v) => (
-                      <button
-                        key={`delvar:${v}`}
-                        type="button"
-                        className="px-2 py-0.5 rounded border text-xs hover:bg-slate-50"
-                        onClick={() => copyVar(v)}
-                      >
-                        {v}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="text-[11px] text-slate-500 mt-1">
-                    Use dotted paths like <span className="font-mono">{"{{ order.order_name }}"}</span>.
                   </div>
                 </div>
               </div>
@@ -2051,6 +2665,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, templates, temp
     </div>
   );
 }
+*/
 
 function InboxEnvSettings({ loading, saving, error, values, onChange, onRefresh, onSave }) {
   return (

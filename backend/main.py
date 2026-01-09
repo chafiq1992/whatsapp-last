@@ -10174,6 +10174,42 @@ async def app_config(request: Request):
                 return str(v)
             return str(os.getenv(name, "") or "")
 
+        def _parse_str_list(raw: Any) -> list[str]:
+            """Parse a config value into a list of strings (supports JSON list or comma/newline)."""
+            try:
+                if raw is None:
+                    return []
+                if isinstance(raw, list):
+                    out = [str(x).strip() for x in raw if str(x or "").strip()]
+                else:
+                    s = str(raw or "").strip()
+                    if not s:
+                        return []
+                    # If it looks like JSON, try JSON parse first.
+                    if (s.startswith("[") and s.endswith("]")) or (s.startswith('"') and s.endswith('"')):
+                        try:
+                            tmp = json.loads(s)
+                            if isinstance(tmp, list):
+                                out = [str(x).strip() for x in tmp if str(x or "").strip()]
+                            else:
+                                out = [str(tmp).strip()] if str(tmp or "").strip() else []
+                        except Exception:
+                            out = [x.strip() for x in re.split(r"[,\n\r]+", s) if x and x.strip()]
+                    else:
+                        out = [x.strip() for x in re.split(r"[,\n\r]+", s) if x and x.strip()]
+                # De-dup preserving order
+                seen: set[str] = set()
+                dedup: list[str] = []
+                for x in out:
+                    k = x.lower()
+                    if not k or k in seen:
+                        continue
+                    seen.add(k)
+                    dedup.append(x)
+                return dedup
+            except Exception:
+                return []
+
         def _read_filter(suffix: str):
             label = _env_ws(f"CATALOG_FILTER_{suffix}_LABEL").strip()
             query = _env_ws(f"CATALOG_FILTER_{suffix}_QUERY").strip()
@@ -10215,11 +10251,31 @@ async def app_config(request: Request):
             label = _workspace_label(ww)
             ws_list.append({"id": ww, "label": label, "short": _workspace_short(ww, label)})
 
+        # Delivery app statuses for Automation Studio (used to render a dropdown/multi-select).
+        # Sources (priority):
+        # - DB setting delivery_statuses::<workspace>
+        # - DB setting delivery_statuses (default workspace fallback)
+        # - env DELIVERY_STATUSES_<WS> or DELIVERY_STATUSES (comma/newline or JSON list)
+        delivery_statuses: list[str] = []
+        try:
+            raw_ds = await db_manager.get_setting(_ws_setting_key("delivery_statuses", ws))
+            if (not raw_ds) and ws == _coerce_workspace(DEFAULT_WORKSPACE):
+                raw_ds = await db_manager.get_setting("delivery_statuses")
+            delivery_statuses = _parse_str_list(raw_ds)
+        except Exception:
+            delivery_statuses = []
+        if not delivery_statuses:
+            try:
+                delivery_statuses = _parse_str_list(_env_ws("DELIVERY_STATUSES"))
+            except Exception:
+                delivery_statuses = []
+
         return {
             "workspace": ws,
             "defaultWorkspace": DEFAULT_WORKSPACE,
             "workspaces": ws_list,
             "catalogFilters": filters,
+            "delivery_statuses": delivery_statuses,
         }
     except Exception:
         # Safe defaults on any failure
@@ -10236,6 +10292,7 @@ async def app_config(request: Request):
                 {"label": "Boys", "query": "boys", "match": "includes"},
                 {"label": "All", "type": "all"},
             ],
+            "delivery_statuses": [],
         }
 
 # Serve hashed main bundle filenames for safety even if HTML references are stale

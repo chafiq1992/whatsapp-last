@@ -341,6 +341,8 @@ export default function AutomationStudio({ onClose }) {
     tag: "",
     cooldownSeconds: 0,
     triggerSource: "whatsapp",
+    waTriggerMode: "incoming", // incoming | no_reply
+    noReplyMinutes: 30,
     shopifyTopic: "orders/paid",
     shopifyTaggedWith: "",
     shopifyTestPhones: "",
@@ -745,6 +747,15 @@ export default function AutomationStudio({ onClose }) {
               tag: String(aTag?.tag || ""),
               cooldownSeconds: Number(r.cooldown_seconds || 0),
               triggerSource: source === "shopify" ? "shopify" : (source === "delivery" ? "delivery" : "whatsapp"),
+              waTriggerMode: (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "no_reply") ? "no_reply" : "incoming",
+              noReplyMinutes: (() => {
+                try {
+                  const c = (r?.condition && typeof r.condition === "object") ? r.condition : {};
+                  const sec = Number(c?.seconds || 0);
+                  if (Number.isFinite(sec) && sec > 0) return Math.max(1, Math.round(sec / 60));
+                } catch {}
+                return 30;
+              })(),
               shopifyTopic: String(trig.event || "orders/paid"),
               shopifyTaggedWith: taggedWith,
               shopifyTestPhones: testPhonesStr,
@@ -947,13 +958,15 @@ export default function AutomationStudio({ onClose }) {
                       ? { source: "shopify", event: String(draft.shopifyTopic || "orders/paid") }
                       : draft.triggerSource === "delivery"
                         ? { source: "delivery", event: "order_status_changed" }
-                        : { source: "whatsapp", event: "incoming_message" },
+                        : { source: "whatsapp", event: (String(draft.waTriggerMode || "incoming") === "no_reply" ? "no_reply" : "incoming_message") },
                   condition:
                     draft.triggerSource === "shopify" && tagged
                       ? { match: "tag_contains", value: tagged }
                       : draft.triggerSource === "delivery"
                         ? (deliveryStatuses.length ? { match: "status_in", statuses: deliveryStatuses } : { match: "any" })
-                        : { match: "contains", keywords: kws },
+                        : (String(draft.waTriggerMode || "incoming") === "no_reply"
+                          ? { match: "no_reply_for", seconds: Math.max(60, Number(draft.noReplyMinutes || 30) * 60), keywords: kws }
+                          : { match: "contains", keywords: kws }),
                   ...(draft.triggerSource === "shopify"
                     ? { test_phone_numbers: testPhones }
                     : draft.triggerSource === "delivery"
@@ -1606,6 +1619,112 @@ function MultiSelectDropdown({ label, options, selected, onChange, placeholder =
   );
 }
 
+function SingleSelectDropdown({ label, options, value, onChange, placeholder = "Select…", allowClear = true }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const onDoc = (e) => {
+      try {
+        if (!ref.current) return;
+        if (ref.current.contains(e.target)) return;
+        setOpen(false);
+      } catch {}
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const normalizedOptions = useMemo(() => {
+    const arr = Array.isArray(options) ? options : [];
+    const seen = new Set();
+    const out = [];
+    for (const x of arr) {
+      const s = String(x || "").trim();
+      if (!s) continue;
+      const k = s.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(s);
+    }
+    return out;
+  }, [options]);
+
+  const filtered = useMemo(() => {
+    const qq = String(q || "").trim().toLowerCase();
+    if (!qq) return normalizedOptions;
+    return normalizedOptions.filter((x) => x.toLowerCase().includes(qq));
+  }, [normalizedOptions, q]);
+
+  const current = String(value || "").trim();
+  const summary = current ? current : placeholder;
+
+  return (
+    <div ref={ref} className="relative">
+      {label ? <div className="text-xs text-slate-500 mb-1">{label}</div> : null}
+      <button
+        type="button"
+        className="w-full flex items-center justify-between gap-2 border rounded-lg px-3 py-2 text-sm bg-white hover:bg-slate-50"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`truncate ${current ? "text-slate-900" : "text-slate-500"}`}>{summary}</span>
+        <span className="text-slate-400">▾</span>
+      </button>
+      {open && (
+        <div className="absolute mt-2 w-full z-50 bg-white border rounded-xl shadow-lg p-2">
+          <div className="flex items-center gap-2 mb-2">
+            <input
+              className="w-full border rounded-lg px-2 py-1 text-sm"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search…"
+            />
+            {allowClear && (
+              <button
+                type="button"
+                className="px-2 py-1 text-sm border rounded-lg hover:bg-slate-50"
+                onClick={() => {
+                  onChange("");
+                  setOpen(false);
+                }}
+                title="Clear"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="max-h-56 overflow-auto">
+            {filtered.length === 0 ? (
+              <div className="text-sm text-slate-500 px-2 py-2">No results</div>
+            ) : (
+              filtered.map((opt) => {
+                const isSel = String(opt).toLowerCase() === current.toLowerCase();
+                return (
+                  <button
+                    key={`opt:${opt}`}
+                    type="button"
+                    className={`w-full text-left px-2 py-1.5 rounded-lg text-sm hover:bg-slate-50 flex items-center justify-between ${
+                      isSel ? "bg-indigo-50" : ""
+                    }`}
+                    onClick={() => {
+                      onChange(opt);
+                      setOpen(false);
+                    }}
+                  >
+                    <span className="truncate">{opt}</span>
+                    {isSel ? <span className="text-indigo-600 text-xs">✓</span> : null}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusOptions, templates, templatesLoading, templatesError, saving, onClose, onChange, onSave }) {
   const [step, setStep] = useState(1); // 1..3
   const [nameTouched, setNameTouched] = useState(false);
@@ -1679,10 +1798,54 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
   const shopifyVarsByTopic = (topic) => {
     try {
       const ev = (Array.isArray(SHOPIFY_EVENTS) ? SHOPIFY_EVENTS : []).find((x) => x.topic === topic);
-      if (ev && Array.isArray(ev.variables)) return ev.variables;
+      if (ev && Array.isArray(ev.variables)) {
+        const base = ev.variables;
+        // Extra common order/customer/address fields for templating (used by dropdown pickers)
+        const extra = [
+          "order_number",
+          "total_price",
+          "customer.first_name",
+          "customer.last_name",
+          "customer.email",
+          "customer.phone",
+          "shipping_address.name",
+          "shipping_address.phone",
+          "shipping_address.address1",
+          "shipping_address.address2",
+          "shipping_address.city",
+          "shipping_address.province",
+          "shipping_address.zip",
+          "shipping_address.country",
+          "billing_address.name",
+          "billing_address.phone",
+          "billing_address.address1",
+          "billing_address.address2",
+          "billing_address.city",
+          "billing_address.province",
+          "billing_address.zip",
+          "billing_address.country",
+          // Line items (use [0] syntax — supported by backend template renderer)
+          "line_items[0].title",
+          "line_items[0].variant_title",
+          "line_items[0].quantity",
+          "line_items[0].price",
+          "line_items[0].sku",
+          // Computed helper (backend will populate)
+          "order_first_item_image_url",
+        ];
+        return [...base, ...extra];
+      }
     } catch {}
     // minimal fallback
-    return ["customer.phone", "name", "order_number", "total_price", "tags"];
+    return [
+      "customer.phone",
+      "order_number",
+      "total_price",
+      "shipping_address.address1",
+      "shipping_address.city",
+      "line_items[0].title",
+      "order_first_item_image_url",
+    ];
   };
 
   const copyVar = async (v) => {
@@ -1856,6 +2019,44 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                     Delivery status
                   </button>
                 </div>
+
+                {draft.triggerSource === "whatsapp" && (
+                  <div className="mt-3 border rounded-xl p-3 bg-slate-50">
+                    <div className="text-xs font-semibold text-slate-700 mb-2">WhatsApp settings</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Trigger type</div>
+                        <select
+                          className="w-full border rounded-lg px-3 py-2"
+                          value={String(draft.waTriggerMode || "incoming")}
+                          onChange={(e) => onChange({ waTriggerMode: e.target.value })}
+                        >
+                          <option value="incoming">Incoming message</option>
+                          <option value="no_reply">No reply after time</option>
+                        </select>
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          Use <span className="font-mono">Incoming message</span> for keyword auto-replies, or <span className="font-mono">No reply</span> to follow up when the customer is waiting.
+                        </div>
+                      </div>
+
+                      {String(draft.waTriggerMode || "incoming") === "no_reply" && (
+                        <div>
+                          <div className="text-xs text-slate-500 mb-1">Wait (minutes)</div>
+                          <input
+                            type="number"
+                            min={1}
+                            className="w-full border rounded-lg px-3 py-2"
+                            value={Number(draft.noReplyMinutes || 30)}
+                            onChange={(e) => onChange({ noReplyMinutes: Number(e.target.value || 0) })}
+                          />
+                          <div className="text-[11px] text-slate-500 mt-1">
+                            After a customer message, if nobody replies within this time, the rule will run once.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {draft.triggerSource === "shopify" && (
                   <div className="mt-3 border rounded-xl p-3 bg-slate-50">
@@ -2070,6 +2271,15 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
                         const fmt = String(h?.format || "").toUpperCase();
                         if (!["IMAGE", "VIDEO", "DOCUMENT"].includes(fmt)) return null;
+                        const varOptions = (() => {
+                          try {
+                            if (draft.triggerSource === "shopify") return shopifyVarsByTopic(draft.shopifyTopic);
+                            if (draft.triggerSource === "delivery") return DELIVERY_VARS;
+                            return ["phone", "text"];
+                          } catch {
+                            return ["phone", "text"];
+                          }
+                        })();
                         return (
                           <div className="mt-2">
                             <div className="text-xs text-slate-500 mb-1">Header {fmt} URL</div>
@@ -2079,6 +2289,19 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                               onChange={(e) => onChange({ templateHeaderUrl: e.target.value })}
                               placeholder="https://... (public image/video/pdf URL)"
                             />
+                            <div className="mt-2">
+                              <SingleSelectDropdown
+                                label="Or select a variable"
+                                options={varOptions}
+                                value=""
+                                placeholder="Choose variable…"
+                                onChange={(v) => {
+                                  const vv = String(v || "").trim();
+                                  if (!vv) return;
+                                  onChange({ templateHeaderUrl: `{{ ${vv} }}` });
+                                }}
+                              />
+                            </div>
                             <div className="text-[11px] text-slate-500 mt-1">
                               This template requires a {fmt} header. If you leave it empty, WhatsApp will reject the message (error 132012).
                             </div>
@@ -2092,53 +2315,70 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                     {(Array.isArray(draft.templateVars) && draft.templateVars.length > 0) && (
                       <div className="mt-3">
                         <div className="text-xs text-slate-500 mb-1">Body variables</div>
-                        {draft.triggerSource === "shopify" && (
-                          <div className="mb-2">
-                            <div className="text-[11px] text-slate-500 mb-1">Insert Shopify variable (click to copy)</div>
-                            <div className="flex flex-wrap gap-1">
-                              {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 16).map((v) => (
-                                <button
-                                  key={`shopvar2:${v}`}
-                                  type="button"
-                                  className="px-2 py-0.5 rounded border text-xs hover:bg-white"
-                                  onClick={() => copyVar(v)}
-                                >
-                                  {v}
-                                </button>
-                              ))}
+                        {(() => {
+                          const opts = (() => {
+                            try {
+                              if (draft.triggerSource === "shopify") return shopifyVarsByTopic(draft.shopifyTopic);
+                              if (draft.triggerSource === "delivery") return DELIVERY_VARS;
+                              return ["phone", "text"];
+                            } catch {
+                              return ["phone", "text"];
+                            }
+                          })();
+                          return (
+                            <div className="mb-2">
+                              <SingleSelectDropdown
+                                label="Select a variable to insert"
+                                options={opts}
+                                value=""
+                                placeholder="Choose variable…"
+                                onChange={(v) => {
+                                  const vv = String(v || "").trim();
+                                  if (!vv) return;
+                                  try { copyVar(vv); } catch {}
+                                }}
+                              />
+                              <div className="text-[11px] text-slate-500 mt-1">
+                                Tip: select a variable to copy it, then paste into any Var field below.
+                              </div>
                             </div>
-                          </div>
-                        )}
-                        {draft.triggerSource === "delivery" && (
-                          <div className="mb-2">
-                            <div className="text-[11px] text-slate-500 mb-1">Insert Delivery variable (click to copy)</div>
-                            <div className="flex flex-wrap gap-1">
-                              {DELIVERY_VARS.slice(0, 16).map((v) => (
-                                <button
-                                  key={`delvar2:${v}`}
-                                  type="button"
-                                  className="px-2 py-0.5 rounded border text-xs hover:bg-white"
-                                  onClick={() => copyVar(v)}
-                                >
-                                  {v}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                          );
+                        })()}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                           {draft.templateVars.map((v, idx) => (
-                            <input
-                              key={`tplvar:${idx}`}
-                              className="w-full border rounded-lg px-3 py-2"
-                              placeholder={`Var ${idx + 1} (e.g. {{ order_number }})`}
-                              value={v}
-                              onChange={(e) => {
-                                const next = [...draft.templateVars];
-                                next[idx] = e.target.value;
-                                onChange({ templateVars: next });
-                              }}
-                            />
+                            <div key={`tplvarwrap:${idx}`} className="grid grid-cols-1 gap-2">
+                              <input
+                                className="w-full border rounded-lg px-3 py-2"
+                                placeholder={`Var ${idx + 1} (e.g. {{ order_number }})`}
+                                value={v}
+                                onChange={(e) => {
+                                  const next = [...draft.templateVars];
+                                  next[idx] = e.target.value;
+                                  onChange({ templateVars: next });
+                                }}
+                              />
+                              <SingleSelectDropdown
+                                label={`Pick var for {{${idx + 1}}}`}
+                                options={(() => {
+                                  try {
+                                    if (draft.triggerSource === "shopify") return shopifyVarsByTopic(draft.shopifyTopic);
+                                    if (draft.triggerSource === "delivery") return DELIVERY_VARS;
+                                    return ["phone", "text"];
+                                  } catch {
+                                    return ["phone", "text"];
+                                  }
+                                })()}
+                                value=""
+                                placeholder="Choose…"
+                                onChange={(sel) => {
+                                  const vv = String(sel || "").trim();
+                                  if (!vv) return;
+                                  const next = [...draft.templateVars];
+                                  next[idx] = `{{ ${vv} }}`;
+                                  onChange({ templateVars: next });
+                                }}
+                              />
+                            </div>
                           ))}
                         </div>
                       </div>

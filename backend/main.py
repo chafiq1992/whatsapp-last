@@ -2786,6 +2786,24 @@ class DatabaseManager:
                 pass
             return {"user_id": user_id, "inbound_wa_message_id": inbound_wa, "inbound_ts": inbound_ts}
 
+    async def has_inbound_reply(self, *, user_id: str, inbound_wa_message_id: str) -> bool:
+        """Return True if the given inbound WA message id has any recorded first reply."""
+        uid = str(user_id or "").strip()
+        mid = str(inbound_wa_message_id or "").strip()
+        if not (uid and mid):
+            return False
+        async with self._conn() as db:
+            q = self._convert(
+                "SELECT 1 AS ok FROM inbound_replies WHERE user_id = ? AND inbound_wa_message_id = ? LIMIT 1"
+            )
+            params = (uid, mid)
+            if self.use_postgres:
+                row = await db.fetchrow(q, *params)
+            else:
+                cur = await db.execute(q, params)
+                row = await cur.fetchone()
+            return bool(row)
+
     # ── Conversation metadata (assignment, tags, avatar) ───────────
     async def get_conversation_meta(self, user_id: str) -> dict:
         async with self._conn() as db:
@@ -5643,6 +5661,8 @@ class MessageProcessor:
                 reply_id = (btn.get("id") or lst.get("id") or "").strip()
                 message_obj["type"] = "text"
                 message_obj["message"] = title or "[interactive_reply]"
+                message_obj["interactive_id"] = reply_id
+                message_obj["interactive_title"] = title
                 # Route survey interactions before generic acknowledgment
                 if reply_id.startswith("survey_"):
                     # Persist the textual reply bubble first
@@ -5794,14 +5814,8 @@ class MessageProcessor:
             if msg_type == "text":
                 await self._maybe_auto_reply_with_catalog(sender, message_obj.get("message", ""))
             elif msg_type == "interactive":
-                # Default acknowledgement when no special handler above
-                await self.process_outgoing_message({
-                    "user_id": sender,
-                    "type": "text",
-                    "from_me": True,
-                    "message": "Message reçu. Merci !\nتم استلام ردك، شكرًا لك!",
-                    "timestamp": datetime.utcnow().isoformat(),
-                })
+                # No default acknowledgement for interactive replies: let automations / flows respond.
+                pass
         except Exception as _exc:
             # Never break incoming flow due to auto-reply errors
             print(f"Auto-reply failed: {_exc}")
@@ -5809,14 +5823,19 @@ class MessageProcessor:
         # Workspace-scoped "simple automations" (admin-configured rules).
         # Run async so webhook ingest latency stays low.
         try:
-            if msg_type == "text":
-                txt = str(message_obj.get("message") or "")
-            else:
-                txt = ""
+            txt = str(message_obj.get("message") or "") if str(message_obj.get("type") or "") == "text" else ""
             # IMPORTANT: this runs after webhook processing may reset the workspace contextvar,
             # so bind the current workspace explicitly for the task.
             ws = get_current_workspace()
             asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
+            # Schedule "no reply after X" follow-ups (if any).
+            if txt and str(message_obj.get("wa_message_id") or "").strip():
+                asyncio.create_task(self._schedule_no_reply_followups(
+                    ws=_coerce_workspace(ws),
+                    user_id=sender,
+                    inbound_wa_message_id=str(message_obj.get("wa_message_id") or "").strip(),
+                    incoming_text=txt,
+                ))
         except Exception:
             pass
 
@@ -5908,6 +5927,369 @@ class MessageProcessor:
         except Exception:
             return str(s or "")
 
+    def _render_template_components(self, comps: Any, ctx: dict) -> list[dict]:
+        """Render {{ ... }} inside WhatsApp template components.
+
+        Supported:
+        - body text params: {type:"text", text:"{{ var }}"}
+        - header media params: image/video/document link fields
+        """
+        if not isinstance(comps, list):
+            return []
+        out: list[dict] = []
+        for c in comps:
+            if not isinstance(c, dict):
+                continue
+            cc = dict(c)
+            params = cc.get("parameters")
+            if isinstance(params, list):
+                new_params = []
+                for p in params:
+                    if not isinstance(p, dict):
+                        continue
+                    pp = dict(p)
+                    ptype = str(pp.get("type") or "").lower()
+                    if ptype == "text":
+                        pp["text"] = self._render_template(str(pp.get("text") or ""), ctx)
+                    elif ptype == "image" and isinstance(pp.get("image"), dict):
+                        img = dict(pp.get("image") or {})
+                        img["link"] = self._render_template(str(img.get("link") or ""), ctx)
+                        pp["image"] = img
+                    elif ptype == "video" and isinstance(pp.get("video"), dict):
+                        vid = dict(pp.get("video") or {})
+                        vid["link"] = self._render_template(str(vid.get("link") or ""), ctx)
+                        pp["video"] = vid
+                    elif ptype == "document" and isinstance(pp.get("document"), dict):
+                        doc = dict(pp.get("document") or {})
+                        doc["link"] = self._render_template(str(doc.get("link") or ""), ctx)
+                        pp["document"] = doc
+                    new_params.append(pp)
+                cc["parameters"] = new_params
+            out.append(cc)
+        return out
+
+    def _normalize_button_title(self, s: str) -> str:
+        try:
+            return re.sub(r"\s+", " ", str(s or "").strip()).lower()
+        except Exception:
+            return str(s or "").strip().lower()
+
+    def _match_button(self, *, title: str, reply_id: str, titles: list[str], ids: list[str]) -> bool:
+        """Match by id (preferred) or title (best-effort, includes truncation tolerance)."""
+        rid = str(reply_id or "").strip()
+        if rid and isinstance(ids, list):
+            idset = {str(x or "").strip() for x in ids if str(x or "").strip()}
+            if rid in idset:
+                return True
+        t = self._normalize_button_title(title)
+        if not t:
+            return False
+        cand = [self._normalize_button_title(x) for x in (titles or []) if str(x or "").strip()]
+        cand = [x for x in cand if x]
+        if t in cand:
+            return True
+        # WhatsApp may truncate titles (20 chars). Accept prefix matches.
+        for c in cand:
+            if c.startswith(t) or t.startswith(c):
+                return True
+        return False
+
+    def _oc_pending_key(self, ws: str, user_id: str) -> str:
+        return f"automation:order_confirm:pending:{_coerce_workspace(ws)}:{str(user_id or '').strip()}"
+
+    async def _set_order_confirm_pending(self, *, ws: str, user_id: str, state: dict, ttl_sec: int = 24 * 3600) -> None:
+        try:
+            rds = getattr(self.redis_manager, "redis_client", None)
+            if not rds:
+                return
+            key = self._oc_pending_key(ws, user_id)
+            await rds.set(key, json.dumps(state, ensure_ascii=False), ex=int(ttl_sec))
+        except Exception:
+            return
+
+    async def _get_order_confirm_pending(self, *, ws: str, user_id: str) -> Optional[dict]:
+        try:
+            rds = getattr(self.redis_manager, "redis_client", None)
+            if not rds:
+                return None
+            key = self._oc_pending_key(ws, user_id)
+            raw = await rds.get(key)
+            if not raw:
+                return None
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="ignore")
+            obj = json.loads(raw) if isinstance(raw, str) else None
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
+    async def _clear_order_confirm_pending(self, *, ws: str, user_id: str) -> None:
+        try:
+            rds = getattr(self.redis_manager, "redis_client", None)
+            if not rds:
+                return
+            await rds.delete(self._oc_pending_key(ws, user_id))
+        except Exception:
+            return
+
+    async def _shopify_first_item_image_url(self, data: dict) -> str:
+        """Best-effort fetch of first line item's product image URL (cached)."""
+        try:
+            if not isinstance(data, dict):
+                return ""
+            order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
+            line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
+            if not line_items:
+                return ""
+            first = line_items[0] if isinstance(line_items[0], dict) else {}
+            product_id = first.get("product_id")
+            pid = str(product_id).strip() if product_id is not None else ""
+            if not pid or not pid.isdigit():
+                return ""
+
+            rds = getattr(self.redis_manager, "redis_client", None)
+            cache_key = f"shopify:product:first_image:{_coerce_workspace(get_current_workspace())}:{pid}"
+            if rds:
+                try:
+                    cached = await rds.get(cache_key)
+                    if cached:
+                        if isinstance(cached, (bytes, bytearray)):
+                            cached = cached.decode("utf-8", errors="ignore")
+                        return str(cached or "").strip()
+                except Exception:
+                    pass
+
+            from .shopify_integration import admin_api_base, _client_args  # type: ignore
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(f"{admin_api_base()}/products/{pid}.json", **_client_args())
+                if resp.status_code != 200:
+                    return ""
+                product = (resp.json() or {}).get("product") or {}
+                imgs = product.get("images") if isinstance(product, dict) else []
+                if not isinstance(imgs, list) or not imgs:
+                    return ""
+                src = str((imgs[0] or {}).get("src") or "").strip() if isinstance(imgs[0], dict) else ""
+                if src and rds:
+                    try:
+                        await rds.set(cache_key, src, ex=24 * 3600)
+                    except Exception:
+                        pass
+                return src
+        except Exception:
+            return ""
+
+    async def _schedule_no_reply_followups(self, *, ws: str, user_id: str, inbound_wa_message_id: str, incoming_text: str) -> None:
+        """Schedule all whatsapp:no_reply rules that match this inbound message."""
+        try:
+            if not inbound_wa_message_id:
+                return
+            rules = await self._load_automation_rules(ws)
+            if not rules:
+                return
+            text = str(incoming_text or "")
+            text_lc = text.lower()
+            for rule in rules:
+                try:
+                    if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
+                        continue
+                    trigger = rule.get("trigger") or {}
+                    if not isinstance(trigger, dict):
+                        continue
+                    if str(trigger.get("source") or "").lower() != "whatsapp":
+                        continue
+                    if str(trigger.get("event") or "").lower() != "no_reply":
+                        continue
+                    cond = rule.get("condition") or {}
+                    if not isinstance(cond, dict):
+                        cond = {}
+                    seconds = int(cond.get("seconds") or 0)
+                    if seconds <= 0:
+                        seconds = 30 * 60
+                    keywords = cond.get("keywords")
+                    kws = [str(x or "").strip() for x in keywords if str(x or "").strip()] if isinstance(keywords, list) else []
+                    if kws and not any((k.lower() in text_lc) for k in kws):
+                        continue
+
+                    rid = str(rule.get("id") or "")
+                    async def _job(_rule: dict, _rid: str, _sec: int):
+                        try:
+                            await asyncio.sleep(max(1, int(_sec)))
+                            # If replied, skip
+                            if await self.db_manager.has_inbound_reply(user_id=user_id, inbound_wa_message_id=inbound_wa_message_id):
+                                return
+                            ctx = {
+                                "phone": user_id,
+                                "user_id": user_id,
+                                "text": text,
+                                "inbound_wa_message_id": inbound_wa_message_id,
+                            }
+                            # Execute actions (same subset as simple automations)
+                            actions = _rule.get("actions") or []
+                            if isinstance(actions, dict):
+                                actions = [actions]
+                            if not isinstance(actions, list):
+                                actions = []
+                            for act in actions:
+                                if not isinstance(act, dict):
+                                    continue
+                                at = str(act.get("type") or "").strip().lower()
+                                if at in ("send_text", "send_whatsapp_text"):
+                                    msg = self._render_template(str(act.get("text") or ""), ctx).strip()
+                                    if not msg:
+                                        continue
+                                    await self.process_outgoing_message({
+                                        "user_id": self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "message": msg,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                    })
+                                elif at in ("send_template", "send_whatsapp_template", "order_confirmation_flow"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                                    if not tname:
+                                        continue
+                                    lang = str(act.get("language") or "en").strip() or "en"
+                                    comps = self._render_template_components(act.get("components") or [], ctx)
+                                    preview = str(act.get("preview") or f"[template] {tname}")
+                                    await self.process_outgoing_message({
+                                        "user_id": to_id,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "message": preview,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                        "template_name": tname,
+                                        "template_language": lang,
+                                        "template_components": comps,
+                                    })
+                                elif at in ("add_tag", "tag"):
+                                    tag = str(act.get("tag") or "").strip()
+                                    if not tag:
+                                        continue
+                                    try:
+                                        meta = await self.db_manager.get_conversation_meta(user_id)
+                                        tags = list((meta or {}).get("tags") or []) if isinstance(meta, dict) else []
+                                    except Exception:
+                                        tags = []
+                                    if tag not in tags:
+                                        tags.append(tag)
+                                        try:
+                                            await self.db_manager.set_conversation_tags(user_id, tags)
+                                            await self.connection_manager.broadcast_to_admins({
+                                                "type": "conversation_tags_updated",
+                                                "data": {"user_id": user_id, "tags": tags},
+                                            })
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            return
+
+                    asyncio.create_task(_job(rule, rid, seconds))
+                except Exception:
+                    continue
+        except Exception:
+            return
+
+    async def _handle_order_confirm_click(self, *, ws: str, user_id: str, title: str, reply_id: str) -> bool:
+        """If a pending order-confirmation flow exists and this click matches a branch, execute it."""
+        try:
+            state = await self._get_order_confirm_pending(ws=ws, user_id=user_id)
+            if not state:
+                return False
+
+            confirm_titles = state.get("confirm_titles") if isinstance(state.get("confirm_titles"), list) else []
+            change_titles = state.get("change_titles") if isinstance(state.get("change_titles"), list) else []
+            talk_titles = state.get("talk_titles") if isinstance(state.get("talk_titles"), list) else []
+            confirm_ids = state.get("confirm_ids") if isinstance(state.get("confirm_ids"), list) else []
+            change_ids = state.get("change_ids") if isinstance(state.get("change_ids"), list) else []
+            talk_ids = state.get("talk_ids") if isinstance(state.get("talk_ids"), list) else []
+
+            branch = None
+            if self._match_button(title=title, reply_id=reply_id, titles=confirm_titles, ids=confirm_ids):
+                branch = "confirm"
+            elif self._match_button(title=title, reply_id=reply_id, titles=change_titles, ids=change_ids):
+                branch = "change"
+            elif self._match_button(title=title, reply_id=reply_id, titles=talk_titles, ids=talk_ids):
+                branch = "talk"
+            else:
+                return False
+
+            # One-shot: clear pending to avoid double processing
+            await self._clear_order_confirm_pending(ws=ws, user_id=user_id)
+
+            audio_url = ""
+            if branch == "confirm":
+                audio_url = str(state.get("confirm_audio_url") or "").strip()
+            elif branch == "change":
+                audio_url = str(state.get("change_audio_url") or "").strip()
+            elif branch == "talk":
+                audio_url = str(state.get("talk_audio_url") or "").strip()
+
+            if audio_url.startswith(("http://", "https://")):
+                await self.process_outgoing_message({
+                    "user_id": user_id,
+                    "type": "audio",
+                    "from_me": True,
+                    "message": audio_url,
+                    "url": audio_url,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent_username": "automation",
+                })
+
+            # Optional: after confirm, send ordered items as catalog cards (best-effort title -> catalog match)
+            if branch == "confirm" and bool(state.get("send_items")):
+                try:
+                    titles = state.get("line_item_titles") if isinstance(state.get("line_item_titles"), list) else []
+                    titles = [str(x or "").strip() for x in titles if str(x or "").strip()]
+                    max_items = int(state.get("max_items") or 10)
+                    sent = 0
+                    for t in titles:
+                        if sent >= max_items:
+                            break
+                        hit = await self._best_catalog_match(t)
+                        if not hit:
+                            continue
+                        rid = str(hit.get("retailer_id") or hit.get("product_retailer_id") or "").strip()
+                        if not rid:
+                            continue
+                        await self.process_outgoing_message({
+                            "user_id": user_id,
+                            "type": "catalog_item",
+                            "from_me": True,
+                            "retailer_id": rid,
+                            "caption": "",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "agent_username": "automation",
+                        })
+                        sent += 1
+                except Exception:
+                    pass
+
+            # Optional: tag conversation for agent handoff
+            if branch == "talk":
+                try:
+                    meta = await self.db_manager.get_conversation_meta(user_id)
+                    tags = list((meta or {}).get("tags") or []) if isinstance(meta, dict) else []
+                except Exception:
+                    tags = []
+                if "talk_to_agent" not in tags:
+                    tags.append("talk_to_agent")
+                    try:
+                        await self.db_manager.set_conversation_tags(user_id, tags)
+                        await self.connection_manager.broadcast_to_admins({
+                            "type": "conversation_tags_updated",
+                            "data": {"user_id": user_id, "tags": tags},
+                        })
+                    except Exception:
+                        pass
+
+            return True
+        except Exception:
+            return False
+
     async def _run_simple_automations(self, user_id: str, incoming_text: str, message_obj: dict | None = None, workspace: str | None = None) -> None:
         """Execute enabled simple automation rules for an inbound WhatsApp text message."""
         ws_token = None
@@ -5939,6 +6321,23 @@ class MessageProcessor:
                 "user_id": user_id,
                 "text": text,
             }
+            # Include button metadata (interactive replies are coerced into text bubbles)
+            try:
+                if isinstance(message_obj, dict):
+                    ctx["button_id"] = str(message_obj.get("interactive_id") or "")
+                    ctx["button_title"] = str(message_obj.get("interactive_title") or "")
+            except Exception:
+                pass
+
+            # If there's a pending confirmation flow, handle clicks first (one-shot)
+            try:
+                ws0 = _coerce_workspace(ws)
+                reply_id = str((message_obj or {}).get("interactive_id") or "").strip()
+                title0 = str((message_obj or {}).get("interactive_title") or text or "").strip()
+                if title0 and await self._handle_order_confirm_click(ws=ws0, user_id=user_id, title=title0, reply_id=reply_id):
+                    return
+            except Exception:
+                pass
 
             for rule in rules:
                 try:
@@ -6056,7 +6455,7 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = act.get("components") or []
+                            comps = self._render_template_components(act.get("components") or [], ctx)
                             if not tname:
                                 continue
                             # Provide a visible bubble to the inbox (message preview) while sending the template.
@@ -6073,6 +6472,58 @@ class MessageProcessor:
                                 "template_language": lang,
                                 "template_components": comps,
                             })
+                        elif at == "order_confirmation_flow":
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                            if not tname:
+                                continue
+                            lang = str(act.get("language") or "en").strip() or "en"
+                            comps = self._render_template_components(act.get("components") or [], ctx)
+                            preview = str(act.get("preview") or f"[template] {tname}")
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": preview,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                                "template_name": tname,
+                                "template_language": lang,
+                                "template_components": comps,
+                            })
+                            # Save pending branch config for future button clicks
+                            try:
+                                line_items = (ctx.get("line_items") if isinstance(ctx.get("line_items"), list) else []) or []
+                                titles = []
+                                for li in line_items:
+                                    if isinstance(li, dict):
+                                        t = str(li.get("title") or li.get("name") or "").strip()
+                                        if t:
+                                            titles.append(t)
+                                await self._set_order_confirm_pending(
+                                    ws=_coerce_workspace(ws),
+                                    user_id=to_id,
+                                    state={
+                                        "rule_id": str(rule.get("id") or ""),
+                                        "template_name": tname,
+                                        "confirm_titles": act.get("confirm_titles") or [],
+                                        "change_titles": act.get("change_titles") or [],
+                                        "talk_titles": act.get("talk_titles") or [],
+                                        "confirm_ids": act.get("confirm_ids") or [],
+                                        "change_ids": act.get("change_ids") or [],
+                                        "talk_ids": act.get("talk_ids") or [],
+                                        "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
+                                        "change_audio_url": str(act.get("change_audio_url") or ""),
+                                        "talk_audio_url": str(act.get("talk_audio_url") or ""),
+                                        "send_items": bool(act.get("send_items")),
+                                        "max_items": int(act.get("max_items") or 10),
+                                        "line_item_titles": titles,
+                                        "created_at": datetime.utcnow().isoformat(),
+                                    },
+                                    ttl_sec=24 * 3600,
+                                )
+                            except Exception:
+                                pass
                         elif at in ("add_tag", "tag"):
                             tag = str(act.get("tag") or "").strip()
                             if not tag:
@@ -6191,12 +6642,26 @@ class MessageProcessor:
                     pass
 
             # Context for templating
+            order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
+            shipping_address = (order_obj.get("shipping_address") if isinstance(order_obj.get("shipping_address"), dict) else {})
+            billing_address = (order_obj.get("billing_address") if isinstance(order_obj.get("billing_address"), dict) else {})
+            line_items = (order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else [])
+            try:
+                first_item_image = await self._shopify_first_item_image_url(data)
+            except Exception:
+                first_item_image = ""
             ctx = {
                 "topic": topic_norm,
                 "phone": phone_digits,
-                "customer": (data.get("customer") if isinstance(data.get("customer"), dict) else {}),
-                "order_number": data.get("name") or data.get("order_number") or "",
-                "total_price": data.get("total_price") or "",
+                "customer": (order_obj.get("customer") if isinstance(order_obj.get("customer"), dict) else (data.get("customer") if isinstance(data.get("customer"), dict) else {})),
+                "order_number": order_obj.get("name") or data.get("name") or data.get("order_number") or "",
+                "total_price": order_obj.get("total_price") or data.get("total_price") or "",
+                # Convenient aliases used by the UI dropdowns
+                "shipping_address": shipping_address,
+                "billing_address": billing_address,
+                "line_items": line_items,
+                "order_first_item_image_url": first_item_image,
+                # Full raw payload for power users
                 "payload": data,
             }
 
@@ -6307,9 +6772,7 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = act.get("components") or []
-                            if not isinstance(comps, list):
-                                comps = []
+                            comps = self._render_template_components(act.get("components") or [], ctx)
                             if not (to_id and tname):
                                 continue
                             preview = str(act.get("preview") or f"[template] {tname}")
@@ -6324,6 +6787,63 @@ class MessageProcessor:
                                 "template_language": lang,
                                 "template_components": comps,
                             })
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
+                        elif at == "order_confirmation_flow":
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
+                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                            if not (to_id and tname):
+                                continue
+                            lang = str(act.get("language") or "en").strip() or "en"
+                            comps = self._render_template_components(act.get("components") or [], ctx)
+                            preview = str(act.get("preview") or f"[template] {tname}")
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": preview,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                                "template_name": tname,
+                                "template_language": lang,
+                                "template_components": comps,
+                            })
+                            try:
+                                # Persist branch config for clicks (store line item titles from Shopify order payload)
+                                order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
+                                line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
+                                titles = []
+                                for li in line_items:
+                                    if isinstance(li, dict):
+                                        t = str(li.get("title") or li.get("name") or "").strip()
+                                        if t:
+                                            titles.append(t)
+                                await self._set_order_confirm_pending(
+                                    ws=_coerce_workspace(ws),
+                                    user_id=to_id,
+                                    state={
+                                        "rule_id": str(rule.get("id") or ""),
+                                        "template_name": tname,
+                                        "confirm_titles": act.get("confirm_titles") or [],
+                                        "change_titles": act.get("change_titles") or [],
+                                        "talk_titles": act.get("talk_titles") or [],
+                                        "confirm_ids": act.get("confirm_ids") or [],
+                                        "change_ids": act.get("change_ids") or [],
+                                        "talk_ids": act.get("talk_ids") or [],
+                                        "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
+                                        "change_audio_url": str(act.get("change_audio_url") or ""),
+                                        "talk_audio_url": str(act.get("talk_audio_url") or ""),
+                                        "send_items": bool(act.get("send_items")),
+                                        "max_items": int(act.get("max_items") or 10),
+                                        "line_item_titles": titles,
+                                        "created_at": datetime.utcnow().isoformat(),
+                                    },
+                                    ttl_sec=24 * 3600,
+                                )
+                            except Exception:
+                                pass
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
                             except Exception:
@@ -6515,9 +7035,7 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             lang = str(act.get("language") or "en").strip() or "en"
-                            comps = act.get("components") or []
-                            if not isinstance(comps, list):
-                                comps = []
+                            comps = self._render_template_components(act.get("components") or [], ctx)
                             if not (to_id and tname):
                                 continue
                             preview = str(act.get("preview") or f"[template] {tname}")
@@ -6532,6 +7050,62 @@ class MessageProcessor:
                                 "template_language": lang,
                                 "template_components": comps,
                             })
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
+                            except Exception:
+                                pass
+                        elif at == "order_confirmation_flow":
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
+                            tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                            if not (to_id and tname):
+                                continue
+                            lang = str(act.get("language") or "en").strip() or "en"
+                            comps = self._render_template_components(act.get("components") or [], ctx)
+                            preview = str(act.get("preview") or f"[template] {tname}")
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "text",
+                                "from_me": True,
+                                "message": preview,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                                "template_name": tname,
+                                "template_language": lang,
+                                "template_components": comps,
+                            })
+                            try:
+                                titles = []
+                                order_obj = ctx.get("order") if isinstance(ctx.get("order"), dict) else {}
+                                line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
+                                for li in line_items:
+                                    if isinstance(li, dict):
+                                        t = str(li.get("title") or li.get("name") or "").strip()
+                                        if t:
+                                            titles.append(t)
+                                await self._set_order_confirm_pending(
+                                    ws=_coerce_workspace(ws),
+                                    user_id=to_id,
+                                    state={
+                                        "rule_id": str(rule.get("id") or ""),
+                                        "template_name": tname,
+                                        "confirm_titles": act.get("confirm_titles") or [],
+                                        "change_titles": act.get("change_titles") or [],
+                                        "talk_titles": act.get("talk_titles") or [],
+                                        "confirm_ids": act.get("confirm_ids") or [],
+                                        "change_ids": act.get("change_ids") or [],
+                                        "talk_ids": act.get("talk_ids") or [],
+                                        "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
+                                        "change_audio_url": str(act.get("change_audio_url") or ""),
+                                        "talk_audio_url": str(act.get("talk_audio_url") or ""),
+                                        "send_items": bool(act.get("send_items")),
+                                        "max_items": int(act.get("max_items") or 10),
+                                        "line_item_titles": titles,
+                                        "created_at": datetime.utcnow().isoformat(),
+                                    },
+                                    ttl_sec=24 * 3600,
+                                )
+                            except Exception:
+                                pass
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
                             except Exception:

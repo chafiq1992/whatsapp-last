@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App.js';
 import StudioPage from './StudioPage';
 import AutomationSettingsPage from './AutomationSettingsPage';
+import AnalyticsPage from './AnalyticsPage';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 
@@ -14,8 +15,10 @@ function getRoute() {
     const isStudio = (hash && hash.includes('/automation-studio')) || path === '/automation-studio' || path.startsWith('/automation-studio/');
     const isAutomationSettings = (hash && hash.includes('/automation-settings')) || path === '/automation-settings' || path.startsWith('/automation-settings/');
     const isSettings = (hash && hash.includes('/settings')) || path === '/settings' || path.startsWith('/settings/');
+    const isAnalytics = (hash && hash.includes('/analytics')) || path === '/analytics' || path.startsWith('/analytics/');
     if (isSettings || isAutomationSettings) return 'settings';
     if (isStudio) return 'studio';
+    if (isAnalytics) return 'analytics';
     return 'app';
   } catch {
     return 'app';
@@ -35,7 +38,11 @@ function RouterRoot() {
     };
   }, []);
 
-  return route === 'settings' ? <AutomationSettingsPage /> : (route === 'studio' ? <StudioPage /> : <App />);
+  return route === 'settings'
+    ? <AutomationSettingsPage />
+    : (route === 'studio'
+      ? <StudioPage />
+      : (route === 'analytics' ? <AnalyticsPage /> : <App />));
 }
 
 root.render(<RouterRoot />);

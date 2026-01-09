@@ -10269,6 +10269,23 @@ async def app_config(request: Request):
                 delivery_statuses = _parse_str_list(_env_ws("DELIVERY_STATUSES"))
             except Exception:
                 delivery_statuses = []
+        # Safe fallback: ship with a sane default list so the UI dropdown isn't empty.
+        # Override via DB/env as needed per deployment.
+        if not delivery_statuses:
+            delivery_statuses = [
+                "Dispatched",
+                "Livré",
+                "Paid",
+                "En cours",
+                "Pas de réponse 1",
+                "Pas de réponse 2",
+                "Pas de réponse 3",
+                "Annulé",
+                "Refusé",
+                "Rescheduled",
+                "Returned",
+                "Deleted",
+            ]
 
         return {
             "workspace": ws,

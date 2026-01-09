@@ -265,16 +265,19 @@ export default function AutomationSettingsPage() {
   return (
     <div className="h-screen w-screen bg-white">
       <header className="h-12 px-3 flex items-center justify-between border-b bg-white/70 backdrop-blur sticky top-0 z-50">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="text-sm font-semibold text-gray-800 truncate">Settings</div>
+        </div>
         <div className="flex items-center gap-2">
-          <button className="px-3 py-1.5 text-sm bg-gray-800 text-white rounded" onClick={() => (window.location.href = '/#/automation-studio')}>
-            Automation
-          </button>
           <button className="px-3 py-1.5 text-sm bg-gray-200 text-gray-900 rounded border border-gray-300" onClick={() => (window.location.href = '/')}>
             Inbox
           </button>
-          <div className="text-sm font-semibold text-gray-800 ml-2">Settings</div>
-        </div>
-        <div className="flex items-center gap-2">
+          <button className="px-3 py-1.5 text-sm bg-gray-200 text-gray-900 rounded border border-gray-300" onClick={() => (window.location.href = '/#/analytics')}>
+            Analytics
+          </button>
+          <button className="px-3 py-1.5 text-sm bg-gray-800 text-white rounded" onClick={() => (window.location.href = '/#/automation-studio')}>
+            Automation
+          </button>
           <select
             className="border rounded px-2 py-1 text-sm"
             value={workspace}

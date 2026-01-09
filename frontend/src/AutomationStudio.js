@@ -316,7 +316,7 @@ function makeEdge(from, fromPort, to, toPort) {
 export default function AutomationStudio({ onClose }) {
   // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
   // Settings are now in a dedicated page (/#/automation-settings).
-  const [mode, setMode] = useState("simple"); // simple | templates | env | (legacy flow editor)
+  const [mode, setMode] = useState("simple"); // simple | templates | (legacy flow editor)
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesSaving, setRulesSaving] = useState(false);
@@ -369,16 +369,6 @@ export default function AutomationStudio({ onClose }) {
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [templatesError, setTemplatesError] = useState("");
   const [templates, setTemplates] = useState([]);
-
-  const [envLoading, setEnvLoading] = useState(true);
-  const [envSaving, setEnvSaving] = useState(false);
-  const [envError, setEnvError] = useState("");
-  const [envDraft, setEnvDraft] = useState({
-    allowed_phone_number_ids: "",
-    survey_test_numbers: "",
-    auto_reply_test_numbers: "",
-    waba_id: "",
-  });
 
   const loadRules = async () => {
     setRulesError("");
@@ -433,48 +423,9 @@ export default function AutomationStudio({ onClose }) {
     }
   };
 
-  const loadInboxEnv = async () => {
-    setEnvError("");
-    setEnvLoading(true);
-    try {
-      const res = await api.get("/admin/inbox-env");
-      const d = res?.data || {};
-      const join = (arr) => (Array.isArray(arr) ? arr.filter(Boolean).join("\n") : "");
-      setEnvDraft({
-        allowed_phone_number_ids: join(d.allowed_phone_number_ids),
-        survey_test_numbers: join(d.survey_test_numbers),
-        auto_reply_test_numbers: join(d.auto_reply_test_numbers),
-        waba_id: String(d.waba_id || ""),
-      });
-    } catch (e) {
-      setEnvError("Failed to load environment settings.");
-    } finally {
-      setEnvLoading(false);
-    }
-  };
-
-  const saveInboxEnv = async () => {
-    setEnvError("");
-    setEnvSaving(true);
-    try {
-      await api.post("/admin/inbox-env", {
-        allowed_phone_number_ids: envDraft.allowed_phone_number_ids,
-        survey_test_numbers: envDraft.survey_test_numbers,
-        auto_reply_test_numbers: envDraft.auto_reply_test_numbers,
-        waba_id: envDraft.waba_id,
-      });
-      await loadInboxEnv();
-    } catch (e) {
-      setEnvError("Failed to save environment settings.");
-    } finally {
-      setEnvSaving(false);
-    }
-  };
-
   useEffect(() => {
     loadRules();
     loadRuleStats();
-    loadInboxEnv();
     // Templates are optional; don't block page load if not configured.
     loadTemplates();
     // Load available workspaces for per-rule scoping UI (best-effort).
@@ -652,13 +603,21 @@ export default function AutomationStudio({ onClose }) {
             >
               WhatsApp Templates
             </button>
-            <button
-              className={`px-2 py-1 border rounded text-sm ${mode === "env" ? "bg-blue-50 border-blue-200" : ""}`}
-              onClick={() => setMode("env")}
-            >
-              Environment
-            </button>
           </div>
+          <button
+            className="px-2 py-1 border rounded text-sm"
+            onClick={() => { try { window.location.href = '/'; } catch {} }}
+            title="Back to Inbox"
+          >
+            Inbox
+          </button>
+          <button
+            className="px-2 py-1 border rounded text-sm"
+            onClick={() => { try { window.location.href = '/#/analytics'; } catch {} }}
+            title="Analytics"
+          >
+            Analytics
+          </button>
           <button
             className="px-2 py-1 border rounded text-sm"
             onClick={() => { try { window.location.href = '/#/settings'; } catch {} }}
@@ -1022,16 +981,6 @@ export default function AutomationStudio({ onClose }) {
           loading={templatesLoading}
           error={templatesError}
           onRefresh={loadTemplates}
-        />
-      ) : mode === "env" ? (
-        <InboxEnvSettings
-          loading={envLoading}
-          saving={envSaving}
-          error={envError}
-          values={envDraft}
-          onChange={(patch) => setEnvDraft((prev) => ({ ...prev, ...patch }))}
-          onRefresh={loadInboxEnv}
-          onSave={saveInboxEnv}
         />
       ) : (
         <>
@@ -2667,6 +2616,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
 }
 */
 
+// (Unused) Environment editor kept for backward compatibility; the UI entry point was removed.
 function InboxEnvSettings({ loading, saving, error, values, onChange, onRefresh, onSave }) {
   return (
     <div className="p-4 max-w-5xl mx-auto">

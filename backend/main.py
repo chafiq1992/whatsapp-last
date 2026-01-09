@@ -5338,7 +5338,7 @@ class MessageProcessor:
                 env_cfg = await self._get_inbox_env(get_current_workspace())
                 expected_pid = str((env_cfg or {}).get("phone_number_id") or "").strip()
                 if expected_pid and incoming_phone_id and (str(incoming_phone_id).strip() != expected_pid):
-                    def _ws_for_pid(pid: str) -> str:
+                    async def _ws_for_pid(pid: str) -> str:
                         try:
                             p = str(pid or "").strip()
                             if not p:
@@ -5376,7 +5376,7 @@ class MessageProcessor:
                         except Exception:
                             return ""
 
-                    target_ws = _ws_for_pid(incoming_phone_id)
+                    target_ws = await _ws_for_pid(incoming_phone_id)
                     if target_ws and target_ws != get_current_workspace():
                         _vlog(
                             f"🔁 Rerouting webhook by phone_number_id: incoming={incoming_phone_id} from={get_current_workspace()} to={target_ws}"

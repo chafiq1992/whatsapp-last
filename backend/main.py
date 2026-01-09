@@ -5317,12 +5317,34 @@ class MessageProcessor:
             except Exception:
                 hinted_ws = None
 
+            def _ws_from_config(pid: str) -> str:
+                """Best-effort: map incoming phone_number_id to workspace by scanning runtime/env configs."""
+                try:
+                    p = str(pid or "").strip()
+                    if not p:
+                        return ""
+                    for _w, _cfg in (RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+                        try:
+                            if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
+                                return _coerce_workspace(_w)
+                        except Exception:
+                            continue
+                    for _w, _cfg in (WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+                        try:
+                            if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
+                                return _coerce_workspace(_w)
+                        except Exception:
+                            continue
+                    return ""
+                except Exception:
+                    return ""
+
             # Prefer runtime mapping (can be updated from DB settings). Fallback to env-derived mapping.
             ws_from_phone = (RUNTIME_PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or PHONE_ID_TO_WORKSPACE.get(incoming_phone_id))
             # Workspace hint is best-effort; the authoritative routing key is metadata.phone_number_id.
             ws_from_phone_norm = _coerce_workspace(ws_from_phone) if ws_from_phone else ""
             hinted_ws_norm = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else ""
-            derived_ws = ws_from_phone_norm or hinted_ws_norm or ""
+            derived_ws = _ws_from_config(incoming_phone_id) or ws_from_phone_norm or hinted_ws_norm or ""
             if hinted_ws_norm and ws_from_phone_norm and hinted_ws_norm != ws_from_phone_norm:
                 _vlog(
                     f"⚠️ Webhook workspace hint mismatch: hinted={hinted_ws_norm} phone_map={ws_from_phone_norm} phone_number_id={incoming_phone_id} (using phone_map)"
@@ -5356,6 +5378,23 @@ class MessageProcessor:
                                             return ws2
                             except Exception:
                                 pass
+                            # Next: scan per-workspace inbox_env (DB + env defaults) for a matching phone_number_id.
+                            # This avoids relying on a stale _workspace hint or per-instance memory maps.
+                            try:
+                                candidates = sorted(list(_all_workspaces_set()))
+                            except Exception:
+                                candidates = sorted(list(set((WORKSPACES or [DEFAULT_WORKSPACE]))))
+                            for w in candidates:
+                                ww = _coerce_workspace(w)
+                                if not ww:
+                                    continue
+                                try:
+                                    cfg = await self._get_inbox_env(ww)
+                                    pid2 = str((cfg or {}).get("phone_number_id") or "").strip()
+                                    if pid2 and pid2 == p:
+                                        return ww
+                                except Exception:
+                                    continue
                             # Prefer scanning runtime configs (avoids stale phone_id map entries).
                             for _w, _cfg in (RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
                                 try:
@@ -5437,7 +5476,10 @@ class MessageProcessor:
                     await self._handle_incoming_message(message)
 
         except Exception as e:
+            # Critical: re-raise so the durable queue (Redis Streams / Postgres webhook_events)
+            # can retry and eventually DLQ instead of silently dropping the webhook.
             print(f"Webhook processing error: {e}")
+            raise
         finally:
             if ws_token is not None:
                 try:

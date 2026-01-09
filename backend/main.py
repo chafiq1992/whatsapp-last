@@ -5403,6 +5403,9 @@ class MessageProcessor:
                         raise RuntimeError(
                             f"phone_number_id mismatch (unroutable): workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
                         )
+            except RuntimeError:
+                # Important: do NOT swallow routing failures; the webhook worker must retry and/or DLQ.
+                raise
             except Exception:
                 pass
 
@@ -8777,6 +8780,104 @@ async def replay_webhook_dlq(payload: dict = Body(...), _: dict = Depends(requir
             continue
 
     return {"ok": True, "replayed": replayed, "count": count}
+
+
+@app.get("/admin/webhook-events/stats")
+async def webhook_events_stats(_: dict = Depends(require_admin), hours: int = 72):
+    """Inspect Postgres webhook queue stats (requires DATABASE_URL + WEBHOOK_USE_DB_QUEUE=1)."""
+    hours = max(1, min(24 * 30, int(hours or 72)))
+    if not getattr(db_manager, "use_postgres", False):
+        raise HTTPException(status_code=400, detail="webhook_events stats require Postgres (DATABASE_URL)")
+    try:
+        async with db_manager._conn() as db:
+            rows = await db.fetch(
+                """
+                SELECT status, COUNT(*) AS c
+                FROM webhook_events
+                WHERE created_at >= NOW() - ($1 * INTERVAL '1 hour')
+                GROUP BY status
+                """,
+                int(hours),
+            )
+            dead = await db.fetch(
+                """
+                SELECT id, attempts, created_at, updated_at, LEFT(COALESCE(last_error,''), 500) AS last_error
+                FROM webhook_events
+                WHERE status='dead'
+                  AND created_at >= NOW() - ($1 * INTERVAL '1 hour')
+                ORDER BY id DESC
+                LIMIT 50
+                """,
+                int(hours),
+            )
+        out = {str(r["status"]): int(r["c"] or 0) for r in (rows or [])}
+        return {"ok": True, "hours": hours, "counts": out, "dead_sample": [dict(x) for x in (dead or [])]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to query webhook_events: {exc}")
+
+
+@app.post("/admin/webhook-events/replay")
+async def webhook_events_replay(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Replay Postgres webhook events by resetting status back to pending.
+
+    Use this when you had a processing outage (routing mismatch, worker crash, etc).
+    """
+    if not getattr(db_manager, "use_postgres", False):
+        raise HTTPException(status_code=400, detail="webhook_events replay requires Postgres (DATABASE_URL)")
+    mode = str((payload or {}).get("mode") or "dead").strip().lower()  # dead | retry | pending | all
+    hours = 72
+    try:
+        hours = int((payload or {}).get("hours") or 72)
+    except Exception:
+        hours = 72
+    hours = max(1, min(24 * 30, hours))
+    limit = 500
+    try:
+        limit = int((payload or {}).get("limit") or 500)
+    except Exception:
+        limit = 500
+    limit = max(1, min(5000, limit))
+
+    statuses = {
+        "dead": ["dead"],
+        "retry": ["retry"],
+        "pending": ["pending"],
+        "all": ["dead", "retry", "pending"],
+    }.get(mode, ["dead"])
+
+    try:
+        async with db_manager._conn() as db:
+            ids = await db.fetch(
+                """
+                SELECT id
+                FROM webhook_events
+                WHERE status = ANY($1::text[])
+                  AND created_at >= NOW() - ($2 * INTERVAL '1 hour')
+                ORDER BY id ASC
+                LIMIT $3
+                """,
+                statuses,
+                int(hours),
+                int(limit),
+            )
+            id_list = [int(r["id"]) for r in (ids or [])]
+            if not id_list:
+                return {"ok": True, "replayed": 0, "mode": mode, "hours": hours, "limit": limit}
+            await db.execute(
+                """
+                UPDATE webhook_events
+                SET status='pending',
+                    next_attempt_at=NOW(),
+                    locked_at=NULL,
+                    lock_owner=NULL,
+                    updated_at=NOW()
+                WHERE id = ANY($1::bigint[])
+                """,
+                id_list,
+            )
+        return {"ok": True, "replayed": len(id_list), "mode": mode, "hours": hours, "limit": limit}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to replay webhook_events: {exc}")
 
 
 # ---- Workspace registry + per-workspace UI settings (admin) ----

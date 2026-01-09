@@ -70,8 +70,21 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                     f"⏭️ Webhook ignored at ingress for phone_number_id {incoming_phone_id} (allowed {sorted(list(rt.allowed_phone_number_ids))[:10]})"
                 )
                 return {"ok": True}
-            # Only attach a workspace hint when we have a concrete mapping.
-            ws = rt.phone_id_to_workspace.get(incoming_phone_id) if incoming_phone_id else None
+            # Prefer a shared mapping (Redis) so multi-instance deployments don't rely on per-instance memory.
+            ws = None
+            try:
+                r = getattr(rt.redis_manager, "redis_client", None)
+                if r and incoming_phone_id:
+                    raw = await r.hget("wa:phone_id_to_workspace", incoming_phone_id)
+                    if raw is not None:
+                        if isinstance(raw, (bytes, bytearray)):
+                            raw = raw.decode("utf-8", "ignore")
+                        ws = str(raw or "").strip()
+            except Exception:
+                ws = None
+            # Fallback to in-memory mapping (seeded from env and updated on admin save).
+            if not ws:
+                ws = rt.phone_id_to_workspace.get(incoming_phone_id) if incoming_phone_id else None
             if ws:
                 data["_workspace"] = rt.coerce_workspace(ws)
         except Exception:

@@ -5343,6 +5343,19 @@ class MessageProcessor:
                             p = str(pid or "").strip()
                             if not p:
                                 return ""
+                            # Prefer shared Redis mapping (multi-instance stable)
+                            try:
+                                r = getattr(self.redis_manager, "redis_client", None)
+                                if r:
+                                    raw = await r.hget("wa:phone_id_to_workspace", p)
+                                    if raw is not None:
+                                        if isinstance(raw, (bytes, bytearray)):
+                                            raw = raw.decode("utf-8", "ignore")
+                                        ws2 = _coerce_workspace(str(raw or "").strip())
+                                        if ws2:
+                                            return ws2
+                            except Exception:
+                                pass
                             # Prefer scanning runtime configs (avoids stale phone_id map entries).
                             for _w, _cfg in (RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
                                 try:
@@ -5386,10 +5399,10 @@ class MessageProcessor:
                             )
                             return
                     else:
-                        _vlog(
-                            f"⏭️ Skipping webhook: phone_number_id mismatch workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
+                        # Treat as a processing failure so the webhook worker can retry and/or DLQ.
+                        raise RuntimeError(
+                            f"phone_number_id mismatch (unroutable): workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
                         )
-                        return
             except Exception:
                 pass
 
@@ -8673,6 +8686,37 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         message_processor._inbox_env_cache.pop(ws, None)
     except Exception:
         pass
+    # Persist phone_number_id -> workspace mapping in shared storage (Redis/auth DB) for multi-instance stability.
+    try:
+        pid = str(phone_number_id or "").strip()
+        ws_norm = _coerce_workspace(ws_now)
+        if pid and ws_norm:
+            # 1) Redis (preferred for fast lookups by /webhook ingress)
+            try:
+                r = getattr(redis_manager, "redis_client", None)
+                if r:
+                    await r.hset("wa:phone_id_to_workspace", pid, ws_norm)
+            except Exception:
+                pass
+            # 2) Auth DB (durable fallback; also helps rebuild mappings on cold start)
+            try:
+                raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
+                m = json.loads(raw_map) if raw_map else {}
+                if not isinstance(m, dict):
+                    m = {}
+                # Remove any other phone IDs pointing to this workspace (avoid duplicates)
+                try:
+                    for k, v in list(m.items()):
+                        if str(v or "").strip().lower() == ws_norm and str(k or "").strip() != pid:
+                            m.pop(k, None)
+                except Exception:
+                    pass
+                m[pid] = ws_norm
+                await auth_db_manager.set_setting("phone_id_to_workspace", m)
+            except Exception:
+                pass
+    except Exception:
+        pass
     # Update runtime WhatsApp routing immediately (no redeploy needed).
     try:
         await _sync_whatsapp_runtime_for_workspace(ws_now)
@@ -8687,6 +8731,52 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     except Exception:
         pass
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}
+
+
+@app.post("/admin/webhook-dlq/replay")
+async def replay_webhook_dlq(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Replay webhook DLQ entries back into the main webhook stream.
+
+    This is a safety net for periods where processing was failing (e.g., routing mismatch).
+    Requires Redis Streams to be enabled/available.
+    """
+    count = 50
+    try:
+        count = int((payload or {}).get("count") or 50)
+    except Exception:
+        count = 50
+    count = max(1, min(500, count))
+
+    r = getattr(redis_manager, "redis_client", None)
+    if not r or not WEBHOOK_USE_REDIS_STREAM:
+        raise HTTPException(status_code=400, detail="DLQ replay requires Redis Streams")
+
+    try:
+        items = await r.xrevrange(WEBHOOK_STREAM_DLQ_KEY, max="+", min="-", count=count)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read DLQ: {exc}")
+
+    replayed = 0
+    for _id, fields in reversed(items or []):  # replay oldest -> newest
+        try:
+            raw = None
+            if isinstance(fields, dict):
+                raw = fields.get("payload")
+                if raw is None:
+                    raw = fields.get(b"payload")
+            if raw is None:
+                continue
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", "ignore")
+            raw = str(raw or "").strip()
+            if not raw:
+                continue
+            await r.xadd(WEBHOOK_STREAM_KEY, {"payload": raw})
+            replayed += 1
+        except Exception:
+            continue
+
+    return {"ok": True, "replayed": replayed, "count": count}
 
 
 # ---- Workspace registry + per-workspace UI settings (admin) ----

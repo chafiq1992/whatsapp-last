@@ -1915,14 +1915,14 @@ class DatabaseManager:
 
     async def _add_column_if_missing(self, db, table: str, column: str, col_def: str):
         """Add a column to a table if it doesn't already exist."""
-        exists = False
         if self.use_postgres:
-            q = (
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name=$1 AND column_name=$2"
-            )
-            exists = bool(await db.fetchrow(q, table, column))
+            # Postgres: use the native IF NOT EXISTS so this remains robust across schemas/search_path.
+            # This avoids false positives (e.g., a column existing in a different schema) and fixes
+            # cases where information_schema checks can be misleading.
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_def}")
+            return
         else:
+            exists = False
             cur = await db.execute(f"PRAGMA table_info({table})")
             cols = [r[1] for r in await cur.fetchall()]
             exists = column in cols

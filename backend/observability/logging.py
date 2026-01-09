@@ -56,6 +56,26 @@ def configure_logging(
     root = logging.getLogger()
     root.setLevel(lvl)
 
+    # Ensure every LogRecord has these attributes, even for loggers/handlers that
+    # don't use our filters (e.g., uvicorn's own handlers).
+    try:
+        old_factory = logging.getLogRecordFactory()
+
+        def _factory(*args, **kwargs):  # type: ignore[no-redef]
+            record = old_factory(*args, **kwargs)
+            # Provide safe defaults to avoid KeyError in formatters.
+            if not hasattr(record, "request_id"):
+                record.request_id = None
+            if not hasattr(record, "workspace"):
+                record.workspace = None
+            if not hasattr(record, "agent_username"):
+                record.agent_username = None
+            return record
+
+        logging.setLogRecordFactory(_factory)
+    except Exception:
+        pass
+
     # If something already configured handlers (uvicorn), avoid duplicating them.
     if not root.handlers:
         handler = logging.StreamHandler()

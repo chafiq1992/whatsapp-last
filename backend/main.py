@@ -208,6 +208,18 @@ async def _sync_whatsapp_runtime_for_workspace(workspace: str) -> None:
         cfg = {}
     phone_id = str((cfg or {}).get("phone_number_id") or "").strip()
     token = str((cfg or {}).get("access_token") or "").strip()
+    # Remove stale phone_id → workspace mappings for this workspace.
+    # Otherwise, changing a workspace phone_number_id can leave the old phone_id routed to this workspace,
+    # causing webhook mis-routing and intermittent "phone_number_id mismatch" skips.
+    try:
+        for pid, w in list((RUNTIME_PHONE_ID_TO_WORKSPACE or {}).items()):
+            if str(w or "").strip().lower() == ws and str(pid or "").strip() != str(phone_id or "").strip():
+                try:
+                    del RUNTIME_PHONE_ID_TO_WORKSPACE[pid]
+                except Exception:
+                    pass
+    except Exception:
+        pass
     # Only update if meaningful; keep env fallback otherwise.
     try:
         if phone_id and not _is_placeholder_phone(phone_id):
@@ -5307,9 +5319,14 @@ class MessageProcessor:
 
             # Prefer runtime mapping (can be updated from DB settings). Fallback to env-derived mapping.
             ws_from_phone = (RUNTIME_PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or PHONE_ID_TO_WORKSPACE.get(incoming_phone_id))
-            # If a workspace hint was attached by ingress, trust it (after coercion).
-            # Otherwise, route strictly by phone_number_id mapping.
-            derived_ws = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else (_coerce_workspace(ws_from_phone) if ws_from_phone else "")
+            # Workspace hint is best-effort; the authoritative routing key is metadata.phone_number_id.
+            ws_from_phone_norm = _coerce_workspace(ws_from_phone) if ws_from_phone else ""
+            hinted_ws_norm = _coerce_workspace(str(hinted_ws or "")) if hinted_ws else ""
+            derived_ws = ws_from_phone_norm or hinted_ws_norm or ""
+            if hinted_ws_norm and ws_from_phone_norm and hinted_ws_norm != ws_from_phone_norm:
+                _vlog(
+                    f"⚠️ Webhook workspace hint mismatch: hinted={hinted_ws_norm} phone_map={ws_from_phone_norm} phone_number_id={incoming_phone_id} (using phone_map)"
+                )
             if not derived_ws:
                 # Unknown phone_number_id → do not process into any workspace (prevents leakage).
                 _vlog(f"⏭️ Skipping webhook: unknown phone_number_id={incoming_phone_id}")
@@ -5321,10 +5338,58 @@ class MessageProcessor:
                 env_cfg = await self._get_inbox_env(get_current_workspace())
                 expected_pid = str((env_cfg or {}).get("phone_number_id") or "").strip()
                 if expected_pid and incoming_phone_id and (str(incoming_phone_id).strip() != expected_pid):
-                    _vlog(
-                        f"⏭️ Skipping webhook: phone_number_id mismatch workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
-                    )
-                    return
+                    def _ws_for_pid(pid: str) -> str:
+                        try:
+                            p = str(pid or "").strip()
+                            if not p:
+                                return ""
+                            # Prefer scanning runtime configs (avoids stale phone_id map entries).
+                            for _w, _cfg in (RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+                                try:
+                                    if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
+                                        return _coerce_workspace(_w)
+                                except Exception:
+                                    continue
+                            for _w, _cfg in (WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+                                try:
+                                    if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
+                                        return _coerce_workspace(_w)
+                                except Exception:
+                                    continue
+                            # Fallback to maps
+                            return _coerce_workspace(
+                                (RUNTIME_PHONE_ID_TO_WORKSPACE.get(p) or PHONE_ID_TO_WORKSPACE.get(p) or "")
+                            )
+                        except Exception:
+                            return ""
+
+                    target_ws = _ws_for_pid(incoming_phone_id)
+                    if target_ws and target_ws != get_current_workspace():
+                        _vlog(
+                            f"🔁 Rerouting webhook by phone_number_id: incoming={incoming_phone_id} from={get_current_workspace()} to={target_ws}"
+                        )
+                        # Switch workspace context (avoid dropping the webhook due to a bad hint/stale map)
+                        try:
+                            if ws_token is not None:
+                                _CURRENT_WORKSPACE.reset(ws_token)
+                        except Exception:
+                            pass
+                        ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(target_ws))
+                        try:
+                            env_cfg = await self._get_inbox_env(get_current_workspace())
+                            expected_pid = str((env_cfg or {}).get("phone_number_id") or "").strip()
+                        except Exception:
+                            expected_pid = ""
+                        if expected_pid and incoming_phone_id and (str(incoming_phone_id).strip() != expected_pid):
+                            _vlog(
+                                f"⏭️ Skipping webhook after reroute: phone_number_id mismatch workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
+                            )
+                            return
+                    else:
+                        _vlog(
+                            f"⏭️ Skipping webhook: phone_number_id mismatch workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
+                        )
+                        return
             except Exception:
                 pass
 

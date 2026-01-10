@@ -2852,7 +2852,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       Variables: <span className="font-mono">{"{{ phone }}"}</span>, <span className="font-mono">{"{{ text }}"}</span>, <span className="font-mono">{"{{ order_number }}"}</span>
                     </div>
                   </div>
-                )))))}
+                ))))}
               </div>
 
               <div className="md:col-span-2">

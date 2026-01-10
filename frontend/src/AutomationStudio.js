@@ -346,19 +346,31 @@ export default function AutomationStudio({ onClose }) {
     tag: "",
     cooldownSeconds: 0,
     triggerSource: "whatsapp",
-    waTriggerMode: "incoming", // incoming | no_reply
+    waTriggerMode: "incoming", // incoming | no_reply | button
     noReplyMinutes: 30,
+    whatsappTestPhones: "",
+    waNoUrlNoDigit: false,
+    buttonIds: "",
     shopifyTopic: "orders/paid",
     shopifyTaggedWith: "",
     shopifyTestPhones: "",
+    shopifyTagOnSent: "",
     deliveryStatuses: "",
     deliveryTestPhones: "",
-    actionMode: "text", // 'text' | 'template' | 'order_confirm'
+    actionMode: "text", // 'text' | 'template' | 'order_confirm' | 'buttons' | 'list' | 'order_status'
     to: "{{ phone }}",
     templateName: "",
     templateLanguage: "en",
     templateVars: [],
     templateHeaderUrl: "",
+    // Buttons action
+    buttonsText: "",
+    buttonsLines: "buy_item|Acheter | شراء\norder_status|Statut | حالة",
+    // List action
+    listText: "",
+    listButtonText: "Choisir | اختر",
+    listSectionTitle: "Options",
+    listRowsLines: "gender_girls|Fille | بنت\ngender_boys|Garçon | ولد",
     // Order confirmation flow (multi-step)
     ocConfirmTitles: "تأكيد الطلب\nتاكيد الطلب",
     ocChangeTitles: "تغيير المعلومات\nتغير المعلومات",
@@ -696,6 +708,9 @@ export default function AutomationStudio({ onClose }) {
             const aTag = acts.find((x) => String(x?.type || "").toLowerCase().includes("tag")) || null;
             const aTpl = acts.find((x) => String(x?.type || "").toLowerCase().includes("template")) || null;
             const aOC = acts.find((x) => ["order_confirmation_flow", "order_confirm_flow"].includes(String(x?.type || "").toLowerCase())) || null;
+            const aButtons = acts.find((x) => String(x?.type || "").toLowerCase() === "send_buttons") || null;
+            const aList = acts.find((x) => String(x?.type || "").toLowerCase() === "send_list") || null;
+            const aStatus = acts.find((x) => String(x?.type || "").toLowerCase() === "shopify_order_status") || null;
             const trig = (r && r.trigger) || {};
             const source = String(trig.source || "whatsapp").toLowerCase();
             const testPhones = Array.isArray(r?.test_phone_numbers) ? r.test_phone_numbers : [];
@@ -764,7 +779,9 @@ export default function AutomationStudio({ onClose }) {
               tag: String(aTag?.tag || ""),
               cooldownSeconds: Number(r.cooldown_seconds || 0),
               triggerSource: source === "shopify" ? "shopify" : (source === "delivery" ? "delivery" : "whatsapp"),
-              waTriggerMode: (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "no_reply") ? "no_reply" : "incoming",
+              waTriggerMode: (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "no_reply")
+                ? "no_reply"
+                : (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "interactive" ? "button" : "incoming"),
               noReplyMinutes: (() => {
                 try {
                   const c = (r?.condition && typeof r.condition === "object") ? r.condition : {};
@@ -773,19 +790,70 @@ export default function AutomationStudio({ onClose }) {
                 } catch {}
                 return 30;
               })(),
+              whatsappTestPhones: (!isDelivery && source !== "shopify") ? testPhonesStr : "",
+              waNoUrlNoDigit: String(r?.condition?.match || "").toLowerCase() === "no_url_no_digit",
+              buttonIds: (() => {
+                try {
+                  const m = String(r?.condition?.match || "").toLowerCase();
+                  if (m === "button_id" || m === "interactive_id") {
+                    const v = String(r?.condition?.value || "").trim();
+                    const ids = Array.isArray(r?.condition?.ids) ? r.condition.ids : [];
+                    const arr = v ? [v] : ids;
+                    return (arr || []).map((x) => String(x || "").trim()).filter(Boolean).join("\n");
+                  }
+                } catch {}
+                return "";
+              })(),
               shopifyTopic: trigEvent || "orders/paid",
               shopifyTopicPreset: isCustomTopic ? "orders/paid" : (trigEvent || "orders/paid"),
               shopifyTopicCustom: isCustomTopic ? trigEvent : "",
               shopifyTaggedWith: taggedWith,
               shopifyTestPhones: testPhonesStr,
+              shopifyTagOnSent: String((aText?.shopify_tag_on_sent || aTpl?.shopify_tag_on_sent || aOC?.shopify_tag_on_sent) || ""),
               deliveryStatuses: isDelivery ? statusesStr : "",
               deliveryTestPhones: isDelivery ? testPhonesStr : "",
-              actionMode: aOC ? "order_confirm" : (aTpl ? "template" : "text"),
+              actionMode: aStatus ? "order_status" : (aButtons ? "buttons" : (aList ? "list" : (aOC ? "order_confirm" : (aTpl ? "template" : "text")))),
               to: String((aText?.to || aTpl?.to || aOC?.to) || "{{ phone }}"),
               templateName: String(aTpl?.template_name || aOC?.template_name || ""),
               templateLanguage: String(aTpl?.language || aOC?.language || "en"),
               templateVars: tplVars,
               templateHeaderUrl: tplHeaderUrl,
+              buttonsText: String(aButtons?.text || aButtons?.message || ""),
+              buttonsLines: (() => {
+                try {
+                  const bs = Array.isArray(aButtons?.buttons) ? aButtons.buttons : [];
+                  return bs
+                    .map((b) => `${String(b?.id || "").trim()}|${String(b?.title || "").trim()}`)
+                    .filter((x) => {
+                      const parts = x.split("|");
+                      return String(parts[0] || "").trim() && String(parts[1] || "").trim();
+                    })
+                    .join("\n");
+                } catch {
+                  return "";
+                }
+              })(),
+              listText: String(aList?.text || aList?.message || ""),
+              listButtonText: String(aList?.button_text || "Choose"),
+              listSectionTitle: String((((Array.isArray(aList?.sections) ? aList.sections : [])[0] || {})?.title) || ""),
+              listRowsLines: (() => {
+                try {
+                  const secs = Array.isArray(aList?.sections) ? aList.sections : [];
+                  const rows = Array.isArray(secs?.[0]?.rows) ? secs[0].rows : [];
+                  return rows
+                    .map((r0) => {
+                      const id = String(r0?.id || "").trim();
+                      const title = String(r0?.title || "").trim();
+                      const desc = String(r0?.description || "").trim();
+                      if (!id || !title) return "";
+                      return desc ? `${id}|${title}|${desc}` : `${id}|${title}`;
+                    })
+                    .filter(Boolean)
+                    .join("\n");
+                } catch {
+                  return "";
+                }
+              })(),
               ocEntryGateMode: String(aOC?.entry_gate_mode || "all"),
               ocRequiredTag: String(aOC?.required_tag || "easysell_cod_form"),
               ocIncludeOnlineStore: aOC?.include_online_store !== undefined ? !!aOC.include_online_store : true,
@@ -833,6 +901,14 @@ export default function AutomationStudio({ onClose }) {
                   .split(",")
                   .map((x) => x.trim())
                   .filter(Boolean);
+                const whatsappTestPhones = String(draft.whatsappTestPhones || "")
+                  .split(/\r?\n|,/g)
+                  .map((x) => x.trim())
+                  .filter(Boolean);
+                const buttonIds = String(draft.buttonIds || "")
+                  .split(/\r?\n|,/g)
+                  .map((x) => x.trim())
+                  .filter(Boolean);
                 const testPhones = String(draft.shopifyTestPhones || "")
                   .split(/\r?\n|,/g)
                   .map((x) => x.trim())
@@ -869,6 +945,8 @@ export default function AutomationStudio({ onClose }) {
                     return [currentWorkspace];
                   }
                 })();
+
+                const shopifyTagOnSent = String(draft.shopifyTagOnSent || "").trim();
 
                 if (draft.actionMode === "order_confirm") {
                   const tn = String(draft.templateName || "").trim();
@@ -909,6 +987,7 @@ export default function AutomationStudio({ onClose }) {
                       language: String(draft.templateLanguage || "en"),
                       components: comps,
                       preview: `[template] ${tn}`,
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
                       entry_gate_mode: String(draft.ocEntryGateMode || "all"),
                       required_tag: String(draft.ocRequiredTag || "").trim(),
                       include_online_store: !!draft.ocIncludeOnlineStore,
@@ -969,10 +1048,71 @@ export default function AutomationStudio({ onClose }) {
                       language: String(draft.templateLanguage || "en"),
                       components: comps,
                       preview: `[template] ${tn}`,
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
                     });
                   }
+                } else if (draft.actionMode === "buttons") {
+                  const body = String(draft.buttonsText || draft.replyText || "").trim();
+                  const lines = String(draft.buttonsLines || "")
+                    .split(/\r?\n/g)
+                    .map((x) => x.trim())
+                    .filter(Boolean);
+                  const btns = [];
+                  for (const ln of lines) {
+                    const parts = ln.split("|");
+                    const id = String(parts[0] || "").trim();
+                    const title = String(parts.slice(1).join("|") || "").trim();
+                    if (id && title) btns.push({ id, title });
+                  }
+                  if (body && btns.length) {
+                    actions.push({
+                      type: "send_buttons",
+                      to: String(draft.to || "{{ phone }}"),
+                      text: body,
+                      buttons: btns,
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                    });
+                  }
+                } else if (draft.actionMode === "list") {
+                  const body = String(draft.listText || draft.replyText || "").trim();
+                  const buttonText = String(draft.listButtonText || "Choose").trim();
+                  const sectionTitle = String(draft.listSectionTitle || "").trim();
+                  const rowLines = String(draft.listRowsLines || "")
+                    .split(/\r?\n/g)
+                    .map((x) => x.trim())
+                    .filter(Boolean);
+                  const rows = [];
+                  for (const ln of rowLines) {
+                    const parts = ln.split("|");
+                    const id = String(parts[0] || "").trim();
+                    const title = String(parts[1] || "").trim();
+                    const desc = String(parts.slice(2).join("|") || "").trim();
+                    if (!id || !title) continue;
+                    const row = { id, title };
+                    if (desc) row.description = desc;
+                    rows.push(row);
+                  }
+                  if (body && rows.length) {
+                    actions.push({
+                      type: "send_list",
+                      to: String(draft.to || "{{ phone }}"),
+                      text: body,
+                      button_text: buttonText,
+                      sections: [{ ...(sectionTitle ? { title: sectionTitle } : {}), rows }],
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                    });
+                  }
+                } else if (draft.actionMode === "order_status") {
+                  actions.push({ type: "shopify_order_status" });
                 } else {
-                  if ((draft.replyText || "").trim()) actions.push({ type: "send_text", to: String(draft.to || "{{ phone }}"), text: String(draft.replyText || "") });
+                  if ((draft.replyText || "").trim()) {
+                    actions.push({
+                      type: "send_text",
+                      to: String(draft.to || "{{ phone }}"),
+                      text: String(draft.replyText || ""),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                    });
+                  }
                 }
                 if ((draft.tag || "").trim()) actions.push({ type: "add_tag", tag: String(draft.tag || "").trim() });
                 const tagged = String(draft.shopifyTaggedWith || "").trim();
@@ -987,7 +1127,14 @@ export default function AutomationStudio({ onClose }) {
                       ? { source: "shopify", event: String(shopifyTopicEffective || "orders/paid") }
                       : draft.triggerSource === "delivery"
                         ? { source: "delivery", event: "order_status_changed" }
-                        : { source: "whatsapp", event: (String(draft.waTriggerMode || "incoming") === "no_reply" ? "no_reply" : "incoming_message") },
+                        : {
+                          source: "whatsapp",
+                          event: (
+                            String(draft.waTriggerMode || "incoming") === "no_reply"
+                              ? "no_reply"
+                              : (String(draft.waTriggerMode || "incoming") === "button" ? "interactive" : "incoming_message")
+                          ),
+                        },
                   condition:
                     draft.triggerSource === "shopify" && tagged
                       ? { match: "tag_contains", value: tagged }
@@ -995,12 +1142,15 @@ export default function AutomationStudio({ onClose }) {
                         ? (deliveryStatuses.length ? { match: "status_in", statuses: deliveryStatuses } : { match: "any" })
                         : (String(draft.waTriggerMode || "incoming") === "no_reply"
                           ? { match: "no_reply_for", seconds: Math.max(60, Number(draft.noReplyMinutes || 30) * 60), keywords: kws }
-                          : { match: "contains", keywords: kws }),
+                          : (String(draft.waTriggerMode || "incoming") === "button"
+                            ? { match: "button_id", ids: buttonIds }
+                            : (draft.waNoUrlNoDigit ? { match: "no_url_no_digit" } : { match: "contains", keywords: kws })
+                          )),
                   ...(draft.triggerSource === "shopify"
                     ? { test_phone_numbers: testPhones }
                     : draft.triggerSource === "delivery"
                       ? { test_phone_numbers: deliveryTestPhones }
-                      : {}),
+                      : (whatsappTestPhones.length ? { test_phone_numbers: whatsappTestPhones } : {})),
                   actions,
                 };
                 const next = (() => {
@@ -1985,6 +2135,19 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     if (draft.actionMode === "text") {
       return tagOk || !!String(draft.replyText || "").trim();
     }
+    if (draft.actionMode === "buttons") {
+      const bodyOk = !!String(draft.buttonsText || "").trim();
+      const hasBtn = String(draft.buttonsLines || "").trim().length > 0;
+      return tagOk || (bodyOk && hasBtn);
+    }
+    if (draft.actionMode === "list") {
+      const bodyOk = !!String(draft.listText || "").trim();
+      const hasRows = String(draft.listRowsLines || "").trim().length > 0;
+      return tagOk || (bodyOk && hasRows);
+    }
+    if (draft.actionMode === "order_status") {
+      return true; // built-in lookup action (no extra input required)
+    }
     // template / order_confirm require a selected template (tag-only rules are allowed, but rarely intended)
     return !!String(draft.templateName || "").trim() || tagOk;
   }, [draft]);
@@ -2135,12 +2298,29 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                           onChange={(e) => onChange({ waTriggerMode: e.target.value })}
                         >
                           <option value="incoming">Incoming message</option>
+                          <option value="button">Button/list click</option>
                           <option value="no_reply">No reply after time</option>
                         </select>
                         <div className="text-[11px] text-slate-500 mt-1">
-                          Use <span className="font-mono">Incoming message</span> for keyword auto-replies, or <span className="font-mono">No reply</span> to follow up when the customer is waiting.
+                          Use <span className="font-mono">Incoming message</span> for keyword auto-replies, <span className="font-mono">Button click</span> for interactive flows, or <span className="font-mono">No reply</span> to follow up when the customer is waiting.
                         </div>
                       </div>
+
+                      {String(draft.waTriggerMode || "incoming") === "button" && (
+                        <div>
+                          <div className="text-xs text-slate-500 mb-1">Button IDs (one per line)</div>
+                          <textarea
+                            className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                            rows={3}
+                            value={draft.buttonIds || ""}
+                            onChange={(e) => onChange({ buttonIds: e.target.value })}
+                            placeholder={"buy_item\norder_status\ngender_girls"}
+                          />
+                          <div className="text-[11px] text-slate-500 mt-1">
+                            Match by <span className="font-mono">interactive.id</span> (recommended). These IDs come from your buttons/list rows.
+                          </div>
+                        </div>
+                      )}
 
                       {String(draft.waTriggerMode || "incoming") === "no_reply" && (
                         <div>
@@ -2157,6 +2337,37 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                           </div>
                         </div>
                       )}
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Test phone numbers (optional)</div>
+                        <textarea
+                          className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                          rows={3}
+                          value={draft.whatsappTestPhones || ""}
+                          onChange={(e) => onChange({ whatsappTestPhones: e.target.value })}
+                          placeholder={"+212612345678\n+212600000000"}
+                        />
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          If set, this rule only fires for these numbers (digits-only match).
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Special condition (optional)</div>
+                        <label className="text-xs text-slate-700 flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={!!draft.waNoUrlNoDigit}
+                            onChange={(e) => onChange({ waNoUrlNoDigit: !!e.target.checked })}
+                            disabled={String(draft.waTriggerMode || "incoming") !== "incoming"}
+                          />
+                          Only when message has no URL and no digits (menu-style)
+                        </label>
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          This is used for “choose an option” style menus. It only applies to <span className="font-mono">Incoming message</span>.
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -2221,6 +2432,18 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         <div className="text-[11px] text-slate-500 mt-1">
                           If set, this rule only fires when the Shopify payload phone matches one of these numbers.
                         </div>
+                      </div>
+                    </div>
+                    <div className="mt-3">
+                      <div className="text-xs text-slate-500 mb-1">Add tag after WhatsApp send succeeds (optional)</div>
+                      <input
+                        className="w-full border rounded-lg px-3 py-2"
+                        value={draft.shopifyTagOnSent || ""}
+                        onChange={(e) => onChange({ shopifyTagOnSent: e.target.value })}
+                        placeholder="e.g. whatsapp_sent"
+                      />
+                      <div className="text-[11px] text-slate-500 mt-1">
+                        If set, the app will add this tag to the Shopify order after the WhatsApp message is sent successfully.
                       </div>
                     </div>
                   </div>
@@ -2313,6 +2536,15 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   </button>
                   <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "order_confirm" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "order_confirm" })}>
                     Confirmation flow
+                  </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "buttons" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "buttons" })}>
+                    Buttons
+                  </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "list" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "list" })}>
+                    List
+                  </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "order_status" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "order_status" })}>
+                    Order status lookup
                   </button>
                 </div>
 
@@ -2567,6 +2799,51 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       </div>
                     )}
                   </div>
+                ) : (draft.actionMode === "buttons" ? (
+                  <div className="border rounded-xl p-3 bg-slate-50 space-y-3">
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Buttons body text</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2" rows={4} value={draft.buttonsText || ""} onChange={(e) => onChange({ buttonsText: e.target.value })} placeholder="Veuillez choisir une option…" />
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Buttons (one per line: id|title)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={4} value={draft.buttonsLines || ""} onChange={(e) => onChange({ buttonsLines: e.target.value })} placeholder={"buy_item|Acheter | شراء\norder_status|Statut | حالة"} />
+                      <div className="text-[11px] text-slate-500 mt-1">
+                        Prefer matching by button <span className="font-mono">id</span> (stable). WhatsApp truncates long titles.
+                      </div>
+                    </div>
+                  </div>
+                ) : (draft.actionMode === "list" ? (
+                  <div className="border rounded-xl p-3 bg-slate-50 space-y-3">
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">List body text</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2" rows={3} value={draft.listText || ""} onChange={(e) => onChange({ listText: e.target.value })} placeholder="Veuillez choisir: Fille ou Garçon…" />
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">List button label</div>
+                        <input className="w-full border rounded-lg px-3 py-2" value={draft.listButtonText || ""} onChange={(e) => onChange({ listButtonText: e.target.value })} placeholder="Choisir | اختر" />
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Section title</div>
+                        <input className="w-full border rounded-lg px-3 py-2" value={draft.listSectionTitle || ""} onChange={(e) => onChange({ listSectionTitle: e.target.value })} placeholder="Genre | النوع" />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Rows (one per line: id|title|description optional)</div>
+                      <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={4} value={draft.listRowsLines || ""} onChange={(e) => onChange({ listRowsLines: e.target.value })} placeholder={"gender_girls|Fille | بنت\ngender_boys|Garçon | ولد"} />
+                    </div>
+                  </div>
+                ) : (draft.actionMode === "order_status" ? (
+                  <div className="border rounded-xl p-3 bg-slate-50">
+                    <div className="text-xs text-slate-500 mb-1">Order status lookup</div>
+                    <div className="text-sm text-slate-700">
+                      This action queries Shopify for recent orders by the customer phone and sends a bilingual status summary.
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-2">
+                      Tip: use a WhatsApp <span className="font-mono">Button/list click</span> trigger and match <span className="font-mono">order_status</span>.
+                    </div>
+                  </div>
                 ) : (
                   <div className="border rounded-xl p-3 bg-slate-50">
                     <div className="text-xs text-slate-500 mb-1">Auto-reply text</div>
@@ -2575,7 +2852,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       Variables: <span className="font-mono">{"{{ phone }}"}</span>, <span className="font-mono">{"{{ text }}"}</span>, <span className="font-mono">{"{{ order_number }}"}</span>
                     </div>
                   </div>
-                )}
+                )))))}
               </div>
 
               <div className="md:col-span-2">

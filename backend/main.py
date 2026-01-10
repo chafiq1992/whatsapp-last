@@ -4336,9 +4336,168 @@ class MessageProcessor:
             try:
                 raw = await auth_db_manager.get_setting("automation_rules_v2")
                 data = json.loads(raw) if raw else []
-                if isinstance(data, list) and len(data) > 0:
-                    _AUTOMATION_RULES_V2_INIT_DONE = True
-                    return data
+                if isinstance(data, list):
+                    # Best-effort one-time seeding of built-in rules so hardcoded automations become visible/editable.
+                    # IMPORTANT: after seeding once, we never re-add them (so users can delete them permanently).
+                    try:
+                        seeded_flag = await auth_db_manager.get_setting("automation_rules_v2_seeded_builtin_v1")
+                        already_seeded = bool(str(seeded_flag or "").strip())
+                    except Exception:
+                        already_seeded = False
+                    if not already_seeded:
+                        try:
+                            # Seed a workspace-scoped set of rules for the existing hardcoded "catalog quick buttons" flow.
+                            # We keep the gating behavior (test numbers) by copying inbox_env.auto_reply_test_numbers.
+                            next_data = list(data or [])
+                            existing_ids = {str((r or {}).get("id") or "").strip() for r in next_data if isinstance(r, dict)}
+                            for ws in sorted(list(_all_workspaces_set())):
+                                w = _normalize_workspace_id(ws)
+                                if not w:
+                                    continue
+                                try:
+                                    env_cfg = await self._get_inbox_env(w)
+                                    auto_reply_tests = (env_cfg or {}).get("auto_reply_test_numbers") or set()
+                                    if isinstance(auto_reply_tests, set):
+                                        tests = sorted([_digits_only(str(x or "")) for x in auto_reply_tests if _digits_only(str(x or ""))])
+                                    elif isinstance(auto_reply_tests, list):
+                                        tests = sorted([_digits_only(str(x or "")) for x in auto_reply_tests if _digits_only(str(x or ""))])
+                                    else:
+                                        tests = []
+                                except Exception:
+                                    tests = []
+
+                                rid_menu = f"builtin_menu_buttons_{w}"
+                                if rid_menu not in existing_ids:
+                                    next_data.append({
+                                        "id": rid_menu,
+                                        "name": "Menu buttons (buy/status) — built-in",
+                                        "enabled": True,
+                                        "cooldown_seconds": 24 * 3600,
+                                        "trigger": {"source": "whatsapp", "event": "incoming_message"},
+                                        "condition": {"match": "no_url_no_digit"},
+                                        "actions": [{
+                                            "type": "send_buttons",
+                                            "to": "{{ phone }}",
+                                            "text": (
+                                                "Veuillez choisir une option :\n"
+                                                "Je veux acheter un article\n"
+                                                "Je veux vérifier le statut de ma commande\n\n"
+                                                "اختر خيارًا:\n"
+                                                "أريد شراء منتج\n"
+                                                "أريد التحقق من حالة طلبي"
+                                            ),
+                                            "buttons": [
+                                                {"id": "buy_item", "title": "Acheter | شراء"},
+                                                {"id": "order_status", "title": "Statut | حالة"},
+                                            ],
+                                        }],
+                                        "workspaces": [w],
+                                        **({"test_phone_numbers": tests} if tests else {}),
+                                    })
+                                    existing_ids.add(rid_menu)
+
+                                # When customer clicks "order_status" button -> run Shopify lookup
+                                rid_status = f"builtin_order_status_{w}"
+                                if rid_status not in existing_ids:
+                                    next_data.append({
+                                        "id": rid_status,
+                                        "name": "Order status (button) — built-in",
+                                        "enabled": True,
+                                        "cooldown_seconds": 10,
+                                        "trigger": {"source": "whatsapp", "event": "interactive"},
+                                        "condition": {"match": "button_id", "value": "order_status"},
+                                        "actions": [{"type": "shopify_order_status"}],
+                                        "workspaces": [w],
+                                        **({"test_phone_numbers": tests} if tests else {}),
+                                    })
+                                    existing_ids.add(rid_status)
+
+                                # When customer clicks "buy_item" -> show gender list
+                                rid_buy = f"builtin_buy_item_{w}"
+                                if rid_buy not in existing_ids:
+                                    next_data.append({
+                                        "id": rid_buy,
+                                        "name": "Buy flow (button → gender list) — built-in",
+                                        "enabled": True,
+                                        "cooldown_seconds": 2,
+                                        "trigger": {"source": "whatsapp", "event": "interactive"},
+                                        "condition": {"match": "button_id", "value": "buy_item"},
+                                        "actions": [{
+                                            "type": "send_list",
+                                            "to": "{{ phone }}",
+                                            "text": (
+                                                "Veuillez choisir: Fille ou Garçon\n"
+                                                "يرجى الاختيار: بنت أم ولد"
+                                            ),
+                                            "button_text": "Choisir | اختر",
+                                            "sections": [{
+                                                "title": "Genre | النوع",
+                                                "rows": [
+                                                    {"id": "gender_girls", "title": "Fille | بنت"},
+                                                    {"id": "gender_boys", "title": "Garçon | ولد"},
+                                                ],
+                                            }],
+                                        }],
+                                        "workspaces": [w],
+                                        **({"test_phone_numbers": tests} if tests else {}),
+                                    })
+                                    existing_ids.add(rid_buy)
+
+                                # When customer picks gender -> prompt for age/size
+                                rid_girls = f"builtin_gender_girls_{w}"
+                                if rid_girls not in existing_ids:
+                                    next_data.append({
+                                        "id": rid_girls,
+                                        "name": "Gender girls (button) — built-in",
+                                        "enabled": True,
+                                        "cooldown_seconds": 2,
+                                        "trigger": {"source": "whatsapp", "event": "interactive"},
+                                        "condition": {"match": "button_id", "value": "gender_girls"},
+                                        "actions": [{
+                                            "type": "send_text",
+                                            "to": "{{ phone }}",
+                                            "text": (
+                                                "Filles: indiquez l'âge (0 mois à 7 ans) et la pointure (16 à 38).\n"
+                                                "البنات: يرجى تزويدنا بالعمر (من 0 شهر إلى 7 سنوات) ومقاس الحذاء (من 16 إلى 38)."
+                                            ),
+                                        }],
+                                        "workspaces": [w],
+                                        **({"test_phone_numbers": tests} if tests else {}),
+                                    })
+                                    existing_ids.add(rid_girls)
+
+                                rid_boys = f"builtin_gender_boys_{w}"
+                                if rid_boys not in existing_ids:
+                                    next_data.append({
+                                        "id": rid_boys,
+                                        "name": "Gender boys (button) — built-in",
+                                        "enabled": True,
+                                        "cooldown_seconds": 2,
+                                        "trigger": {"source": "whatsapp", "event": "interactive"},
+                                        "condition": {"match": "button_id", "value": "gender_boys"},
+                                        "actions": [{
+                                            "type": "send_text",
+                                            "to": "{{ phone }}",
+                                            "text": (
+                                                "Garçons: indiquez l'âge (0 mois à 10 ans) et la pointure (16 à 38).\n"
+                                                "الأولاد: يرجى تزويدنا بالعمر (من 0 شهر إلى 10 سنوات) ومقاس الحذاء (من 16 إلى 38)."
+                                            ),
+                                        }],
+                                        "workspaces": [w],
+                                        **({"test_phone_numbers": tests} if tests else {}),
+                                    })
+                                    existing_ids.add(rid_boys)
+
+                            await auth_db_manager.set_setting("automation_rules_v2", next_data)
+                            await auth_db_manager.set_setting("automation_rules_v2_seeded_builtin_v1", {"ts": datetime.utcnow().isoformat()})
+                            data = next_data
+                        except Exception:
+                            # Never block startup/init due to seeding failures
+                            pass
+
+                    if isinstance(data, list) and len(data) > 0:
+                        _AUTOMATION_RULES_V2_INIT_DONE = True
+                        return data
             except Exception:
                 pass
 
@@ -4596,6 +4755,38 @@ class MessageProcessor:
         return optimistic_message
 
     # -------------------- Shopify helpers --------------------
+    async def _shopify_add_order_tag_best_effort(self, order_id: str, tag: str) -> None:
+        """Best-effort add a tag to a Shopify order (safe: fetches tags first).
+
+        Requires the configured Shopify token to have read_orders + write_orders.
+        """
+        try:
+            oid = str(order_id or "").strip()
+            t = str(tag or "").strip()
+            if not oid or not oid.isdigit() or not t:
+                return
+            import httpx  # type: ignore
+            from .shopify_integration import admin_api_base, _client_args  # type: ignore
+
+            base = admin_api_base()
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                get_resp = await client.get(f"{base}/orders/{oid}.json", **_client_args())
+                if get_resp.status_code != 200:
+                    return
+                order_obj = (get_resp.json() or {}).get("order") or {}
+                current_tags_str = order_obj.get("tags") or ""
+                current_tags = [x.strip() for x in str(current_tags_str).split(",") if x and x.strip()]
+                # case-insensitive avoid duplicates
+                lower = {x.lower() for x in current_tags}
+                if t.lower() not in lower:
+                    current_tags.append(t)
+                payload = {"order": {"id": int(oid), "tags": ", ".join(current_tags)}}
+                put_resp = await client.put(f"{base}/orders/{oid}.json", json=payload, **_client_args())
+                if put_resp.status_code != 200:
+                    return
+        except Exception:
+            return
+
     async def _fetch_shopify_variant(self, variant_id: str) -> Optional[dict]:
         try:
             import httpx  # type: ignore
@@ -5211,6 +5402,15 @@ class MessageProcessor:
             
             # Save to database with real WhatsApp ID
             await self.db_manager.save_message(message, wa_message_id, "sent")
+
+            # Optional: tag Shopify order after successful WhatsApp send (best-effort).
+            try:
+                order_id = str(message.get("shopify_order_id") or "").strip()
+                tag = str(message.get("shopify_tag_on_sent") or "").strip()
+                if order_id and tag:
+                    asyncio.create_task(self._shopify_add_order_tag_best_effort(order_id, tag))
+            except Exception:
+                pass
             
             # If this is an invoice image (Arabic caption contains 'فاتورتك'), send the warning message as a reply
             try:
@@ -5735,58 +5935,6 @@ class MessageProcessor:
                     except Exception as _exc:
                         print(f"Survey interaction error: {_exc}")
                     return
-                # Order status flow
-                if reply_id == "order_status":
-                    # Persist UI bubble then handle
-                    await self.connection_manager.send_to_user(sender, {
-                        "type": "message_received",
-                        "data": message_obj
-                    })
-                    await self.connection_manager.broadcast_to_admins(
-                        {"type": "message_received", "data": message_obj}, exclude_user=sender
-                    )
-                    db_data = {k: v for k, v in message_obj.items() if k != "id"}
-                    await self.redis_manager.cache_message(sender, db_data)
-                    await self.db_manager.upsert_message(db_data)
-                    try:
-                        await self._handle_order_status_request(sender)
-                    except Exception as _exc:
-                        print(f"order_status flow error: {_exc}")
-                    return
-                # Buy flow start → show gender list
-                if reply_id == "buy_item":
-                    await self.connection_manager.send_to_user(sender, {
-                        "type": "message_received",
-                        "data": message_obj
-                    })
-                    await self.connection_manager.broadcast_to_admins(
-                        {"type": "message_received", "data": message_obj}, exclude_user=sender
-                    )
-                    db_data = {k: v for k, v in message_obj.items() if k != "id"}
-                    await self.redis_manager.cache_message(sender, db_data)
-                    await self.db_manager.upsert_message(db_data)
-                    try:
-                        await self._send_buy_gender_list(sender)
-                    except Exception as _exc:
-                        print(f"buy flow start error: {_exc}")
-                    return
-                # Gender selection → send size/age prompt
-                if reply_id in ("gender_girls", "gender_boys"):
-                    await self.connection_manager.send_to_user(sender, {
-                        "type": "message_received",
-                        "data": message_obj
-                    })
-                    await self.connection_manager.broadcast_to_admins(
-                        {"type": "message_received", "data": message_obj}, exclude_user=sender
-                    )
-                    db_data = {k: v for k, v in message_obj.items() if k != "id"}
-                    await self.redis_manager.cache_message(sender, db_data)
-                    await self.db_manager.upsert_message(db_data)
-                    try:
-                        await self._send_gender_prompt(sender, reply_id)
-                    except Exception as _exc:
-                        print(f"gender prompt error: {_exc}")
-                    return
             except Exception:
                 message_obj["type"] = "text"
                 message_obj["message"] = "[interactive_reply]"
@@ -5876,7 +6024,11 @@ class MessageProcessor:
         # Workspace-scoped "simple automations" (admin-configured rules).
         # Run async so webhook ingest latency stays low.
         try:
-            txt = str(message_obj.get("message") or "") if str(message_obj.get("type") or "") == "text" else ""
+            # Include interactive replies (button/list) as text too so rules can match on title if desired.
+            typ = str(message_obj.get("type") or "")
+            txt = str(message_obj.get("message") or "") if typ in ("text",) else ""
+            if not txt and str(message_obj.get("interactive_id") or "").strip():
+                txt = str(message_obj.get("interactive_title") or message_obj.get("message") or "")
             # IMPORTANT: this runs after webhook processing may reset the workspace contextvar,
             # so bind the current workspace explicitly for the task.
             ws = get_current_workspace()
@@ -6403,8 +6555,13 @@ class MessageProcessor:
                         trigger = {}
                     if str(trigger.get("source") or "whatsapp").lower() != "whatsapp":
                         continue
-                    if str(trigger.get("event") or "incoming_message").lower() not in ("incoming_message", "message"):
+                    trig_event = str(trigger.get("event") or "incoming_message").lower()
+                    if trig_event not in ("incoming_message", "message", "interactive", "button"):
                         continue
+                    if trig_event in ("interactive", "button"):
+                        # Only fire on interactive replies
+                        if not str(ctx.get("button_id") or "").strip():
+                            continue
 
                     # Condition
                     cond = rule.get("condition") or {}
@@ -6421,6 +6578,40 @@ class MessageProcessor:
                     matched = False
                     if mode == "any":
                         matched = True
+                    elif mode in ("no_url_no_digit", "no_url_nor_digit", "no_url_no_digits"):
+                        try:
+                            has_url = bool(re.search(r"https?://", text or "", flags=re.IGNORECASE))
+                            has_digit = bool(re.search(r"\d", text or ""))
+                            matched = (not has_url) and (not has_digit) and bool(text.strip())
+                        except Exception:
+                            matched = False
+                    elif mode in ("button_id", "interactive_id"):
+                        bid = str(ctx.get("button_id") or "").strip()
+                        if not bid:
+                            matched = False
+                        else:
+                            if needle:
+                                matched = bid == needle
+                            else:
+                                ids = cond.get("ids") or cond.get("values") or []
+                                if isinstance(ids, str):
+                                    ids = [x.strip() for x in re.split(r"[,\n\r]+", ids) if x and x.strip()]
+                                if isinstance(ids, list):
+                                    s = {str(x or "").strip() for x in ids if str(x or "").strip()}
+                                    matched = bid in s if s else True
+                                else:
+                                    matched = True
+                    elif mode in ("button_title_contains", "interactive_title_contains"):
+                        bt = str(ctx.get("button_title") or "").strip().lower()
+                        if not bt:
+                            matched = False
+                        else:
+                            if kws:
+                                matched = any((k.lower() in bt) for k in kws)
+                            elif needle:
+                                matched = needle.lower() in bt
+                            else:
+                                matched = True
                     elif kws:
                         matched = any((k.lower() in text_lc) for k in kws)
                     elif not needle:
@@ -6439,6 +6630,21 @@ class MessageProcessor:
 
                     if not matched:
                         continue
+
+                    # Optional testing guard: if configured, only fire for these numbers.
+                    try:
+                        test_phones = rule.get("test_phone_numbers") or rule.get("test_numbers") or []
+                        if isinstance(test_phones, str):
+                            test_phones = [x.strip() for x in re.split(r"[,\n\r]+", test_phones) if x and x.strip()]
+                        if isinstance(test_phones, list):
+                            test_set = {_digits_only(str(x or "")) for x in test_phones}
+                            test_set = {x for x in test_set if x}
+                        else:
+                            test_set = set()
+                        if test_set and _digits_only(user_id) not in test_set:
+                            continue
+                    except Exception:
+                        pass
 
                     # Simple per-rule stats (best-effort, Redis if available)
                     try:
@@ -6577,6 +6783,59 @@ class MessageProcessor:
                                 )
                             except Exception:
                                 pass
+                        elif at in ("send_buttons", "send_interactive_buttons"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            body_text = self._render_template(str(act.get("text") or act.get("message") or ""), ctx).strip()
+                            buttons = act.get("buttons") or []
+                            if isinstance(buttons, dict):
+                                buttons = [buttons]
+                            if not isinstance(buttons, list):
+                                buttons = []
+                            btns = []
+                            for b in buttons:
+                                if not isinstance(b, dict):
+                                    continue
+                                bid = str(b.get("id") or "").strip()
+                                title = str(b.get("title") or "").strip()
+                                if bid and title:
+                                    btns.append({"id": bid, "title": title})
+                            if not body_text:
+                                body_text = "Choose an option"
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "buttons",
+                                "from_me": True,
+                                "message": body_text,
+                                "buttons": btns,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                            })
+                        elif at in ("send_list", "send_interactive_list"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            body_text = self._render_template(str(act.get("text") or act.get("message") or ""), ctx).strip()
+                            button_text = self._render_template(str(act.get("button_text") or "Choose"), ctx).strip() or "Choose"
+                            sections = act.get("sections") or []
+                            if isinstance(sections, dict):
+                                sections = [sections]
+                            if not isinstance(sections, list):
+                                sections = []
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "list",
+                                "from_me": True,
+                                "message": body_text or "Choose",
+                                "button_text": button_text,
+                                "sections": sections,
+                                "header_text": act.get("header_text") or None,
+                                "footer_text": act.get("footer_text") or None,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                            })
+                        elif at in ("shopify_order_status", "order_status"):
+                            try:
+                                await self._handle_order_status_request(user_id)
+                            except Exception:
+                                pass
                         elif at in ("add_tag", "tag"):
                             tag = str(act.get("tag") or "").strip()
                             if not tag:
@@ -6706,6 +6965,12 @@ class MessageProcessor:
             ctx = {
                 "topic": topic_norm,
                 "phone": phone_digits,
+                "order_id": (
+                    order_obj.get("id")
+                    or data.get("id")
+                    or data.get("order_id")
+                    or (data.get("order") or {}).get("id") if isinstance(data.get("order"), dict) else ""
+                ),
                 "customer": (order_obj.get("customer") if isinstance(order_obj.get("customer"), dict) else (data.get("customer") if isinstance(data.get("customer"), dict) else {})),
                 "order_number": order_obj.get("name") or data.get("name") or data.get("order_number") or "",
                 "total_price": order_obj.get("total_price") or data.get("total_price") or "",
@@ -6809,6 +7074,8 @@ class MessageProcessor:
                             msg = self._render_template(str(act.get("text") or ""), ctx).strip()
                             if not (to_id and msg):
                                 continue
+                            shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
+                            shopify_order_id = str(ctx.get("order_id") or "").strip()
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",
@@ -6816,6 +7083,11 @@ class MessageProcessor:
                                 "message": msg,
                                 "timestamp": datetime.utcnow().isoformat(),
                                 "agent_username": "automation",
+                                **(
+                                    {"shopify_order_id": shopify_order_id, "shopify_tag_on_sent": shopify_tag_on_sent}
+                                    if (shopify_order_id and shopify_tag_on_sent)
+                                    else {}
+                                ),
                             })
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
@@ -6828,6 +7100,8 @@ class MessageProcessor:
                             comps = self._render_template_components(act.get("components") or [], ctx)
                             if not (to_id and tname):
                                 continue
+                            shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
+                            shopify_order_id = str(ctx.get("order_id") or "").strip()
                             preview = str(act.get("preview") or f"[template] {tname}")
                             await self.process_outgoing_message({
                                 "user_id": to_id,
@@ -6839,6 +7113,11 @@ class MessageProcessor:
                                 "template_name": tname,
                                 "template_language": lang,
                                 "template_components": comps,
+                                **(
+                                    {"shopify_order_id": shopify_order_id, "shopify_tag_on_sent": shopify_tag_on_sent}
+                                    if (shopify_order_id and shopify_tag_on_sent)
+                                    else {}
+                                ),
                             })
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
@@ -6891,6 +7170,8 @@ class MessageProcessor:
                                 pass
                             lang = str(act.get("language") or "en").strip() or "en"
                             comps = self._render_template_components(act.get("components") or [], ctx)
+                            shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
+                            shopify_order_id = str(ctx.get("order_id") or "").strip()
                             preview = str(act.get("preview") or f"[template] {tname}")
                             await self.process_outgoing_message({
                                 "user_id": to_id,
@@ -6902,6 +7183,11 @@ class MessageProcessor:
                                 "template_name": tname,
                                 "template_language": lang,
                                 "template_components": comps,
+                                **(
+                                    {"shopify_order_id": shopify_order_id, "shopify_tag_on_sent": shopify_tag_on_sent}
+                                    if (shopify_order_id and shopify_tag_on_sent)
+                                    else {}
+                                ),
                             })
                             try:
                                 # Persist branch config for clicks (store line item titles from Shopify order payload)
@@ -7493,33 +7779,8 @@ class MessageProcessor:
                     return
         except Exception:
             pass
-        # 0) If the message has no URL and contains no digits, offer quick-reply buttons
-        try:
-            has_url = bool(re.search(r"https?://", text or ""))
-            has_digit = bool(re.search(r"\d", text or ""))
-        except Exception:
-            has_url = False
-            has_digit = False
-        if (not has_url) and (not has_digit) and is_test_number:
-            await self.process_outgoing_message({
-                "user_id": user_id,
-                "type": "buttons",
-                "from_me": True,
-                "message": (
-                    "Veuillez choisir une option :\nJe veux acheter un article\nJe veux vérifier le statut de ma commande\n\n"
-                    "اختر خيارًا:\nأريد شراء منتج\nأريد التحقق من حالة طلبي"
-                ),
-                "buttons": [
-                    {"id": "buy_item", "title": "Acheter | شراء"},
-                    {"id": "order_status", "title": "Statut | حالة"},
-                ],
-                "timestamp": datetime.utcnow().isoformat(),
-            })
-            try:
-                await self.redis_manager.mark_auto_reply_sent(user_id)
-            except Exception:
-                pass
-            return
+        # NOTE: The "menu buttons" quick-reply flow is now implemented as an admin-editable automation rule
+        # (seeded into automation_rules_v2). Keeping it out of this hardcoded path avoids duplicate sends.
         # 1) Try explicit retailer_id extraction from text
         retailer_id_raw = self._extract_product_retailer_id(text)
         if retailer_id_raw:

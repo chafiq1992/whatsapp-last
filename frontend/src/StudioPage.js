@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from './api';
 import AutomationStudio from './AutomationStudio';
+import AutomationCustomersTab from './AutomationCustomersTab';
 
 export default function StudioPage() {
   const [allowed, setAllowed] = useState(false);
@@ -8,6 +9,7 @@ export default function StudioPage() {
   const [workspace, setWorkspace] = useState(() => {
     try { return (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch { return 'irranova'; }
   });
+  const [viewTab, setViewTab] = useState('canvas'); // 'canvas' | 'compaioing_es'
   useEffect(() => {
     (async () => {
       try {
@@ -60,8 +62,8 @@ export default function StudioPage() {
   if (!allowed) return null;
 
   return (
-    <div className="h-screen w-screen bg-white">
-      <div className="absolute top-2 left-2 z-50">
+    <div className="h-screen w-screen bg-white flex flex-col">
+      <div className="h-12 border-b flex items-center justify-between px-3">
         <div className="flex items-center gap-2">
           <button
             className="px-3 py-1.5 text-sm bg-gray-800 text-white rounded"
@@ -84,8 +86,26 @@ export default function StudioPage() {
             Workspace: {String(workspace || '').toUpperCase()}
           </button>
         </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            className={`px-3 py-1.5 text-sm rounded ${viewTab === 'canvas' ? 'bg-slate-900 text-white' : 'border'}`}
+            onClick={() => setViewTab('canvas')}
+          >
+            Canvas
+          </button>
+          <button
+            className={`px-3 py-1.5 text-sm rounded ${viewTab === 'compaioing_es' ? 'bg-slate-900 text-white' : 'border'}`}
+            onClick={() => setViewTab('compaioing_es')}
+          >
+            compaioing es
+          </button>
+        </div>
       </div>
-      <AutomationStudio />
+
+      <div className="flex-1 overflow-hidden">
+        {viewTab === 'canvas' ? <AutomationStudio /> : <AutomationCustomersTab />}
+      </div>
     </div>
   );
 }

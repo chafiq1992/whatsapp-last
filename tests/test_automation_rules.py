@@ -205,3 +205,46 @@ def test_inbox_env_endpoints_roundtrip(client):
     assert "212600000000" in (data.get("survey_test_numbers") or [])
 
 
+def test_template_renderer_supports_list_wildcard_join():
+    from backend import main
+
+    ctx = {
+        "line_items": [
+            {"title": "T-Shirt", "variant_title": "Large"},
+            {"title": "Shoes", "variant_title": "42"},
+        ]
+    }
+    out = main.message_processor._render_template("Items: {{ line_items[].variant_title }}", ctx)
+    assert out == "Items: Large, 42"
+
+
+def test_whatsapp_template_header_media_requires_link_or_id(monkeypatch):
+    from backend import main
+
+    router = main.WorkspaceWhatsAppRouter({
+        "irranova": {"access_token": "t", "phone_number_id": "p"},
+    })
+
+    async def fake_make_request(endpoint: str, data: dict) -> dict:
+        return {"endpoint": endpoint, "data": data}
+
+    monkeypatch.setattr(router, "_make_request", fake_make_request)
+
+    tok = main._CURRENT_WORKSPACE.set("irranova")
+    try:
+        # Missing header media link/id should fail before making request
+        bad_components = [{"type": "header", "parameters": [{"type": "image", "image": {"link": ""}}]}]
+        try:
+            asyncio.run(router.send_template_message("212600000000", "tpl", "ar", bad_components))
+            assert False, "Expected exception for missing header image link"
+        except Exception as e:
+            assert "Invalid template components" in str(e)
+            assert "missing link/id" in str(e).lower()
+
+        good_components = [{"type": "header", "parameters": [{"type": "image", "image": {"link": "https://example.com/a.jpg"}}]}]
+        ok = asyncio.run(router.send_template_message("212600000000", "tpl", "ar", good_components))
+        assert (ok or {}).get("endpoint") == "messages"
+    finally:
+        main._CURRENT_WORKSPACE.reset(tok)
+
+

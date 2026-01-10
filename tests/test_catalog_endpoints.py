@@ -9,7 +9,7 @@ async def fake_send_catalog_products(to, ids):
     fake_send_catalog_products.called = (to, ids)
     return ["ok"]
 
-async def fake_send_single_catalog_item(to, rid, caption=""):
+async def fake_send_single_catalog_item(to, rid, caption="", catalog_id=None, **kwargs):
     fake_send_single_catalog_item.called = (to, rid)
     return {"ok": True}
 

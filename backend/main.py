@@ -1541,6 +1541,29 @@ class WorkspaceWhatsAppRouter:
         context_message_id: str | None = None,
     ) -> dict:
         """Send a WhatsApp template message via Graph API."""
+        # Validate components early to avoid cryptic Graph errors like:
+        # "(#100) Invalid parameter ... Either one of media ID or link must be present"
+        try:
+            for comp in (components or []):
+                if not isinstance(comp, dict):
+                    continue
+                if str(comp.get("type") or "").strip().lower() != "header":
+                    continue
+                params = comp.get("parameters") if isinstance(comp.get("parameters"), list) else []
+                for p in params:
+                    if not isinstance(p, dict):
+                        continue
+                    ptype = str(p.get("type") or "").strip().lower()
+                    if ptype not in ("image", "video", "document"):
+                        continue
+                    obj = p.get(ptype) if isinstance(p.get(ptype), dict) else {}
+                    link = str((obj or {}).get("link") or "").strip()
+                    mid = str((obj or {}).get("id") or "").strip()
+                    if not (link or mid):
+                        raise ValueError(f"Template header {ptype} parameter missing link/id")
+        except Exception as e:
+            raise Exception(f"Invalid template components: {e}")
+
         url = f"{self.base_url}/messages"
         tpl = {
             "name": str(template_name or "").strip(),
@@ -2243,10 +2266,7 @@ class DatabaseManager:
                     click_id       TEXT,
                     source_first_inbound_ts TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_conv_source_ts
-                    ON conversation_meta (source, source_first_inbound_ts);
-                CREATE INDEX IF NOT EXISTS idx_conv_click_id
-                    ON conversation_meta (click_id);
+                -- NOTE: indexes on newly added columns are created later after migration checks.
 
                 -- Internal, agent-only notes attached to a conversation
                 CREATE TABLE IF NOT EXISTS conversation_notes (
@@ -6092,19 +6112,44 @@ class MessageProcessor:
 
     def _render_template(self, s: str, ctx: dict) -> str:
         """Template helper supporting dotted paths: {{ customer.phone }}."""
-        def _resolve(path: str):
+        def _resolve_from(root: Any, path: str) -> str:
+            """Resolve a dotted path against dict root.
+
+            Supported:
+            - dot paths: a.b.c
+            - list indexing: items[0].title
+            - list wildcard join: items[].title  -> "t1, t2, ..."
+            """
             p = str(path or "").strip()
             if not p:
                 return ""
-            cur = ctx
-            # support dot + [idx]
-            for part in p.split("."):
-                part = part.strip()
-                if not part:
-                    continue
+            parts = [x.strip() for x in p.split(".") if str(x or "").strip()]
+            cur: Any = root
+            for i, part in enumerate(parts):
+                # Wildcard: key[] means iterate list and join remainder
+                if part.endswith("[]") and len(part) > 2:
+                    key = part[:-2]
+                    if not isinstance(cur, dict):
+                        return ""
+                    arr = cur.get(key)
+                    if not isinstance(arr, list) or not arr:
+                        return ""
+                    rest = ".".join(parts[i + 1 :])
+                    values: list[str] = []
+                    for item in arr:
+                        if not rest:
+                            v = "" if item is None else str(item)
+                        else:
+                            v = _resolve_from(item if isinstance(item, dict) else {}, rest)
+                        v = str(v or "").strip()
+                        if v:
+                            values.append(v)
+                    return ", ".join(values)
+
+                # Indexing: key[0]
                 m = re.fullmatch(r"([A-Za-z0-9_]+)\[(\d+)\]", part)
                 key = part
-                idx = None
+                idx: int | None = None
                 if m:
                     key = m.group(1)
                     idx = int(m.group(2))
@@ -6127,7 +6172,7 @@ class MessageProcessor:
             text = str(s)
             # Replace all {{ ... }} occurrences
             def _repl(m):
-                return _resolve(m.group(1))
+                return _resolve_from(ctx, m.group(1))
             return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", _repl, text)
         except Exception:
             return str(s or "")
@@ -6247,20 +6292,94 @@ class MessageProcessor:
             if not line_items:
                 return ""
             first = line_items[0] if isinstance(line_items[0], dict) else {}
+            # 0) Direct hints on the order/line_item (some integrations store it here)
+            try:
+                # note_attributes: [{name:"image_url", value:"https://..."}]
+                note_attrs = order_obj.get("note_attributes") if isinstance(order_obj.get("note_attributes"), list) else []
+                for na in note_attrs:
+                    if not isinstance(na, dict):
+                        continue
+                    if str(na.get("name") or "").strip().lower() == "image_url":
+                        v = str(na.get("value") or "").strip()
+                        if v.startswith(("http://", "https://")):
+                            return v
+            except Exception:
+                pass
+
+            for k in ("image_url", "image", "featured_image"):
+                try:
+                    v = first.get(k)
+                    if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
+                        return v.strip()
+                    if isinstance(v, dict):
+                        src = str(v.get("src") or v.get("url") or v.get("image_url") or "").strip()
+                        if src.startswith(("http://", "https://")):
+                            return src
+                except Exception:
+                    continue
+
             product_id = first.get("product_id")
+            variant_id = first.get("variant_id")
             pid = str(product_id).strip() if product_id is not None else ""
+            vid = str(variant_id).strip() if variant_id is not None else ""
+
+            rds = getattr(self.redis_manager, "redis_client", None)
+            ws = _coerce_workspace(get_current_workspace())
+
+            # 1) If product_id is missing, try variant -> (product_id, image_id) then resolve
+            if (not pid or not pid.isdigit()) and vid and vid.isdigit():
+                v_cache_key = f"shopify:variant:first_image:{ws}:{vid}"
+                if rds:
+                    try:
+                        cached = await rds.get(v_cache_key)
+                        if cached:
+                            if isinstance(cached, (bytes, bytearray)):
+                                cached = cached.decode("utf-8", errors="ignore")
+                            cached_s = str(cached or "").strip()
+                            if cached_s:
+                                return cached_s
+                    except Exception:
+                        pass
+                try:
+                    from .shopify_integration import admin_api_base, _client_args  # type: ignore
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        vresp = await client.get(f"{admin_api_base()}/variants/{vid}.json", **_client_args())
+                        if vresp.status_code == 200:
+                            variant = (vresp.json() or {}).get("variant") or {}
+                            if isinstance(variant, dict):
+                                pid = str(variant.get("product_id") or "").strip()
+                                image_id = str(variant.get("image_id") or "").strip()
+                                # If we have a specific image_id, fetch that image directly
+                                if pid.isdigit() and image_id.isdigit():
+                                    iresp = await client.get(f"{admin_api_base()}/products/{pid}/images/{image_id}.json", **_client_args())
+                                    if iresp.status_code == 200:
+                                        img = (iresp.json() or {}).get("image") or {}
+                                        if isinstance(img, dict):
+                                            src = str(img.get("src") or "").strip()
+                                            if src:
+                                                if rds:
+                                                    try:
+                                                        await rds.set(v_cache_key, src, ex=24 * 3600)
+                                                    except Exception:
+                                                        pass
+                                                return src
+                except Exception:
+                    pass
+
+            # 2) Product image lookup (cached)
             if not pid or not pid.isdigit():
                 return ""
 
-            rds = getattr(self.redis_manager, "redis_client", None)
-            cache_key = f"shopify:product:first_image:{_coerce_workspace(get_current_workspace())}:{pid}"
+            cache_key = f"shopify:product:first_image:{ws}:{pid}"
             if rds:
                 try:
                     cached = await rds.get(cache_key)
                     if cached:
                         if isinstance(cached, (bytes, bytearray)):
                             cached = cached.decode("utf-8", errors="ignore")
-                        return str(cached or "").strip()
+                        cached_s = str(cached or "").strip()
+                        if cached_s:
+                            return cached_s
                 except Exception:
                     pass
 
@@ -8404,15 +8523,17 @@ async def startup():
         print(f"conversation_notes ensure failed: {exc}")
 
     # Start webhook background workers so /webhook can ACK quickly.
-    try:
-        await start_webhook_workers(webhook_runtime)
-        # Mirror runtime flag into legacy global for any old helper callers.
+    # In tests (TestClient), starting long-lived workers causes cross-event-loop issues.
+    if not os.getenv("PYTEST_CURRENT_TEST"):
         try:
-            globals()["WEBHOOK_DB_READY"] = bool(webhook_runtime.state.db_ready)
-        except Exception:
-            pass
-    except Exception as exc:
-        print(f"Webhook worker startup failed: {exc}")
+            await start_webhook_workers(webhook_runtime)
+            # Mirror runtime flag into legacy global for any old helper callers.
+            try:
+                globals()["WEBHOOK_DB_READY"] = bool(webhook_runtime.state.db_ready)
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"Webhook worker startup failed: {exc}")
     # Catalog cache: avoid blocking startup in production
     try:
         # Use the default workspace's catalog id on startup; other workspaces refresh on demand.

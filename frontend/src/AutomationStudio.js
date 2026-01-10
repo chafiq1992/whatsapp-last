@@ -242,14 +242,28 @@ const SHOPIFY_EVENTS = [
 
 const DELIVERY_VARS = [
   "status",
+  "prev_status",
+  "timestamp",
+  "merchant_id",
+  "merchant_name",
+  "merchant_phone",
   "order_id",
   "order_name",
+  "order_description",
+  "order_address",
   "city",
   "cash_amount",
   "phone",
+  "phone_local",
   "order.customer_phone",
+  "order.customer_name",
   "order.address",
+  "order.description",
+  "order.merchant_name",
+  "order.merchant_phone",
+  "order.driver_phone",
   "order.tags",
+  "order.notes",
   "payload",
 ];
 

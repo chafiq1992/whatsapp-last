@@ -7435,6 +7435,60 @@ class MessageProcessor:
                 "event": event_norm,
                 "phone": phone_digits,
                 "status": status_norm,
+                "prev_status": (
+                    data.get("prev_status")
+                    or data.get("previous_status")
+                    or order_obj.get("prev_status")
+                    or order_obj.get("previous_status")
+                    or ""
+                ),
+                "timestamp": data.get("timestamp") or order_obj.get("timestamp") or "",
+                "merchant_id": (
+                    data.get("merchant_id")
+                    or order_obj.get("merchant_id")
+                    or data.get("merchantId")
+                    or order_obj.get("merchantId")
+                    or ""
+                ),
+                "merchant_name": (
+                    data.get("merchant_name")
+                    or order_obj.get("merchant_name")
+                    or data.get("merchantName")
+                    or order_obj.get("merchantName")
+                    or ""
+                ),
+                "merchant_phone": (
+                    data.get("merchant_phone")
+                    or order_obj.get("merchant_phone")
+                    or data.get("merchantPhone")
+                    or order_obj.get("merchantPhone")
+                    or ""
+                ),
+                "driver_phone": (
+                    data.get("driver_phone")
+                    or order_obj.get("driver_phone")
+                    or data.get("driverPhone")
+                    or order_obj.get("driverPhone")
+                    or ""
+                ),
+                "order_description": (
+                    data.get("order_description")
+                    or data.get("description")
+                    or order_obj.get("description")
+                    or ""
+                ),
+                "order_address": (
+                    data.get("order_address")
+                    or data.get("address")
+                    or order_obj.get("address")
+                    or ""
+                ),
+                "phone_local": (
+                    data.get("phone_local")
+                    or data.get("customer_phone")
+                    or order_obj.get("customer_phone")
+                    or ""
+                ),
                 "order": order_obj,
                 # Common aliases for convenience in templates
                 "order_id": order_obj.get("id") or data.get("order_id") or "",

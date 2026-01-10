@@ -80,6 +80,7 @@ load_dotenv()
 # ── Cloud‑Run helpers ────────────────────────────────────────────
 PORT = int(os.getenv("PORT", "8080"))
 BASE_URL = os.getenv("BASE_URL", f"http://localhost:{PORT}")
+WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL = (os.getenv("WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL") or "").strip()
 REDIS_URL = os.getenv("REDIS_URL", "")
 DB_PATH = os.getenv("DB_PATH") or str(ROOT_DIR / "data" / "whatsapp_messages.db")
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional PostgreSQL URL
@@ -7081,6 +7082,17 @@ class MessageProcessor:
                 first_item_image = await self._shopify_first_item_image_url(data)
             except Exception:
                 first_item_image = ""
+            if not str(first_item_image or "").strip():
+                # Optional fallback so templates with required IMAGE headers can still be delivered.
+                # Must be a publicly reachable HTTPS URL.
+                fallback = WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL
+                if not fallback:
+                    try:
+                        if str(BASE_URL or "").strip().startswith("https://"):
+                            fallback = f"{str(BASE_URL).rstrip('/')}/broken-image.png"
+                    except Exception:
+                        fallback = ""
+                first_item_image = str(fallback or "").strip()
             ctx = {
                 "topic": topic_norm,
                 "phone": phone_digits,

@@ -81,6 +81,9 @@ load_dotenv()
 PORT = int(os.getenv("PORT", "8080"))
 BASE_URL = os.getenv("BASE_URL", f"http://localhost:{PORT}")
 WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL = (os.getenv("WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL") or "").strip()
+# Backwards-compat / parity with whatsapp_confermation app:
+# this env name is used there to provide a static header image for templates that require it.
+ORDER_CONFIRM_HEADER_IMAGE_URL = (os.getenv("ORDER_CONFIRM_HEADER_IMAGE_URL") or "").strip()
 REDIS_URL = os.getenv("REDIS_URL", "")
 DB_PATH = os.getenv("DB_PATH") or str(ROOT_DIR / "data" / "whatsapp_messages.db")
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional PostgreSQL URL
@@ -6284,7 +6287,12 @@ class MessageProcessor:
             return
 
     async def _shopify_first_item_image_url(self, data: dict) -> str:
-        """Best-effort fetch of first line item's product image URL (cached)."""
+        """Best-effort fetch of an order image URL suitable for template IMAGE headers (cached).
+
+        Parity with `whatsapp_confermation` app:
+        - prefer order.note_attributes.image_url
+        - else try deriving from ANY line item's variant/product image
+        """
         try:
             if not isinstance(data, dict):
                 return ""
@@ -6292,7 +6300,6 @@ class MessageProcessor:
             line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
             if not line_items:
                 return ""
-            first = line_items[0] if isinstance(line_items[0], dict) else {}
             # 0) Direct hints on the order/line_item (some integrations store it here)
             try:
                 # note_attributes: [{name:"image_url", value:"https://..."}]
@@ -6307,100 +6314,108 @@ class MessageProcessor:
             except Exception:
                 pass
 
-            for k in ("image_url", "image", "featured_image"):
-                try:
-                    v = first.get(k)
-                    if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
-                        return v.strip()
-                    if isinstance(v, dict):
-                        src = str(v.get("src") or v.get("url") or v.get("image_url") or "").strip()
-                        if src.startswith(("http://", "https://")):
-                            return src
-                except Exception:
-                    continue
-
-            product_id = first.get("product_id")
-            variant_id = first.get("variant_id")
-            pid = str(product_id).strip() if product_id is not None else ""
-            vid = str(variant_id).strip() if variant_id is not None else ""
-
             rds = getattr(self.redis_manager, "redis_client", None)
             ws = _coerce_workspace(get_current_workspace())
 
-            # 1) If product_id is missing, try variant -> (product_id, image_id) then resolve
-            if (not pid or not pid.isdigit()) and vid and vid.isdigit():
-                v_cache_key = f"shopify:variant:first_image:{ws}:{vid}"
-                if rds:
-                    try:
-                        cached = await rds.get(v_cache_key)
-                        if cached:
-                            if isinstance(cached, (bytes, bytearray)):
-                                cached = cached.decode("utf-8", errors="ignore")
-                            cached_s = str(cached or "").strip()
-                            if cached_s:
-                                return cached_s
-                    except Exception:
-                        pass
-                try:
-                    from .shopify_integration import admin_api_base, _client_args  # type: ignore
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        vresp = await client.get(f"{admin_api_base()}/variants/{vid}.json", **_client_args())
-                        if vresp.status_code == 200:
-                            variant = (vresp.json() or {}).get("variant") or {}
-                            if isinstance(variant, dict):
-                                pid = str(variant.get("product_id") or "").strip()
-                                image_id = str(variant.get("image_id") or "").strip()
-                                # If we have a specific image_id, fetch that image directly
-                                if pid.isdigit() and image_id.isdigit():
-                                    iresp = await client.get(f"{admin_api_base()}/products/{pid}/images/{image_id}.json", **_client_args())
-                                    if iresp.status_code == 200:
-                                        img = (iresp.json() or {}).get("image") or {}
-                                        if isinstance(img, dict):
-                                            src = str(img.get("src") or "").strip()
-                                            if src:
-                                                if rds:
-                                                    try:
-                                                        await rds.set(v_cache_key, src, ex=24 * 3600)
-                                                    except Exception:
-                                                        pass
-                                                return src
-                except Exception:
-                    pass
-
-            # 2) Product image lookup (cached)
-            if not pid or not pid.isdigit():
-                return ""
-
-            cache_key = f"shopify:product:first_image:{ws}:{pid}"
-            if rds:
-                try:
-                    cached = await rds.get(cache_key)
-                    if cached:
-                        if isinstance(cached, (bytes, bytearray)):
-                            cached = cached.decode("utf-8", errors="ignore")
-                        cached_s = str(cached or "").strip()
-                        if cached_s:
-                            return cached_s
-                except Exception:
-                    pass
-
             from .shopify_integration import admin_api_base, _client_args  # type: ignore
 
+            async def _get_cached(rkey: str) -> str:
+                if not rds:
+                    return ""
+                try:
+                    cached = await rds.get(rkey)
+                    if not cached:
+                        return ""
+                    if isinstance(cached, (bytes, bytearray)):
+                        cached = cached.decode("utf-8", errors="ignore")
+                    return str(cached or "").strip()
+                except Exception:
+                    return ""
+
+            async def _set_cached(rkey: str, val: str) -> None:
+                if not (rds and val):
+                    return
+                try:
+                    await rds.set(rkey, val, ex=24 * 3600)
+                except Exception:
+                    return
+
+            # Try each line item until we find a usable image URL
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(f"{admin_api_base()}/products/{pid}.json", **_client_args())
-                if resp.status_code != 200:
-                    return ""
-                product = (resp.json() or {}).get("product") or {}
-                imgs = product.get("images") if isinstance(product, dict) else []
-                if not isinstance(imgs, list) or not imgs:
-                    return ""
-                src = str((imgs[0] or {}).get("src") or "").strip() if isinstance(imgs[0], dict) else ""
-                if src and rds:
-                    try:
-                        await rds.set(cache_key, src, ex=24 * 3600)
-                    except Exception:
-                        pass
-                return src
+                for li in line_items:
+                    if not isinstance(li, dict):
+                        continue
+
+                    # 1) direct hints on line item
+                    for k in ("image_url", "image", "featured_image"):
+                        try:
+                            v = li.get(k)
+                            if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
+                                return v.strip()
+                            if isinstance(v, dict):
+                                src = str(v.get("src") or v.get("url") or v.get("image_url") or "").strip()
+                                if src.startswith(("http://", "https://")):
+                                    return src
+                        except Exception:
+                            continue
+
+                    product_id = li.get("product_id")
+                    variant_id = li.get("variant_id")
+                    pid = str(product_id).strip() if product_id is not None else ""
+                    vid = str(variant_id).strip() if variant_id is not None else ""
+
+                    # 2) Variant cache/lookup → precise image (if image_id available)
+                    if vid and vid.isdigit():
+                        v_cache_key = f"shopify:variant:first_image:{ws}:{vid}"
+                        cached_v = await _get_cached(v_cache_key)
+                        if cached_v:
+                            return cached_v
+                        try:
+                            vresp = await client.get(f"{admin_api_base()}/variants/{vid}.json", **_client_args())
+                            if vresp.status_code == 200:
+                                variant = (vresp.json() or {}).get("variant") or {}
+                                if isinstance(variant, dict):
+                                    pid2 = str(variant.get("product_id") or "").strip()
+                                    image_id = str(variant.get("image_id") or "").strip()
+                                    if pid2.isdigit():
+                                        pid = pid2
+                                    if pid and pid.isdigit() and image_id.isdigit():
+                                        iresp = await client.get(
+                                            f"{admin_api_base()}/products/{pid}/images/{image_id}.json",
+                                            **_client_args(),
+                                        )
+                                        if iresp.status_code == 200:
+                                            img = (iresp.json() or {}).get("image") or {}
+                                            if isinstance(img, dict):
+                                                src = str(img.get("src") or "").strip()
+                                                if src:
+                                                    await _set_cached(v_cache_key, src)
+                                                    return src
+                        except Exception:
+                            pass
+
+                    # 3) Product cache/lookup → first product image
+                    if pid and pid.isdigit():
+                        p_cache_key = f"shopify:product:first_image:{ws}:{pid}"
+                        cached_p = await _get_cached(p_cache_key)
+                        if cached_p:
+                            return cached_p
+                        try:
+                            presp = await client.get(f"{admin_api_base()}/products/{pid}.json", **_client_args())
+                            if presp.status_code != 200:
+                                continue
+                            product = (presp.json() or {}).get("product") or {}
+                            imgs = product.get("images") if isinstance(product, dict) else []
+                            if not isinstance(imgs, list) or not imgs:
+                                continue
+                            src = str((imgs[0] or {}).get("src") or "").strip() if isinstance(imgs[0], dict) else ""
+                            if src:
+                                await _set_cached(p_cache_key, src)
+                                return src
+                        except Exception:
+                            continue
+
+            return ""
         except Exception:
             return ""
 
@@ -7085,7 +7100,7 @@ class MessageProcessor:
             if not str(first_item_image or "").strip():
                 # Optional fallback so templates with required IMAGE headers can still be delivered.
                 # Must be a publicly reachable HTTPS URL.
-                fallback = WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL
+                fallback = WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL or ORDER_CONFIRM_HEADER_IMAGE_URL
                 if not fallback:
                     try:
                         if str(BASE_URL or "").strip().startswith("https://"):

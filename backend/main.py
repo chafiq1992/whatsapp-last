@@ -6391,6 +6391,8 @@ class MessageProcessor:
                                                 if src:
                                                     await _set_cached(v_cache_key, src)
                                                     return src
+                            else:
+                                _vlog(f"Shopify variants/{vid} lookup failed status={vresp.status_code}")
                         except Exception:
                             pass
 
@@ -6403,6 +6405,7 @@ class MessageProcessor:
                         try:
                             presp = await client.get(f"{admin_api_base()}/products/{pid}.json", **_client_args())
                             if presp.status_code != 200:
+                                _vlog(f"Shopify products/{pid} lookup failed status={presp.status_code}")
                                 continue
                             product = (presp.json() or {}).get("product") or {}
                             imgs = product.get("images") if isinstance(product, dict) else []
@@ -7097,17 +7100,8 @@ class MessageProcessor:
                 first_item_image = await self._shopify_first_item_image_url(data)
             except Exception:
                 first_item_image = ""
-            if not str(first_item_image or "").strip():
-                # Optional fallback so templates with required IMAGE headers can still be delivered.
-                # Must be a publicly reachable HTTPS URL.
-                fallback = WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL or ORDER_CONFIRM_HEADER_IMAGE_URL
-                if not fallback:
-                    try:
-                        if str(BASE_URL or "").strip().startswith("https://"):
-                            fallback = f"{str(BASE_URL).rstrip('/')}/broken-image.png"
-                    except Exception:
-                        fallback = ""
-                first_item_image = str(fallback or "").strip()
+            # IMPORTANT: no fallback image. If Shopify doesn't provide/resolve an image URL,
+            # templates with required IMAGE headers must NOT be sent (WhatsApp will fail).
             ctx = {
                 "topic": topic_norm,
                 "phone": phone_digits,

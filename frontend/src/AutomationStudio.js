@@ -253,6 +253,11 @@ const DELIVERY_VARS = [
   "payload",
 ];
 
+// Default branch titles (used as initial placeholders; UI can auto-fill from template buttons)
+const DEFAULT_OC_CONFIRM_TITLES = "تأكيد الطلب\nتاكيد الطلب";
+const DEFAULT_OC_CHANGE_TITLES = "تغيير المعلومات\nتغير المعلومات";
+const DEFAULT_OC_TALK_TITLES = "تكلم مع العميل";
+
 function TagIcon() {
   return (
     <svg
@@ -654,6 +659,8 @@ export default function AutomationStudio({ onClose }) {
               cooldownSeconds: 0,
               triggerSource: "whatsapp",
               shopifyTopic: "orders/paid",
+              shopifyTopicPreset: "orders/paid",
+              shopifyTopicCustom: "",
               shopifyTaggedWith: "",
               shopifyTestPhones: "",
               deliveryStatuses: "",
@@ -664,9 +671,12 @@ export default function AutomationStudio({ onClose }) {
               templateLanguage: "en",
               templateVars: [],
               templateHeaderUrl: "",
-              ocConfirmTitles: "تأكيد الطلب\nتاكيد الطلب",
-              ocChangeTitles: "تغيير المعلومات\nتغير المعلومات",
-              ocTalkTitles: "تكلم مع العميل",
+              ocEntryGateMode: "tag_or_online_store", // all | tag_or_online_store
+              ocRequiredTag: "easysell_cod_form",
+              ocIncludeOnlineStore: true,
+              ocConfirmTitles: DEFAULT_OC_CONFIRM_TITLES,
+              ocChangeTitles: DEFAULT_OC_CHANGE_TITLES,
+              ocTalkTitles: DEFAULT_OC_TALK_TITLES,
               ocConfirmIds: "",
               ocChangeIds: "",
               ocTalkIds: "",
@@ -696,6 +706,13 @@ export default function AutomationStudio({ onClose }) {
             const isDelivery = source === "delivery";
             const statuses = Array.isArray(r?.condition?.statuses) ? r.condition.statuses : [];
             const statusesStr = statuses.filter(Boolean).join(", ");
+            const trigEvent = String(trig?.event || "orders/paid");
+            const knownTopics = new Set(
+              (Array.isArray(SHOPIFY_EVENTS) ? SHOPIFY_EVENTS : [])
+                .map((ev) => String(ev?.topic || "").trim())
+                .filter(Boolean)
+            );
+            const isCustomTopic = trigEvent && !knownTopics.has(trigEvent);
             const tplVars = (() => {
               try {
                 const src = aOC || aTpl;
@@ -756,7 +773,9 @@ export default function AutomationStudio({ onClose }) {
                 } catch {}
                 return 30;
               })(),
-              shopifyTopic: String(trig.event || "orders/paid"),
+              shopifyTopic: trigEvent || "orders/paid",
+              shopifyTopicPreset: isCustomTopic ? "orders/paid" : (trigEvent || "orders/paid"),
+              shopifyTopicCustom: isCustomTopic ? trigEvent : "",
               shopifyTaggedWith: taggedWith,
               shopifyTestPhones: testPhonesStr,
               deliveryStatuses: isDelivery ? statusesStr : "",
@@ -767,9 +786,12 @@ export default function AutomationStudio({ onClose }) {
               templateLanguage: String(aTpl?.language || aOC?.language || "en"),
               templateVars: tplVars,
               templateHeaderUrl: tplHeaderUrl,
-              ocConfirmTitles: Array.isArray(aOC?.confirm_titles) ? aOC.confirm_titles.filter(Boolean).join("\n") : "تأكيد الطلب\nتاكيد الطلب",
-              ocChangeTitles: Array.isArray(aOC?.change_titles) ? aOC.change_titles.filter(Boolean).join("\n") : "تغيير المعلومات\nتغير المعلومات",
-              ocTalkTitles: Array.isArray(aOC?.talk_titles) ? aOC.talk_titles.filter(Boolean).join("\n") : "تكلم مع العميل",
+              ocEntryGateMode: String(aOC?.entry_gate_mode || "all"),
+              ocRequiredTag: String(aOC?.required_tag || "easysell_cod_form"),
+              ocIncludeOnlineStore: aOC?.include_online_store !== undefined ? !!aOC.include_online_store : true,
+              ocConfirmTitles: Array.isArray(aOC?.confirm_titles) ? aOC.confirm_titles.filter(Boolean).join("\n") : DEFAULT_OC_CONFIRM_TITLES,
+              ocChangeTitles: Array.isArray(aOC?.change_titles) ? aOC.change_titles.filter(Boolean).join("\n") : DEFAULT_OC_CHANGE_TITLES,
+              ocTalkTitles: Array.isArray(aOC?.talk_titles) ? aOC.talk_titles.filter(Boolean).join("\n") : DEFAULT_OC_TALK_TITLES,
               ocConfirmIds: Array.isArray(aOC?.confirm_ids) ? aOC.confirm_ids.filter(Boolean).join("\n") : "",
               ocChangeIds: Array.isArray(aOC?.change_ids) ? aOC.change_ids.filter(Boolean).join("\n") : "",
               ocTalkIds: Array.isArray(aOC?.talk_ids) ? aOC.talk_ids.filter(Boolean).join("\n") : "",
@@ -823,6 +845,10 @@ export default function AutomationStudio({ onClose }) {
                   .split(/\r?\n|,/g)
                   .map((x) => x.trim())
                   .filter(Boolean);
+                const shopifyTopicEffective =
+                  String(draft.shopifyTopicCustom || "").trim() ||
+                  String(draft.shopifyTopicPreset || draft.shopifyTopic || "orders/paid").trim() ||
+                  "orders/paid";
                 const actions = [];
                 const listFromLines = (s) =>
                   String(s || "")
@@ -883,6 +909,9 @@ export default function AutomationStudio({ onClose }) {
                       language: String(draft.templateLanguage || "en"),
                       components: comps,
                       preview: `[template] ${tn}`,
+                      entry_gate_mode: String(draft.ocEntryGateMode || "all"),
+                      required_tag: String(draft.ocRequiredTag || "").trim(),
+                      include_online_store: !!draft.ocIncludeOnlineStore,
                       confirm_titles: listFromLines(draft.ocConfirmTitles),
                       change_titles: listFromLines(draft.ocChangeTitles),
                       talk_titles: listFromLines(draft.ocTalkTitles),
@@ -955,7 +984,7 @@ export default function AutomationStudio({ onClose }) {
                   cooldown_seconds: Number(draft.cooldownSeconds || 0),
                   trigger:
                     draft.triggerSource === "shopify"
-                      ? { source: "shopify", event: String(draft.shopifyTopic || "orders/paid") }
+                      ? { source: "shopify", event: String(shopifyTopicEffective || "orders/paid") }
                       : draft.triggerSource === "delivery"
                         ? { source: "delivery", event: "order_status_changed" }
                         : { source: "whatsapp", event: (String(draft.waTriggerMode || "incoming") === "no_reply" ? "no_reply" : "incoming_message") },
@@ -2138,7 +2167,14 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                       <div>
                         <div className="text-xs text-slate-500 mb-1">Shopify topic</div>
-                        <select className="w-full border rounded-lg px-3 py-2" value={draft.shopifyTopic || "orders/paid"} onChange={(e) => onChange({ shopifyTopic: e.target.value })}>
+                        <select
+                          className="w-full border rounded-lg px-3 py-2"
+                          value={draft.shopifyTopicPreset || draft.shopifyTopic || "orders/paid"}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            onChange({ shopifyTopicPreset: v, shopifyTopicCustom: "", shopifyTopic: v });
+                          }}
+                        >
                           {shopifyTopics.map((x) => <option key={x.topic} value={x.topic}>{x.label}</option>)}
                         </select>
                       </div>
@@ -2146,9 +2182,13 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         <div className="text-xs text-slate-500 mb-1">Custom topic (optional)</div>
                         <input
                           className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
-                          value={draft.shopifyTopic || ""}
-                          onChange={(e) => onChange({ shopifyTopic: e.target.value })}
-                          placeholder="orders/paid"
+                          value={draft.shopifyTopicCustom || ""}
+                          onChange={(e) => {
+                            const custom = e.target.value;
+                            const preset = String(draft.shopifyTopicPreset || draft.shopifyTopic || "orders/paid");
+                            onChange({ shopifyTopicCustom: custom, shopifyTopic: String(custom || "").trim() ? custom : preset });
+                          }}
+                          placeholder="orders/create"
                         />
                       </div>
                     </div>
@@ -2166,7 +2206,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                           placeholder="e.g. vip"
                         />
                         <div className="text-[11px] text-slate-500 mt-1">
-                          Uses <span className="font-mono">orders/updated</span> + condition <span className="font-mono">tag_contains</span>.
+                          If set, this rule only fires when the Shopify order <span className="font-mono">tags</span> contains this value.
                         </div>
                       </div>
                       <div>
@@ -2181,23 +2221,6 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         <div className="text-[11px] text-slate-500 mt-1">
                           If set, this rule only fires when the Shopify payload phone matches one of these numbers.
                         </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-3">
-                      <div className="text-xs text-slate-500 mb-1">Shopify variables (click to copy)</div>
-                      <div className="flex flex-wrap gap-1">
-                        {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 24).map((v) => (
-                          <button
-                            key={`shopvar:${v}`}
-                            type="button"
-                            className="px-2 py-0.5 rounded border text-xs hover:bg-white"
-                            title="Click to copy"
-                            onClick={() => copyVar(v)}
-                          >
-                            {v}
-                          </button>
-                        ))}
                       </div>
                     </div>
                   </div>
@@ -2306,6 +2329,18 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                             const name = e.target.value;
                             const tpl = approvedTemplates.find((t) => t.name === name) || null;
                             const n = inferBodyVarCount(tpl);
+                            const btnTexts = (() => {
+                              try {
+                                const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                                const buttons = comps.find((c) => String(c?.type || "").toUpperCase() === "BUTTONS") || null;
+                                const arr = Array.isArray(buttons?.buttons) ? buttons.buttons : [];
+                                return arr
+                                  .map((b) => String(b?.text || b?.title || b?.url || "").trim())
+                                  .filter(Boolean);
+                              } catch {
+                                return [];
+                              }
+                            })();
                             const headerFormat = (() => {
                               try {
                                 const comps = Array.isArray(tpl?.components) ? tpl.components : [];
@@ -2315,11 +2350,21 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                 return "";
                               }
                             })();
+                            const shouldAutoFillBranches =
+                              String(draft.actionMode || "") === "order_confirm" &&
+                              String(draft.ocConfirmTitles || "").trim() === DEFAULT_OC_CONFIRM_TITLES &&
+                              String(draft.ocChangeTitles || "").trim() === DEFAULT_OC_CHANGE_TITLES &&
+                              String(draft.ocTalkTitles || "").trim() === DEFAULT_OC_TALK_TITLES;
                             onChange({
                               templateName: name,
                               templateLanguage: String(tpl?.language || draft.templateLanguage || "en"),
                               templateVars: Array.from({ length: n }, (_, i) => (draft.templateVars?.[i] || "")),
                               templateHeaderUrl: (["IMAGE", "VIDEO", "DOCUMENT"].includes(headerFormat) ? (draft.templateHeaderUrl || "") : ""),
+                              ...(shouldAutoFillBranches ? {
+                                ocConfirmTitles: String(btnTexts?.[0] || ""),
+                                ocChangeTitles: String(btnTexts?.[1] || ""),
+                                ocTalkTitles: String(btnTexts?.[2] || ""),
+                              } : {}),
                             });
                           }}
                           disabled={templatesLoading}
@@ -2421,6 +2466,49 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                             </div>
                           </div>
                         )}
+                      </div>
+                    )}
+
+                    {draft.actionMode === "order_confirm" && draft.triggerSource === "shopify" && (
+                      <div className="mt-3 border rounded-xl p-3 bg-white">
+                        <div className="text-xs font-semibold text-slate-700">Order entry gate (optional)</div>
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          Use this if you want the confirmation flow to run only for specific Shopify orders.
+                        </div>
+                        <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                          <div>
+                            <div className="text-xs text-slate-500 mb-1">Mode</div>
+                            <select
+                              className="w-full border rounded-lg px-3 py-2"
+                              value={String(draft.ocEntryGateMode || "all")}
+                              onChange={(e) => onChange({ ocEntryGateMode: e.target.value })}
+                            >
+                              <option value="all">All orders (no gate)</option>
+                              <option value="tag_or_online_store">Required tag OR Online Store order</option>
+                            </select>
+                          </div>
+                          <div>
+                            <div className="text-xs text-slate-500 mb-1">Required tag</div>
+                            <input
+                              className="w-full border rounded-lg px-3 py-2"
+                              value={String(draft.ocRequiredTag || "")}
+                              onChange={(e) => onChange({ ocRequiredTag: e.target.value })}
+                              placeholder="easysell_cod_form"
+                              disabled={String(draft.ocEntryGateMode || "all") === "all"}
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-2">
+                          <label className="text-sm flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={!!draft.ocIncludeOnlineStore}
+                              onChange={(e) => onChange({ ocIncludeOnlineStore: e.target.checked })}
+                              disabled={String(draft.ocEntryGateMode || "all") === "all"}
+                            />
+                            Also allow Online Store orders (source_name = web)
+                          </label>
+                        </div>
                       </div>
                     )}
 
@@ -2540,49 +2628,86 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   </div>
 
                   <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="md:col-span-2 border rounded-xl p-3 bg-slate-50">
+                      <div className="text-xs font-semibold text-slate-700">Template buttons</div>
+                      <div className="text-[11px] text-slate-500 mt-1">
+                        If your template has buttons, you can auto-fill Button 1/2/3 from them.
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {Array.isArray(selectedTemplatePreview?.buttons) && selectedTemplatePreview.buttons.length > 0 ? (
+                          selectedTemplatePreview.buttons.map((b, i) => (
+                            <span key={`tplbtn_branch:${i}`} className="px-2 py-1 rounded border text-xs bg-white">
+                              {String(b?.text || b?.title || b?.url || b?.type || "button")}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-xs text-slate-500">No buttons detected for the selected template.</span>
+                        )}
+                      </div>
+                      {Array.isArray(selectedTemplatePreview?.buttons) && selectedTemplatePreview.buttons.length > 0 && (
+                        <div className="mt-2">
+                          <button
+                            type="button"
+                            className="px-3 py-2 rounded-lg border bg-white hover:bg-slate-50 text-sm"
+                            onClick={() => {
+                              const btns = selectedTemplatePreview.buttons
+                                .map((b) => String(b?.text || b?.title || b?.url || "").trim())
+                                .filter(Boolean);
+                              onChange({
+                                ocConfirmTitles: String(btns?.[0] || ""),
+                                ocChangeTitles: String(btns?.[1] || ""),
+                                ocTalkTitles: String(btns?.[2] || ""),
+                              });
+                            }}
+                          >
+                            Auto-fill from template buttons
+                          </button>
+                        </div>
+                      )}
+                    </div>
                     <div className="md:col-span-2">
-                      <div className="text-xs text-slate-500 mb-1">Confirm button titles (one per line)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 1 titles (one per line)</div>
                       <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocConfirmTitles || ""} onChange={(e)=>onChange({ ocConfirmTitles: e.target.value })} />
                     </div>
                     <div className="md:col-span-2">
-                      <div className="text-xs text-slate-500 mb-1">Change info button titles (one per line)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 2 titles (one per line)</div>
                       <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocChangeTitles || ""} onChange={(e)=>onChange({ ocChangeTitles: e.target.value })} />
                     </div>
                     <div className="md:col-span-2">
-                      <div className="text-xs text-slate-500 mb-1">Talk to agent button titles (one per line)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 3 titles (one per line)</div>
                       <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocTalkTitles || ""} onChange={(e)=>onChange({ ocTalkTitles: e.target.value })} />
                     </div>
 
                     <div>
-                      <div className="text-xs text-slate-500 mb-1">Confirm button IDs (optional)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 1 IDs (optional)</div>
                       <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocConfirmIds || ""} onChange={(e)=>onChange({ ocConfirmIds: e.target.value })} />
                     </div>
                     <div>
-                      <div className="text-xs text-slate-500 mb-1">Change button IDs (optional)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 2 IDs (optional)</div>
                       <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocChangeIds || ""} onChange={(e)=>onChange({ ocChangeIds: e.target.value })} />
                     </div>
                     <div>
-                      <div className="text-xs text-slate-500 mb-1">Talk button IDs (optional)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 3 IDs (optional)</div>
                       <textarea className="w-full border rounded-lg px-3 py-2 font-mono text-xs" rows={2} value={draft.ocTalkIds || ""} onChange={(e)=>onChange({ ocTalkIds: e.target.value })} />
                     </div>
 
                     <div className="md:col-span-2">
-                      <div className="text-xs text-slate-500 mb-1">Confirm audio URL (optional)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 1 audio URL (optional)</div>
                       <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.ocConfirmAudioUrl || ""} onChange={(e)=>onChange({ ocConfirmAudioUrl: e.target.value })} placeholder="https://.../confirm.ogg" />
                     </div>
                     <div className="md:col-span-2">
-                      <div className="text-xs text-slate-500 mb-1">Change info audio URL (optional)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 2 audio URL (optional)</div>
                       <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.ocChangeAudioUrl || ""} onChange={(e)=>onChange({ ocChangeAudioUrl: e.target.value })} placeholder="https://.../change.ogg" />
                     </div>
                     <div className="md:col-span-2">
-                      <div className="text-xs text-slate-500 mb-1">Talk to agent audio URL (optional)</div>
+                      <div className="text-xs text-slate-500 mb-1">Button 3 audio URL (optional)</div>
                       <input className="w-full border rounded-lg px-3 py-2 font-mono text-xs" value={draft.ocTalkAudioUrl || ""} onChange={(e)=>onChange({ ocTalkAudioUrl: e.target.value })} placeholder="https://.../talk.ogg" />
                     </div>
 
                     <div className="md:col-span-2 flex items-center justify-between gap-3 border rounded-xl p-3 bg-slate-50">
                       <label className="text-sm flex items-center gap-2">
                         <input type="checkbox" checked={!!draft.ocSendItems} onChange={(e)=>onChange({ ocSendItems: e.target.checked })} />
-                        Send ordered items after confirm (catalog items)
+                        Send ordered items after Button 1 (catalog items)
                       </label>
                       <div className="flex items-center gap-2">
                         <div className="text-xs text-slate-500">Max items</div>
@@ -2668,25 +2793,6 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   </div>
                 </div>
 
-                <div className="mt-2">
-                  <div className="text-xs text-slate-500 mb-1">Shopify variables (click to copy)</div>
-                  <div className="flex flex-wrap gap-1">
-                    {shopifyVarsByTopic(draft.shopifyTopic).slice(0, 40).map((v) => (
-                      <button
-                        key={`shopvar:${v}`}
-                        type="button"
-                        className="px-2 py-0.5 rounded border text-xs hover:bg-slate-50"
-                        title="Click to copy"
-                        onClick={() => copyVar(v)}
-                      >
-                        {v}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="text-[11px] text-slate-500 mt-1">
-                    Variables support dotted paths like <span className="font-mono">{"{{ customer.phone }}"}</span>.
-                  </div>
-                </div>
               </div>
             )}
           </div>
@@ -2861,15 +2967,15 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                       <div className="md:col-span-2">
-                        <div className="text-xs text-slate-500 mb-1">Confirm button titles (one per line)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 1 titles (one per line)</div>
                         <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocConfirmTitles || ""} onChange={(e)=>onChange({ ocConfirmTitles: e.target.value })} />
                       </div>
                       <div className="md:col-span-2">
-                        <div className="text-xs text-slate-500 mb-1">Change info button titles (one per line)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 2 titles (one per line)</div>
                         <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocChangeTitles || ""} onChange={(e)=>onChange({ ocChangeTitles: e.target.value })} />
                       </div>
                       <div className="md:col-span-2">
-                        <div className="text-xs text-slate-500 mb-1">Talk to agent button titles (one per line)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 3 titles (one per line)</div>
                         <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocTalkTitles || ""} onChange={(e)=>onChange({ ocTalkTitles: e.target.value })} />
                       </div>
 
@@ -2878,35 +2984,35 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       </div>
 
                       <div>
-                        <div className="text-xs text-slate-500 mb-1">Confirm button IDs (optional)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 1 IDs (optional)</div>
                         <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocConfirmIds || ""} onChange={(e)=>onChange({ ocConfirmIds: e.target.value })} />
                       </div>
                       <div>
-                        <div className="text-xs text-slate-500 mb-1">Change button IDs (optional)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 2 IDs (optional)</div>
                         <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocChangeIds || ""} onChange={(e)=>onChange({ ocChangeIds: e.target.value })} />
                       </div>
                       <div>
-                        <div className="text-xs text-slate-500 mb-1">Talk button IDs (optional)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 3 IDs (optional)</div>
                         <textarea className="w-full border rounded px-2 py-1 font-mono text-xs" rows={2} value={draft.ocTalkIds || ""} onChange={(e)=>onChange({ ocTalkIds: e.target.value })} />
                       </div>
 
                       <div className="md:col-span-2">
-                        <div className="text-xs text-slate-500 mb-1">Confirm audio URL (optional)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 1 audio URL (optional)</div>
                         <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.ocConfirmAudioUrl || ""} onChange={(e)=>onChange({ ocConfirmAudioUrl: e.target.value })} placeholder="https://.../confirm.ogg" />
                       </div>
                       <div className="md:col-span-2">
-                        <div className="text-xs text-slate-500 mb-1">Change info audio URL (optional)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 2 audio URL (optional)</div>
                         <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.ocChangeAudioUrl || ""} onChange={(e)=>onChange({ ocChangeAudioUrl: e.target.value })} placeholder="https://.../change.ogg" />
                       </div>
                       <div className="md:col-span-2">
-                        <div className="text-xs text-slate-500 mb-1">Talk to agent audio URL (optional)</div>
+                        <div className="text-xs text-slate-500 mb-1">Button 3 audio URL (optional)</div>
                         <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={draft.ocTalkAudioUrl || ""} onChange={(e)=>onChange({ ocTalkAudioUrl: e.target.value })} placeholder="https://.../talk.ogg" />
                       </div>
 
                       <div className="md:col-span-2 flex items-center justify-between gap-3">
                         <label className="text-sm flex items-center gap-2">
                           <input type="checkbox" checked={!!draft.ocSendItems} onChange={(e)=>onChange({ ocSendItems: e.target.checked })} />
-                          Send ordered items after confirm (catalog items)
+                          Send ordered items after Button 1 (catalog items)
                         </label>
                         <div className="flex items-center gap-2">
                           <div className="text-xs text-slate-500">Max items</div>

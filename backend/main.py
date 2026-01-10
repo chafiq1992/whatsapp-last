@@ -6796,6 +6796,46 @@ class MessageProcessor:
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             if not (to_id and tname):
                                 continue
+                            # Optional entry gate (per-rule): only proceed when required tag OR online-store order.
+                            try:
+                                mode = str(act.get("entry_gate_mode") or "all").strip().lower()
+                                if mode in ("tag_or_online_store", "required_tag_or_online_store", "entry_gate"):
+                                    required_tag = str(
+                                        act.get("required_tag")
+                                        or os.getenv("ORDER_CONFIRM_REQUIRED_TAG", "easysell_cod_form")
+                                        or ""
+                                    ).strip()
+                                    include_online_store_env = os.getenv("ORDER_CONFIRM_INCLUDE_ONLINE_STORE", "1").strip().lower()
+                                    include_online_store_default = include_online_store_env not in {"0", "false", "no", "off"}
+                                    include_online_store = (
+                                        bool(act.get("include_online_store"))
+                                        if act.get("include_online_store") is not None
+                                        else include_online_store_default
+                                    )
+
+                                    try:
+                                        order_obj2 = data.get("_order") if isinstance(data.get("_order"), dict) else data
+                                        tags_str = str(order_obj2.get("tags") or data.get("tags") or "")
+                                        tags = [t.strip().lower() for t in tags_str.split(",") if t and t.strip()]
+                                    except Exception:
+                                        tags = []
+                                        order_obj2 = data
+
+                                    has_required_tag = True if not required_tag else (required_tag.lower() in tags)
+                                    is_online_store = False
+                                    if not has_required_tag and include_online_store:
+                                        try:
+                                            source_name = str(order_obj2.get("source_name") or order_obj2.get("source") or "").strip().lower()
+                                            channel = str(order_obj2.get("channel") or order_obj2.get("channel_type") or "").strip().lower()
+                                            is_online_store = source_name in {"web", "online", "online_store"} or channel in {"online", "online_store"}
+                                        except Exception:
+                                            is_online_store = False
+
+                                    if not (has_required_tag or (include_online_store and is_online_store)):
+                                        continue
+                            except Exception:
+                                # If gate parsing fails, do not block sending.
+                                pass
                             lang = str(act.get("language") or "en").strip() or "en"
                             comps = self._render_template_components(act.get("components") or [], ctx)
                             preview = str(act.get("preview") or f"[template] {tname}")

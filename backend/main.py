@@ -180,6 +180,56 @@ def _ws_setting_key(base_key: str, workspace: str | None = None) -> str:
     ws = _coerce_workspace(workspace or get_current_workspace())
     return f"{str(base_key or '').strip()}::{ws}"
 
+
+def _secret_hint(value: str) -> str:
+    """Return a short non-sensitive hint for UI/logs."""
+    s = str(value or "").strip()
+    return (s[-4:] if len(s) >= 4 else "")
+
+
+def _shopify_webhook_secret_env(ws: str) -> str:
+    """Per-workspace env override -> global env fallback."""
+    w = _coerce_workspace(ws)
+    try:
+        return (
+            os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{w.upper()}", "")
+            or os.getenv("SHOPIFY_WEBHOOK_SECRET", "")
+        ).strip()
+    except Exception:
+        return (os.getenv("SHOPIFY_WEBHOOK_SECRET", "") or "").strip()
+
+
+async def _shopify_webhook_secret_db(ws: str) -> str:
+    """DB-stored per-workspace Shopify webhook secret (admin UI). Returns empty string if missing."""
+    w = _coerce_workspace(ws)
+    try:
+        raw = await db_manager.get_setting(_ws_setting_key("shopify_webhook_secret", w))
+        if not raw:
+            return ""
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            obj = None
+        if isinstance(obj, str):
+            return obj.strip()
+        if isinstance(obj, dict):
+            return str(obj.get("secret") or "").strip()
+        return ""
+    except Exception:
+        return ""
+
+
+async def _get_effective_shopify_webhook_secret(ws: str) -> tuple[str, str]:
+    """Return (secret, source) where source is 'db'|'env'|'missing'."""
+    w = _coerce_workspace(ws)
+    db_val = await _shopify_webhook_secret_db(w)
+    if db_val:
+        return db_val, "db"
+    env_val = _shopify_webhook_secret_env(w)
+    if env_val:
+        return env_val, "env"
+    return "", "missing"
+
 async def _get_effective_catalog_id(workspace: str | None = None) -> str:
     """Resolve catalog_id for a workspace (DB override -> env per-workspace -> global env)."""
     ws = _coerce_workspace(workspace or get_current_workspace())
@@ -9415,6 +9465,55 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}
 
 
+# ---- Shopify webhook auth (workspace-scoped, editable from UI) ----
+@app.get("/admin/shopify-webhook-auth")
+async def get_shopify_webhook_auth_endpoint(_: dict = Depends(require_admin)):
+    """Return Shopify webhook auth state for the current workspace.
+
+    Notes:
+    - Effective secret resolution: DB (admin UI) -> env per-workspace -> env global.
+    - Secret value is NEVER returned (only presence + hint).
+    """
+    ws = _coerce_workspace(get_current_workspace())
+    db_val = await _shopify_webhook_secret_db(ws)
+    env_val = _shopify_webhook_secret_env(ws)
+    eff, src = await _get_effective_shopify_webhook_secret(ws)
+    return {
+        "workspace": ws,
+        "webhook_path": f"/shopify/webhook/{ws}",
+        "webhook_url_example": f"{str(BASE_URL or '').rstrip('/')}/shopify/webhook/{ws}",
+        "secret_present": bool(eff),
+        "secret_source": src,
+        "secret_hint": _secret_hint(db_val if src == "db" else env_val),
+        "db_secret_present": bool(db_val),
+        "env_secret_present": bool(env_val),
+    }
+
+
+@app.post("/admin/shopify-webhook-auth")
+async def set_shopify_webhook_auth_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Set/clear the DB-stored Shopify webhook secret for the current workspace.
+
+    Payload:
+    - secret: string (optional). If provided and non-empty, stored in DB for this workspace.
+    - clear_secret: bool (optional). If true, delete DB secret so env fallback is used.
+    """
+    ws = _coerce_workspace(get_current_workspace())
+    clear_secret = bool((payload or {}).get("clear_secret"))
+    secret_in = str((payload or {}).get("secret") or "").strip()
+
+    key = _ws_setting_key("shopify_webhook_secret", ws)
+    if clear_secret:
+        try:
+            await db_manager.delete_setting(key)
+        except Exception:
+            pass
+    elif secret_in:
+        await db_manager.set_setting(key, secret_in)
+    # If neither clear_secret nor secret provided, keep existing unchanged.
+    return await get_shopify_webhook_auth_endpoint(_={})  # type: ignore[arg-type]
+
+
 @app.post("/admin/webhook-dlq/replay")
 async def replay_webhook_dlq(payload: dict = Body(...), _: dict = Depends(require_admin)):
     """Replay webhook DLQ entries back into the main webhook stream.
@@ -9731,7 +9830,7 @@ async def admin_delete_workspace(workspace_id: str, _: dict = Depends(require_ad
     # Remove workspace-scoped settings keys (best-effort)
     deleted_keys: list[str] = []
     try:
-        for base in ("inbox_env", "catalog_filters"):
+        for base in ("inbox_env", "catalog_filters", "shopify_webhook_secret"):
             k = _ws_setting_key(base, ws_id)
             try:
                 await db_manager.delete_setting(k)
@@ -10008,10 +10107,7 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
         body = await request.body()
 
         # Verify HMAC if secret configured
-        secret = (
-            os.getenv(f"SHOPIFY_WEBHOOK_SECRET_{ws.upper()}", "")
-            or os.getenv("SHOPIFY_WEBHOOK_SECRET", "")
-        ).strip()
+        secret, _secret_source = await _get_effective_shopify_webhook_secret(ws)
         if secret:
             hmac_header = (request.headers.get("X-Shopify-Hmac-Sha256") or "").strip()
             from .shopify_webhook import verify_shopify_webhook_hmac

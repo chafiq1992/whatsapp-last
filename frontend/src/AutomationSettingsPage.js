@@ -13,6 +13,7 @@ export default function AutomationSettingsPage() {
   const [allowed, setAllowed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showDocs, setShowDocs] = useState(false);
 
   const [workspaces, setWorkspaces] = useState([]);
   const [defaultWorkspace, setDefaultWorkspace] = useState('irranova');
@@ -48,6 +49,17 @@ export default function AutomationSettingsPage() {
     access_token_source: '',
   });
   const [savingEnv, setSavingEnv] = useState(false);
+
+  const [shopifyDraft, setShopifyDraft] = useState({
+    use_db_secret: false,
+    secret: '',
+    secret_present: false,
+    secret_source: 'missing',
+    secret_hint: '',
+    webhook_path: '',
+    webhook_url_example: '',
+  });
+  const [savingShopify, setSavingShopify] = useState(false);
 
   const selectedWsObj = useMemo(() => {
     const ws = normalizeWorkspaceId(workspace);
@@ -99,8 +111,24 @@ export default function AutomationSettingsPage() {
     });
   };
 
+  const loadShopifyWebhookAuth = async (ws) => {
+    const res = await api.get('/admin/shopify-webhook-auth', { headers: { 'X-Workspace': normalizeWorkspaceId(ws) } });
+    const d = res?.data || {};
+    const useDb = String(d.secret_source || '') === 'db';
+    setShopifyDraft((prev) => ({
+      ...prev,
+      use_db_secret: useDb,
+      secret: '',
+      secret_present: Boolean(d.secret_present),
+      secret_source: String(d.secret_source || 'missing'),
+      secret_hint: String(d.secret_hint || ''),
+      webhook_path: String(d.webhook_path || ''),
+      webhook_url_example: String(d.webhook_url_example || ''),
+    }));
+  };
+
   const refreshAllForWorkspace = async (ws) => {
-    await Promise.allSettled([loadCatalogFilters(ws), loadInboxEnv(ws)]);
+    await Promise.allSettled([loadCatalogFilters(ws), loadInboxEnv(ws), loadShopifyWebhookAuth(ws)]);
   };
 
   useEffect(() => {
@@ -199,6 +227,29 @@ export default function AutomationSettingsPage() {
     }
   };
 
+  const saveShopify = async () => {
+    const ws = normalizeWorkspaceId(workspace);
+    if (!ws) return;
+    setSavingShopify(true);
+    setError('');
+    try {
+      if (shopifyDraft.use_db_secret) {
+        await api.post(
+          '/admin/shopify-webhook-auth',
+          { ...(shopifyDraft.secret ? { secret: shopifyDraft.secret } : {}) },
+          { headers: { 'X-Workspace': ws } }
+        );
+      } else {
+        await api.post('/admin/shopify-webhook-auth', { clear_secret: true }, { headers: { 'X-Workspace': ws } });
+      }
+      await loadShopifyWebhookAuth(ws);
+    } catch (e) {
+      setError('Failed to save Shopify webhook authentication settings.');
+    } finally {
+      setSavingShopify(false);
+    }
+  };
+
   const addWorkspace = async () => {
     const id = normalizeWorkspaceId(addDraft.id);
     if (!id) return;
@@ -259,11 +310,88 @@ export default function AutomationSettingsPage() {
     return defaultWorkspace || 'irranova';
   }
 
+  const effectiveShopifyWebhookUrl = useMemo(() => {
+    const ws = normalizeWorkspaceId(workspace) || 'irranova';
+    const path = `/shopify/webhook/${ws}`;
+    try {
+      const origin = window.location.origin || '';
+      if (origin) return `${origin}${path}`;
+    } catch {}
+    return (shopifyDraft.webhook_url_example || path);
+  }, [workspace, shopifyDraft.webhook_url_example]);
+
   if (!allowed && loading) return null;
   if (!allowed) return null;
 
   return (
     <div className="h-screen w-screen bg-white">
+      {showDocs && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={() => setShowDocs(false)}>
+          <div className="w-full max-w-3xl rounded-lg bg-white shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div className="text-sm font-semibold">Settings documentation</div>
+              <button type="button" className="text-sm px-2 py-1 rounded hover:bg-slate-100" onClick={() => setShowDocs(false)}>Close</button>
+            </div>
+            <div className="p-4 space-y-4 text-sm">
+              <div className="border rounded p-3 bg-slate-50">
+                <div className="font-semibold mb-1">Shopify webhook URL (this workspace)</div>
+                <div className="text-xs text-slate-600 mb-2">
+                  In Shopify Admin → Settings → Notifications → Webhooks, set the delivery URL to:
+                </div>
+                <div className="flex items-center gap-2">
+                  <input readOnly className="flex-1 border rounded px-2 py-1 font-mono text-xs bg-white" value={effectiveShopifyWebhookUrl} />
+                  <button
+                    type="button"
+                    className="px-2 py-1 rounded bg-gray-800 text-white"
+                    onClick={() => {
+                      try { navigator.clipboard.writeText(effectiveShopifyWebhookUrl); } catch {}
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+
+              <div className="border rounded p-3">
+                <div className="font-semibold mb-1">Webhook authentication (HMAC)</div>
+                <div className="text-xs text-slate-600">
+                  Shopify signs the raw request body and sends the signature in <span className="font-mono">X-Shopify-Hmac-Sha256</span>.
+                  This app verifies it when a secret is configured.
+                </div>
+                <div className="mt-2 text-xs text-slate-700 space-y-1">
+                  <div><span className="font-semibold">Per-workspace env</span>: <span className="font-mono">SHOPIFY_WEBHOOK_SECRET_{String((normalizeWorkspaceId(workspace) || 'irranova')).toUpperCase()}</span></div>
+                  <div><span className="font-semibold">Global env fallback</span>: <span className="font-mono">SHOPIFY_WEBHOOK_SECRET</span></div>
+                  <div><span className="font-semibold">UI/DB override</span>: “Use DB secret” stores a secret per workspace and takes priority over env.</div>
+                </div>
+              </div>
+
+              <div className="border rounded p-3">
+                <div className="font-semibold mb-1">Topic-driven processing (X-Shopify-Topic)</div>
+                <div className="text-xs text-slate-600">
+                  Shopify includes <span className="font-mono">X-Shopify-Topic</span> (example: <span className="font-mono">orders/paid</span>).
+                  Our automations match rules where <span className="font-mono">trigger.source=shopify</span> and <span className="font-mono">trigger.event</span> equals the topic exactly.
+                </div>
+              </div>
+
+              <div className="border rounded p-3">
+                <div className="font-semibold mb-1">Environment variables (high-signal)</div>
+                <div className="text-xs text-slate-700 space-y-1">
+                  <div><span className="font-semibold">WORKSPACES / DEFAULT_WORKSPACE</span>: define which workspace ids exist and the default.</div>
+                  <div><span className="font-semibold">BASE_URL</span>: used for server-side URL examples/logs (UI uses your browser origin).</div>
+                  <div><span className="font-semibold">WHATSAPP_VERIFY_TOKEN</span>: Meta webhook verification token (optional if you store override in DB).</div>
+                  <div><span className="font-semibold">WHATSAPP_ACCESS_TOKEN_&lt;WS&gt;</span> / <span className="font-semibold">WHATSAPP_PHONE_NUMBER_ID_&lt;WS&gt;</span>: per-workspace WhatsApp Cloud env fallback.</div>
+                  <div><span className="font-semibold">CATALOG_ID_&lt;WS&gt;</span>: per-workspace catalog env fallback.</div>
+                  <div><span className="font-semibold">ALLOWED_PHONE_NUMBER_IDS</span>: webhook routing allowlist.</div>
+                  <div><span className="font-semibold">SURVEY_TEST_NUMBERS / AUTO_REPLY_TEST_NUMBERS</span>: digits-only test numbers.</div>
+                </div>
+              </div>
+            </div>
+            <div className="border-t px-4 py-3 flex justify-end">
+              <button type="button" className="px-3 py-1.5 rounded bg-gray-800 text-white" onClick={() => setShowDocs(false)}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
       <header className="h-12 px-3 flex items-center justify-between border-b bg-white/70 backdrop-blur sticky top-0 z-50">
         <div className="flex items-center gap-2 min-w-0">
           <div className="text-sm font-semibold text-gray-800 truncate">Settings</div>
@@ -287,6 +415,13 @@ export default function AutomationSettingsPage() {
               <option key={w.id} value={w.id}>{w.label || w.id}</option>
             ))}
           </select>
+          <button
+            type="button"
+            className="px-3 py-1.5 text-sm bg-white text-gray-900 rounded border border-gray-300 hover:bg-gray-50"
+            onClick={() => setShowDocs(true)}
+          >
+            Docs
+          </button>
         </div>
       </header>
 
@@ -518,6 +653,84 @@ export default function AutomationSettingsPage() {
                   <div className="md:col-span-2">
                     <button type="button" className="px-3 py-1.5 rounded bg-gray-800 text-white disabled:opacity-50" disabled={savingEnv} onClick={saveEnv}>
                       {savingEnv ? 'Saving…' : 'Save inbox env'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border rounded bg-white">
+                <div className="px-3 py-2 border-b text-sm font-medium flex items-center justify-between">
+                  <span>Shopify webhooks (per workspace)</span>
+                  <button type="button" className="text-xs px-2 py-1 rounded border bg-white hover:bg-slate-50" onClick={() => setShowDocs(true)}>
+                    Docs
+                  </button>
+                </div>
+                <div className="p-3 space-y-3">
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Webhook URL for this workspace</div>
+                    <div className="flex items-center gap-2">
+                      <input readOnly className="flex-1 border rounded px-2 py-1 font-mono text-xs bg-slate-50" value={effectiveShopifyWebhookUrl} />
+                      <button
+                        type="button"
+                        className="px-2 py-1 rounded bg-gray-800 text-white"
+                        onClick={() => {
+                          try { navigator.clipboard.writeText(effectiveShopifyWebhookUrl); } catch {}
+                        }}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Shopify topics come in <span className="font-mono">X-Shopify-Topic</span> and automations match <span className="font-mono">trigger.event</span> exactly.
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Webhook secret (HMAC)</div>
+                    <div className="flex items-center gap-2 mb-2">
+                      <label className="text-xs text-slate-600 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(shopifyDraft.use_db_secret)}
+                          onChange={(e) => {
+                            const useDb = !!e.target.checked;
+                            setShopifyDraft((d) => ({ ...d, use_db_secret: useDb, secret: '' }));
+                          }}
+                        />
+                        Use DB secret (set from UI)
+                      </label>
+                      <span className="text-[11px] text-slate-500">
+                        Current: <span className="font-mono">{shopifyDraft.secret_source || 'missing'}</span>
+                        {shopifyDraft.secret_hint ? <> • …{shopifyDraft.secret_hint}</> : null}
+                      </span>
+                    </div>
+                    <input
+                      type="password"
+                      className="w-full border rounded px-2 py-1 font-mono text-xs"
+                      value={shopifyDraft.secret || ''}
+                      onChange={(e) => setShopifyDraft((d) => ({ ...d, secret: e.target.value }))}
+                      disabled={!shopifyDraft.use_db_secret}
+                      placeholder={
+                        shopifyDraft.use_db_secret
+                          ? (shopifyDraft.secret_present && shopifyDraft.secret_source === 'db' ? 'Saved in DB — leave blank to keep' : 'Paste Shopify webhook secret here')
+                          : 'Using env secret (SHOPIFY_WEBHOOK_SECRET_<WORKSPACE> or SHOPIFY_WEBHOOK_SECRET)'
+                      }
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      {shopifyDraft.use_db_secret
+                        ? 'DB secret takes priority over env. Leave empty to keep the existing DB secret.'
+                        : 'Env secret is recommended for production; switching off DB secret will delete the DB override for this workspace.'}
+                    </div>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 rounded bg-gray-800 text-white disabled:opacity-50"
+                      disabled={savingShopify}
+                      onClick={saveShopify}
+                    >
+                      {savingShopify ? 'Saving…' : 'Save Shopify webhook auth'}
                     </button>
                   </div>
                 </div>

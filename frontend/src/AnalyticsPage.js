@@ -55,24 +55,26 @@ export default function AnalyticsPage() {
   }, [workspace, workspaces]);
 
   return (
-    <div className="h-screen w-screen bg-gray-950 text-gray-100">
-      <header className="h-12 px-3 flex items-center justify-between border-b border-gray-800 bg-gray-950/70 backdrop-blur sticky top-0 z-50">
+    <div className="min-h-screen w-full bg-slate-50 text-slate-900">
+      <header className="h-14 px-4 flex items-center justify-between border-b border-slate-200 bg-white/80 backdrop-blur sticky top-0 z-50">
         <div className="flex items-center gap-2 min-w-0">
           <div className="text-sm font-semibold truncate">Analytics</div>
-          <span className="text-xs px-2 py-0.5 rounded bg-gray-900 text-gray-200 border border-gray-800">{wsLabel}</span>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-100">
+            {wsLabel}
+          </span>
         </div>
         <div className="flex items-center gap-2">
-          <button className="px-3 py-1.5 text-sm bg-gray-900 text-gray-200 rounded border border-gray-800 hover:bg-gray-800" onClick={() => (window.location.href = '/')}>
+          <button className="px-3 py-1.5 text-sm bg-white text-slate-800 rounded-lg border border-slate-200 hover:bg-slate-50" onClick={() => (window.location.href = '/')}>
             Inbox
           </button>
-          <button className="px-3 py-1.5 text-sm bg-gray-900 text-gray-200 rounded border border-gray-800 hover:bg-gray-800" onClick={() => (window.location.href = '/#/automation-studio')}>
+          <button className="px-3 py-1.5 text-sm bg-white text-slate-800 rounded-lg border border-slate-200 hover:bg-slate-50" onClick={() => (window.location.href = '/#/automation-studio')}>
             Automation
           </button>
-          <button className="px-3 py-1.5 text-sm bg-gray-900 text-gray-200 rounded border border-gray-800 hover:bg-gray-800" onClick={() => (window.location.href = '/#/settings')}>
+          <button className="px-3 py-1.5 text-sm bg-white text-slate-800 rounded-lg border border-slate-200 hover:bg-slate-50" onClick={() => (window.location.href = '/#/settings')}>
             Settings
           </button>
           <select
-            className="border border-gray-800 bg-gray-900 rounded px-2 py-1 text-sm"
+            className="border border-slate-200 bg-white rounded-lg px-2 py-1.5 text-sm text-slate-800"
             value={workspace}
             onChange={(e) => setWorkspace(String(e.target.value || '').trim().toLowerCase())}
             title="Workspace"
@@ -84,17 +86,17 @@ export default function AnalyticsPage() {
         </div>
       </header>
 
-      <div className="p-4 max-w-6xl mx-auto">
+      <div className="w-full px-4 sm:px-6 lg:px-8 py-6">
         {authState === 'loading' ? (
-          <div className="rounded-xl border border-gray-800 bg-gray-900 p-4 text-sm text-gray-300">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">
             Loading analytics…
           </div>
         ) : authState === 'denied' ? (
-          <div className="rounded-xl border border-rose-800 bg-rose-950/30 p-4 text-sm text-rose-200">
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800 shadow-sm">
             Unauthorized. Please log in as an admin.
             <div className="mt-3">
               <button
-                className="px-3 py-1.5 rounded bg-gray-900 border border-gray-800 hover:bg-gray-800"
+                className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-50"
                 onClick={() => { try { window.location.href = '/login'; } catch {} }}
               >
                 Go to Login

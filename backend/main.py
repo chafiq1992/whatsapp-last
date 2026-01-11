@@ -4298,6 +4298,28 @@ class WorkspaceDatabaseRouter:
                     TENANT_DB_URLS[ws] = str(db_url or "")
                 except Exception:
                     pass
+                # If this workspace shares the SAME Postgres DB URL as an existing manager,
+                # reuse that manager to avoid spawning extra asyncpg pools (which can exhaust DB connection limits).
+                try:
+                    raw = str(db_url or "").strip()
+                    scheme = ""
+                    try:
+                        scheme = (urlparse(raw).scheme or "").lower()
+                    except Exception:
+                        scheme = ""
+                    if raw and scheme in ("postgresql", "postgres"):
+                        for _k, _existing in (self._managers or {}).items():
+                            try:
+                                if not getattr(_existing, "use_postgres", False):
+                                    continue
+                                if str(getattr(_existing, "db_url", "") or "").strip() == raw:
+                                    self._managers[ws] = _existing
+                                    return _existing
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+
                 m = DatabaseManager(db_path=db_path, db_url=db_url)
                 self._managers[ws] = m
                 return m
@@ -11700,6 +11722,12 @@ async def admin_init_db(workspace: str | None = None, _: dict = Depends(require_
             pass
 
 
+# Backwards-compatible alias (older UI/error hints referenced this path)
+@app.post("/admin/init-db")
+async def admin_init_db_alias(workspace: str | None = None, _: dict = Depends(require_admin)):
+    return await admin_init_db(workspace=workspace, _=_)
+
+
 @app.get("/debug/workspace")
 async def debug_workspace(request: Request, _: dict = Depends(require_admin)):
     """Admin-only: show resolved workspace + DB routing info (safe)."""
@@ -11797,7 +11825,7 @@ async def analytics_shopify_inbox(start: Optional[str] = None, end: Optional[str
                     "detail": "Shopify inbox analytics failed",
                     "workspace": get_current_workspace(),
                     "error": str(exc2) or str(exc) or "unknown_error",
-                    "hint": "If this persists, open /debug/workspace (admin) to verify DB routing and run /admin/init-db.",
+                    "hint": "If this persists, open /debug/workspace (admin) to verify DB routing and run /admin/db/init (or /admin/init-db).",
                 },
             )
 

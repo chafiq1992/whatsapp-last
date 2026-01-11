@@ -153,64 +153,79 @@ export default function AnalyticsPanel() {
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="text-lg font-semibold">Analytics</div>
-        <div className="flex items-center gap-2">
+    <div className="space-y-5">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-xl font-semibold tracking-tight text-slate-900">Analytics</div>
+          <div className="text-sm text-slate-500">Agent performance and website WhatsApp funnel</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           {['today','7d','30d','90d','custom'].map((p) => (
             <button
               key={p}
               onClick={() => setPeriod(p)}
-              className={`px-3 py-1 rounded ${period===p ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300'}`}
+              className={`px-3 py-1.5 rounded-full text-sm border transition ${
+                period===p
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+              }`}
             >{p.toUpperCase()}</button>
           ))}
         </div>
       </div>
 
       {period === 'custom' && (
-        <div className="flex items-end gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div>
-            <label className="block text-xs text-gray-400 mb-1">Start date</label>
-            <input type="date" value={customStart} onChange={(e)=>setCustomStart(e.target.value)} className="p-2 bg-gray-800 rounded" />
+            <label className="block text-xs text-slate-500 mb-1">Start date</label>
+            <input type="date" value={customStart} onChange={(e)=>setCustomStart(e.target.value)} className="p-2 bg-white rounded-xl border border-slate-200 text-slate-900" />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">End date</label>
-            <input type="date" value={customEnd} onChange={(e)=>setCustomEnd(e.target.value)} className="p-2 bg-gray-800 rounded" />
+            <label className="block text-xs text-slate-500 mb-1">End date</label>
+            <input type="date" value={customEnd} onChange={(e)=>setCustomEnd(e.target.value)} className="p-2 bg-white rounded-xl border border-slate-200 text-slate-900" />
           </div>
-          <button className="px-3 py-2 bg-blue-600 rounded" onClick={fetchStats}>Apply</button>
+          <button className="px-4 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 shadow-sm" onClick={fetchStats}>Apply</button>
         </div>
       )}
 
-      {error && <div className="text-red-400 text-sm">{error}</div>}
+      {error && (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+          {error}
+        </div>
+      )}
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-        <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="text-sm text-gray-400">Total received</div>
-          <div className="text-2xl font-bold">{totals.totalReceived}</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+          <div className="text-sm text-slate-500">Total received</div>
+          <div className="text-2xl font-semibold text-slate-900">{totals.totalReceived}</div>
         </div>
-        <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="text-sm text-gray-400">Total replied-to</div>
-          <div className="text-2xl font-bold">{totals.totalRepliedTo}</div>
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+          <div className="text-sm text-slate-500">Total replied-to</div>
+          <div className="text-2xl font-semibold text-slate-900">{totals.totalRepliedTo}</div>
         </div>
-        <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="text-sm text-gray-400">Total sent</div>
-          <div className="text-2xl font-bold">{totals.totalSent}</div>
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+          <div className="text-sm text-slate-500">Total sent</div>
+          <div className="text-2xl font-semibold text-slate-900">{totals.totalSent}</div>
         </div>
-        <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="text-sm text-gray-400">Total orders</div>
-          <div className="text-2xl font-bold">{totals.totalOrders}</div>
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+          <div className="text-sm text-slate-500">Total orders</div>
+          <div className="text-2xl font-semibold text-slate-900">{totals.totalOrders}</div>
         </div>
       </div>
 
-      <div className="bg-gray-800 rounded p-4 border border-gray-700">
-        <div className="flex items-center justify-between gap-3 mb-2">
-          <div className="font-medium">Website WhatsApp icon (Shopify) analytics</div>
-          <div className="flex items-center gap-2">
+      <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-2">
+          <div className="font-medium text-slate-900">Website WhatsApp icon (Shopify) analytics</div>
+          <div className="flex flex-wrap items-center gap-2">
             {['initiated','inbound_messages','clicks','orders_created'].map((k) => (
               <button
                 key={k}
                 onClick={() => setShopifyMetric(k)}
-                className={`px-2 py-1 rounded text-xs ${shopifyMetric===k ? 'bg-blue-600 text-white' : 'bg-gray-900 text-gray-300'}`}
+                className={`px-2.5 py-1.5 rounded-full text-xs border transition ${
+                  shopifyMetric===k
+                    ? 'bg-indigo-600 text-white border-indigo-600'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                }`}
                 title={k}
               >
                 {k.replaceAll('_',' ').toUpperCase()}
@@ -219,93 +234,97 @@ export default function AnalyticsPanel() {
           </div>
         </div>
 
-        {shopifyError && <div className="text-red-400 text-sm mb-2">{shopifyError}</div>}
+        {shopifyError && (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800 mb-3">
+            {shopifyError}
+          </div>
+        )}
 
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
-          <div className="bg-gray-900 rounded p-3 border border-gray-700">
-            <div className="text-xs text-gray-400">Clicks</div>
-            <div className="text-xl font-bold">{Number(shopTotals.clicks || 0)}</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3 mb-4">
+          <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200">
+            <div className="text-xs text-slate-500">Clicks</div>
+            <div className="text-xl font-semibold text-slate-900">{Number(shopTotals.clicks || 0)}</div>
           </div>
-          <div className="bg-gray-900 rounded p-3 border border-gray-700">
-            <div className="text-xs text-gray-400">Initiated chats</div>
-            <div className="text-xl font-bold">{Number(shopTotals.initiated_conversations || 0)}</div>
+          <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200">
+            <div className="text-xs text-slate-500">Initiated chats</div>
+            <div className="text-xl font-semibold text-slate-900">{Number(shopTotals.initiated_conversations || 0)}</div>
           </div>
-          <div className="bg-gray-900 rounded p-3 border border-gray-700">
-            <div className="text-xs text-gray-400">Inbound msgs</div>
-            <div className="text-xl font-bold">{Number(shopTotals.inbound_messages || 0)}</div>
+          <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200">
+            <div className="text-xs text-slate-500">Inbound msgs</div>
+            <div className="text-xl font-semibold text-slate-900">{Number(shopTotals.inbound_messages || 0)}</div>
           </div>
-          <div className="bg-gray-900 rounded p-3 border border-gray-700">
-            <div className="text-xs text-gray-400">Orders created</div>
-            <div className="text-xl font-bold">{Number(shopTotals.orders_created || 0)}</div>
+          <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200">
+            <div className="text-xs text-slate-500">Orders created</div>
+            <div className="text-xl font-semibold text-slate-900">{Number(shopTotals.orders_created || 0)}</div>
           </div>
-          <div className="bg-gray-900 rounded p-3 border border-gray-700">
-            <div className="text-xs text-gray-400">Orders / initiated</div>
-            <div className="text-xl font-bold">{((Number(shopTotals.orders_per_initiated || 0)) * 100).toFixed(1)}%</div>
+          <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200">
+            <div className="text-xs text-slate-500">Orders / initiated</div>
+            <div className="text-xl font-semibold text-slate-900">{((Number(shopTotals.orders_per_initiated || 0)) * 100).toFixed(1)}%</div>
           </div>
         </div>
 
         <div className="overflow-auto">
-          <div className="flex items-end gap-1 h-32 min-w-[520px]">
+          <div className="flex items-end gap-1 h-36 min-w-[520px]">
             {shopSeries.map((x) => {
               const v = Number(x?.[metricKey] || 0);
               const h = Math.round((v / maxShop) * 100);
               return (
                 <div key={x.bucket} className="flex flex-col items-center gap-1">
                   <div
-                    className="w-3 bg-blue-600 rounded-t"
+                    className="w-3 rounded-t bg-gradient-to-t from-indigo-500 to-sky-400"
                     style={{ height: `${Math.max(1, h)}%` }}
                     title={`${formatBucketLabel(x.bucket)} • ${metricKey}: ${v}`}
                   />
-                  <div className="text-[10px] text-gray-500 rotate-[-45deg] origin-top-left whitespace-nowrap">
+                  <div className="text-[10px] text-slate-500 rotate-[-45deg] origin-top-left whitespace-nowrap">
                     {formatBucketLabel(x.bucket)}
                   </div>
                 </div>
               );
             })}
-            {shopSeries.length === 0 && <div className="text-sm text-gray-400">No data</div>}
+            {shopSeries.length === 0 && <div className="text-sm text-slate-500">No data</div>}
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="font-medium mb-2">Inbound messages replied-to (by agent)</div>
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+          <div className="font-medium text-slate-900 mb-2">Inbound messages replied-to (by agent)</div>
           <div className="space-y-2">
             {stats.map((s) => (
               <div key={s.agent} className="flex items-center gap-2">
-                <div className="w-32 text-sm text-gray-300 truncate" title={nameOf(s.agent)}>{nameOf(s.agent)}</div>
-                <div className="flex-1 h-4 bg-gray-900 rounded overflow-hidden">
-                  <div className="h-4 bg-blue-600" style={{ width: `${Math.round((Number(s.messages_replied_to||0)/maxReplied)*100)}%` }}></div>
+                <div className="w-32 text-sm text-slate-700 truncate" title={nameOf(s.agent)}>{nameOf(s.agent)}</div>
+                <div className="flex-1 h-3.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-3.5 bg-indigo-600" style={{ width: `${Math.round((Number(s.messages_replied_to||0)/maxReplied)*100)}%` }}></div>
                 </div>
-                <div className="w-12 text-right text-sm">{s.messages_replied_to || 0}</div>
+                <div className="w-12 text-right text-sm text-slate-700">{s.messages_replied_to || 0}</div>
               </div>
             ))}
-            {stats.length === 0 && <div className="text-sm text-gray-400">No data</div>}
+            {stats.length === 0 && <div className="text-sm text-slate-500">No data</div>}
           </div>
         </div>
-        <div className="bg-gray-800 rounded p-4 border border-gray-700">
-          <div className="font-medium mb-2">Orders by agent</div>
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+          <div className="font-medium text-slate-900 mb-2">Orders by agent</div>
           <div className="space-y-2">
             {stats.map((s) => (
               <div key={s.agent} className="flex items-center gap-2">
-                <div className="w-32 text-sm text-gray-300 truncate" title={nameOf(s.agent)}>{nameOf(s.agent)}</div>
-                <div className="flex-1 h-4 bg-gray-900 rounded overflow-hidden">
-                  <div className="h-4 bg-emerald-600" style={{ width: `${Math.round((Number(s.orders_created||0)/maxOrders)*100)}%` }}></div>
+                <div className="w-32 text-sm text-slate-700 truncate" title={nameOf(s.agent)}>{nameOf(s.agent)}</div>
+                <div className="flex-1 h-3.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-3.5 bg-emerald-600" style={{ width: `${Math.round((Number(s.orders_created||0)/maxOrders)*100)}%` }}></div>
                 </div>
-                <div className="w-12 text-right text-sm">{s.orders_created || 0}</div>
+                <div className="w-12 text-right text-sm text-slate-700">{s.orders_created || 0}</div>
               </div>
             ))}
-            {stats.length === 0 && <div className="text-sm text-gray-400">No data</div>}
+            {stats.length === 0 && <div className="text-sm text-slate-500">No data</div>}
           </div>
         </div>
       </div>
 
-      <div className="bg-gray-800 rounded p-4 border border-gray-700">
-        <div className="font-medium mb-2">Per-agent details</div>
+      <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+        <div className="font-medium text-slate-900 mb-2">Per-agent details</div>
         <div className="overflow-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-gray-400 text-left">
+              <tr className="text-slate-500 text-left">
                 <th className="py-1 pr-2">Agent</th>
                 <th className="py-1 pr-2">Received</th>
                 <th className="py-1 pr-2">Replied-to</th>
@@ -316,7 +335,7 @@ export default function AnalyticsPanel() {
             </thead>
             <tbody>
               {stats.map((s) => (
-                <tr key={s.agent} className="border-t border-gray-700">
+                <tr key={s.agent} className="border-t border-slate-200 text-slate-800">
                   <td className="py-1 pr-2">{nameOf(s.agent)}</td>
                   <td className="py-1 pr-2">{s.messages_received || 0}</td>
                   <td className="py-1 pr-2">{s.messages_replied_to || 0}</td>
@@ -326,7 +345,7 @@ export default function AnalyticsPanel() {
                 </tr>
               ))}
               {stats.length === 0 && (
-                <tr><td colSpan={6} className="py-2 text-gray-400">No data</td></tr>
+                <tr><td colSpan={6} className="py-2 text-slate-500">No data</td></tr>
               )}
             </tbody>
           </table>

@@ -48,17 +48,25 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
   const containerRef = useRef(null);
   const [isVisible, setIsVisible] = useState(true);
   const [showReactPicker, setShowReactPicker] = useState(false);
-  const retailerId = useMemo(() => {
+  const directRetailerId = useMemo(() => {
     try {
       const direct = msg?.product_retailer_id || msg?.retailer_id || msg?.product_id;
-      if (direct) return String(direct);
-      // Fallback: parse a plausible variant id (6+ digit sequence) from caption/text
+      return direct ? String(direct) : "";
+    } catch { return ""; }
+  }, [msg?.product_retailer_id, msg?.retailer_id, msg?.product_id]);
+  const isCatalogItemType = msg?.type === 'catalog_item' || msg?.type === 'interactive_product';
+  const isReferredProductText = msg?.type === 'text' && !!directRetailerId;
+  const retailerId = useMemo(() => {
+    try {
+      if (directRetailerId) return String(directRetailerId);
+      if (!isCatalogItemType) return "";
+      // Fallback ONLY for catalog item bubbles: parse a plausible variant id (6+ digit sequence) from caption/text
       const source = String(msg?.caption || msg?.message || "");
       const matches = source.match(/(\d{6,})/g);
       if (matches && matches.length) return String(matches[matches.length - 1]);
       return "";
     } catch { return ""; }
-  }, [msg?.product_retailer_id, msg?.retailer_id, msg?.product_id, msg?.caption, msg?.message]);
+  }, [directRetailerId, isCatalogItemType, msg?.caption, msg?.message]);
   const [variantData, setVariantData] = useState(null);
   // Global caches to avoid repeated variant fetches across mounts/renders
   const VARIANT_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -67,8 +75,8 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
   useEffect(() => {
     let cancelled = false;
     // Only fetch for catalog items and when visible to reduce work
-    const isCatalogItem = msg?.type === 'catalog_item' || msg?.type === 'interactive_product';
-    if (!retailerId || !isCatalogItem || !isVisible) return;
+    const shouldFetchVariant = (msg?.type === 'catalog_item' || msg?.type === 'interactive_product' || isReferredProductText);
+    if (!retailerId || !shouldFetchVariant || !isVisible) return;
     // Avoid spurious fetches: Shopify variant IDs are long numeric ids
     const plausibleShopifyId = /^[1-9]\d{10,}$/.test(retailerId);
     if (!plausibleShopifyId) return;
@@ -105,7 +113,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
       }
     })();
     return () => { cancelled = true; };
-  }, [retailerId, API_BASE, isVisible, msg?.type]);
+  }, [retailerId, API_BASE, isVisible, msg?.type, isReferredProductText]);
   // Helpers to extract and classify URLs inside text messages
   const extractUrls = (text) => {
     try {
@@ -177,7 +185,9 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
   const isVideo = msg.type === "video";
   const isCatalogItem = msg.type === "catalog_item" || msg.type === "interactive_product";
   const isCatalogSet = msg.type === "catalog_set";
-  const isText = msg.type === "text" || (!isImage && !isAudio && !isVideo && !isOrder && !isGroupedImages);
+  const isLocation = msg.type === "location";
+  const isContacts = msg.type === "contacts";
+  const isText = msg.type === "text" || (!isImage && !isAudio && !isVideo && !isOrder && !isGroupedImages && !isCatalogItem && !isCatalogSet && !isLocation && !isContacts);
   const [linkPreview, setLinkPreview] = useState(null);
   const [linkPreviewError, setLinkPreviewError] = useState(false);
   const [linkPreviewImgLoaded, setLinkPreviewImgLoaded] = useState(false);
@@ -325,6 +335,116 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
   };
   const notifyResize = () => {
     try { window.dispatchEvent(new CustomEvent('row-resize', { detail: { key: rowKey } })); } catch {}
+  };
+
+  const parseJsonSafe = (raw, fallback) => {
+    try {
+      if (raw == null) return fallback;
+      if (typeof raw === 'object') return raw;
+      const s = String(raw || "").trim();
+      if (!s) return fallback;
+      return JSON.parse(s);
+    } catch {
+      return fallback;
+    }
+  };
+
+  const renderReferredProductPreview = () => {
+    if (!isReferredProductText) return null;
+    const info = catalogProducts[retailerId] || {};
+    const rawImage = variantData?.image_src || info.image || null;
+    const image = rawImage && /^https?:\/\//i.test(rawImage) ? `${API_BASE}/proxy-image?url=${encodeURIComponent(rawImage)}` : rawImage;
+    const title = variantData?.title || String(msg?.caption || "").trim() || "Product";
+    const priceNum = Number(variantData?.price || info.price || 0);
+    const priceStr = Number.isFinite(priceNum) && priceNum > 0 ? `${priceNum.toFixed(2)} MAD` : null;
+    return (
+      <div className="mb-2 flex items-center rounded-xl bg-white/95 border border-blue-200 shadow-sm p-3 gap-3">
+        <div className="flex-shrink-0">
+          {image ? (
+            <img
+              src={image}
+              alt={title}
+              className="w-12 h-12 object-cover rounded-lg border border-blue-200 shadow-sm bg-gray-50"
+              onError={(e) => handleImageError(e, '/placeholder-product.png')}
+            />
+          ) : (
+            <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center text-blue-500 text-lg border border-blue-200 shadow-sm">
+              🛒
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-semibold text-gray-800 leading-tight truncate">{title}</div>
+          <div className="mt-0.5 text-xs text-gray-600 flex flex-wrap gap-2">
+            {!!retailerId && <span className="truncate"><span className="font-medium text-blue-700">Variant:</span> <span className="font-semibold">{retailerId}</span></span>}
+            {priceStr && <><span className="text-gray-400">|</span><span><span className="font-medium text-blue-700">Price:</span> <span className="font-semibold">{priceStr}</span></span></>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderLocation = () => {
+    const loc = parseJsonSafe(msg?.message, {}) || {};
+    const lat = loc.latitude;
+    const lng = loc.longitude;
+    const name = String(loc.name || "").trim();
+    const address = String(loc.address || "").trim();
+    const mapsUrl = (lat != null && lng != null) ? `https://www.google.com/maps?q=${encodeURIComponent(String(lat))},${encodeURIComponent(String(lng))}` : "";
+    return (
+      <div className="leading-relaxed">
+        <div className="text-[10px] uppercase tracking-wide opacity-75 mb-1">📍 Location</div>
+        {(name || address) && (
+          <div className="text-sm">
+            {name && <div className="font-semibold">{name}</div>}
+            {address && <div className="opacity-80">{address}</div>}
+          </div>
+        )}
+        {(lat != null && lng != null) && (
+          <div className="mt-1 text-xs opacity-90">
+            {String(lat)}, {String(lng)}
+          </div>
+        )}
+        {mapsUrl && (
+          <a
+            className="mt-2 inline-block text-xs underline text-blue-200"
+            href={mapsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open in Maps
+          </a>
+        )}
+      </div>
+    );
+  };
+
+  const renderContacts = () => {
+    const contacts = parseJsonSafe(msg?.message, []);
+    const arr = Array.isArray(contacts) ? contacts : [];
+    return (
+      <div className="leading-relaxed">
+        <div className="text-[10px] uppercase tracking-wide opacity-75 mb-1">👤 Contact</div>
+        {arr.length === 0 ? (
+          <div className="text-sm opacity-80">Shared a contact</div>
+        ) : (
+          <div className="space-y-2">
+            {arr.slice(0, 5).map((c, idx) => {
+              const name = String(c?.name?.formatted_name || c?.name?.first_name || c?.name || c?.formatted_name || "Contact").trim();
+              const phones = Array.isArray(c?.phones) ? c.phones : [];
+              const firstPhone = phones.find(p => p?.phone) || phones[0];
+              const phone = firstPhone?.phone ? String(firstPhone.phone) : "";
+              return (
+                <div key={idx} className="border border-gray-200/40 rounded-lg p-2 bg-black/5">
+                  <div className="font-semibold text-sm truncate">{name}</div>
+                  {phone && <div className="text-xs opacity-80 break-all">{phone}</div>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
   };
 
   // Click-to-seek on waveform
@@ -846,8 +966,15 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
              {highlightText(msg.message, highlightQuery)}
            </div>
          ) :
+         isLocation ? (
+           renderLocation()
+         ) :
+         isContacts ? (
+           renderContacts()
+         ) :
          isText ? (
            <div className="whitespace-pre-line break-words leading-relaxed">
+             {renderReferredProductPreview()}
              {(() => {
                const text = String(msg.message || "");
                const urls = extractUrls(text);

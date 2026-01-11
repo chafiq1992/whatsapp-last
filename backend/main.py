@@ -1773,7 +1773,8 @@ class WorkspaceWhatsAppRouter:
         ws = get_current_workspace()
         cid = await _get_effective_catalog_id(ws)
         cache_file = _catalog_cache_file_for(ws, cid)
-        products = catalog_manager.get_cached_products(cache_file=cache_file)
+        # Call positionally to stay compatible with test monkeypatches / older call sites.
+        products = catalog_manager.get_cached_products(cache_file)
         product_ids = [p.get("retailer_id") for p in products if p.get("retailer_id")]
 
         if caption:
@@ -3308,6 +3309,59 @@ class DatabaseManager:
             if not self.use_postgres:
                 await db.commit()
 
+    def _attach_reactions_and_filter(self, ordered: list[dict]) -> list[dict]:
+        """Remove reaction rows from the returned history, but attach reactionsSummary to target messages.
+
+        This prevents empty 'reaction' bubbles while still showing reactions like WhatsApp (overlay on the target).
+        """
+        try:
+            msgs: list[dict] = []
+            reactions: list[dict] = []
+            for r in ordered or []:
+                try:
+                    if str(r.get("type") or "") == "reaction":
+                        reactions.append(r)
+                    else:
+                        msgs.append(r)
+                except Exception:
+                    msgs.append(r)
+
+            # Build summary map: target_wa_id -> {emoji: count}
+            summary_by_target: dict[str, dict[str, int]] = {}
+            for r in reactions:
+                target = str(r.get("reaction_to") or "").strip()
+                emoji = str(r.get("reaction_emoji") or "").strip()
+                if not target or not emoji:
+                    continue
+                action = str(r.get("reaction_action") or "react").strip().lower()
+                delta = -1 if action == "remove" else 1
+                bucket = summary_by_target.setdefault(target, {})
+                bucket[emoji] = int(bucket.get(emoji, 0)) + int(delta)
+
+            # Clamp and attach to messages by wa_message_id
+            for m in msgs:
+                try:
+                    mid = str(m.get("wa_message_id") or "").strip()
+                    if not mid:
+                        continue
+                    summ = summary_by_target.get(mid)
+                    if not summ:
+                        continue
+                    cleaned: dict[str, int] = {}
+                    for emj, cnt in summ.items():
+                        c = int(cnt or 0)
+                        if c > 0:
+                            cleaned[str(emj)] = c
+                    if cleaned:
+                        # Frontend expects camelCase
+                        m["reactionsSummary"] = cleaned
+                except Exception:
+                    continue
+
+            return msgs
+        except Exception:
+            return ordered or []
+
     # ── wrapper helpers re-used elsewhere ──
     async def get_messages(self, user_id: str, offset=0, limit=50) -> list[dict]:
         """Return the last N messages for a conversation, in chronological order (oldest→newest).
@@ -3335,7 +3389,7 @@ class DatabaseManager:
                 rows = await cur.fetchall()
             # Reverse to chronological order for display
             ordered = [dict(r) for r in rows][::-1]
-            return ordered
+            return self._attach_reactions_and_filter(ordered)
 
     async def get_messages_since(self, user_id: str, since_timestamp: str, limit: int = 500) -> list[dict]:
         """Return messages newer than the given ISO-8601 timestamp, ascending order.
@@ -3352,7 +3406,8 @@ class DatabaseManager:
             else:
                 cur = await db.execute(query, tuple(params))
                 rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+            ordered = [dict(r) for r in rows]
+            return self._attach_reactions_and_filter(ordered)
 
     async def get_messages_before(self, user_id: str, before_timestamp: str, limit: int = 50) -> list[dict]:
         """Return messages older than the given ISO-8601 timestamp, ascending order.
@@ -3370,7 +3425,8 @@ class DatabaseManager:
             else:
                 cur = await db.execute(query, tuple(params))
                 rows = await cur.fetchall()
-            return [dict(r) for r in rows][::-1]
+            ordered = [dict(r) for r in rows][::-1]
+            return self._attach_reactions_and_filter(ordered)
 
     # ── Conversation notes helpers ─────────────────────────────────
     async def add_note(self, note: dict) -> dict:
@@ -3654,7 +3710,7 @@ class DatabaseManager:
                         status,
                         COALESCE(server_ts, timestamp) AS ts
                       FROM messages
-                      WHERE workspace = ?
+                      WHERE workspace = ? AND COALESCE(type, '') <> 'reaction'
                       ORDER BY user_id, COALESCE(server_ts, timestamp) DESC
                     ),
                     page AS (
@@ -3669,7 +3725,7 @@ class DatabaseManager:
                         COUNT(*) FILTER (WHERE from_me = 0 AND status <> 'read') AS unread_count,
                         MAX(COALESCE(server_ts, timestamp)) FILTER (WHERE from_me = 1) AS last_agent_ts
                       FROM messages
-                      WHERE workspace = ? AND user_id IN (SELECT user_id FROM page)
+                      WHERE workspace = ? AND COALESCE(type, '') <> 'reaction' AND user_id IN (SELECT user_id FROM page)
                       GROUP BY user_id
                     ),
                     unresponded AS (
@@ -3678,11 +3734,12 @@ class DatabaseManager:
                         COUNT(*) FILTER (
                           WHERE m.from_me = 0
                             AND m.status = 'read'
+                            AND COALESCE(m.type, '') <> 'reaction'
                             AND COALESCE(m.server_ts, m.timestamp) > COALESCE(c.last_agent_ts, '1970-01-01')
                         ) AS unresponded_count
                       FROM messages m
                       JOIN counts c ON c.user_id = m.user_id
-                      WHERE m.workspace = ? AND m.user_id IN (SELECT user_id FROM page)
+                      WHERE m.workspace = ? AND COALESCE(m.type, '') <> 'reaction' AND m.user_id IN (SELECT user_id FROM page)
                       GROUP BY m.user_id, c.last_agent_ts
                     )
                     SELECT
@@ -3765,7 +3822,7 @@ class DatabaseManager:
 
                 cur = await db.execute(
                     self._convert(
-                        "SELECT message, type, from_me, status, COALESCE(server_ts, timestamp) AS ts FROM messages WHERE workspace = ? AND user_id = ? ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT 1"
+                        "SELECT message, type, from_me, status, COALESCE(server_ts, timestamp) AS ts FROM messages WHERE workspace = ? AND user_id = ? AND COALESCE(type, '') <> 'reaction' ORDER BY COALESCE(server_ts, timestamp) DESC LIMIT 1"
                     ),
                     (ws, uid)
                 )
@@ -3777,7 +3834,7 @@ class DatabaseManager:
                 last_status = last["status"] if last else None
 
                 cur = await db.execute(
-                    self._convert("SELECT COUNT(*) AS c FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 0 AND status != 'read'"),
+                    self._convert("SELECT COUNT(*) AS c FROM messages WHERE workspace = ? AND user_id = ? AND COALESCE(type, '') <> 'reaction' AND from_me = 0 AND status != 'read'"),
                     (ws, uid)
                 )
                 unread_row = await cur.fetchone()
@@ -3785,7 +3842,7 @@ class DatabaseManager:
 
                 cur = await db.execute(
                     self._convert(
-                        "SELECT MAX(COALESCE(server_ts, timestamp)) as t FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 1"
+                        "SELECT MAX(COALESCE(server_ts, timestamp)) as t FROM messages WHERE workspace = ? AND user_id = ? AND COALESCE(type, '') <> 'reaction' AND from_me = 1"
                     ),
                     (ws, uid)
                 )
@@ -3794,7 +3851,7 @@ class DatabaseManager:
 
                 cur = await db.execute(
                     self._convert(
-                        "SELECT COUNT(*) AS c FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 0 AND status = 'read' AND COALESCE(server_ts, timestamp) > ?"
+                        "SELECT COUNT(*) AS c FROM messages WHERE workspace = ? AND user_id = ? AND COALESCE(type, '') <> 'reaction' AND from_me = 0 AND status = 'read' AND COALESCE(server_ts, timestamp) > ?"
                     ),
                     (ws, uid, last_agent),
                 )
@@ -6018,12 +6075,41 @@ class MessageProcessor:
             message_obj["caption"] = message["video"].get("caption", "")
         elif msg_type == "order":
             message_obj["message"] = json.dumps(message.get("order", {}))
+        elif msg_type == "location":
+            try:
+                loc = message.get("location") or {}
+                payload = {
+                    "latitude": loc.get("latitude"),
+                    "longitude": loc.get("longitude"),
+                    "name": loc.get("name"),
+                    "address": loc.get("address"),
+                    "url": loc.get("url"),
+                }
+                message_obj["message"] = json.dumps(payload, ensure_ascii=False)
+            except Exception:
+                message_obj["message"] = json.dumps({"latitude": None, "longitude": None}, ensure_ascii=False)
+        elif msg_type == "contacts":
+            try:
+                contacts = message.get("contacts") or []
+                message_obj["message"] = json.dumps(contacts, ensure_ascii=False)
+            except Exception:
+                message_obj["message"] = json.dumps([], ensure_ascii=False)
 
         # Replies: capture quoted message id if present
         try:
             ctx = message.get("context") or {}
             if isinstance(ctx, dict) and ctx.get("id"):
                 message_obj["reply_to"] = ctx.get("id")
+            # Catalog context: "clicked message business" from a catalog item
+            # WhatsApp sends this under context.referred_product
+            rp = (ctx.get("referred_product") if isinstance(ctx, dict) else None) or {}
+            if isinstance(rp, dict):
+                pr = rp.get("product_retailer_id") or rp.get("retailer_id") or rp.get("product_id")
+                if pr:
+                    # Persist into existing columns so UI can render a product preview for text bubbles
+                    message_obj["product_retailer_id"] = str(pr)
+                    message_obj["retailer_id"] = str(pr)
+                    message_obj["product_id"] = str(pr)
         except Exception:
             pass
         

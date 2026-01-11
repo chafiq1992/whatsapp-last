@@ -185,9 +185,10 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
   const isVideo = msg.type === "video";
   const isCatalogItem = msg.type === "catalog_item" || msg.type === "interactive_product";
   const isCatalogSet = msg.type === "catalog_set";
+  const isReaction = msg.type === "reaction";
   const isLocation = msg.type === "location";
   const isContacts = msg.type === "contacts";
-  const isText = msg.type === "text" || (!isImage && !isAudio && !isVideo && !isOrder && !isGroupedImages && !isCatalogItem && !isCatalogSet && !isLocation && !isContacts);
+  const isText = msg.type === "text" || (!isImage && !isAudio && !isVideo && !isOrder && !isGroupedImages && !isCatalogItem && !isCatalogSet && !isReaction && !isLocation && !isContacts);
   const [linkPreview, setLinkPreview] = useState(null);
   const [linkPreviewError, setLinkPreviewError] = useState(false);
   const [linkPreviewImgLoaded, setLinkPreviewImgLoaded] = useState(false);
@@ -833,7 +834,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
             }}
             title="Show referenced message"
           >
-            <div className="text-[10px] opacity-70 mb-0.5">Replying to</div>
+            <div className="text-[10px] opacity-70 mb-0.5">{isReaction ? 'Reacted to' : 'Replying to'}</div>
             <div className="flex items-center gap-2">
               {(() => {
                 try {
@@ -964,6 +965,14 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
            <div className="whitespace-pre-line break-words leading-relaxed">
              <div className="text-[10px] uppercase tracking-wide opacity-75 mb-0.5">Catalog Set</div>
              {highlightText(msg.message, highlightQuery)}
+           </div>
+         ) :
+         isReaction ? (
+           <div className="leading-relaxed">
+             <div className="text-center text-2xl leading-none">{String(msg.reaction_emoji || msg.message || "🙂")}</div>
+             {String(msg.reaction_action || "").toLowerCase() === "remove" && (
+               <div className="mt-1 text-center text-[11px] opacity-70">Reaction removed</div>
+             )}
            </div>
          ) :
          isLocation ? (

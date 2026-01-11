@@ -691,6 +691,7 @@ const ConversationRow = memo(function Row({
               if (t === 'order') return <><span aria-hidden>🧾</span><span>Order</span></>;
               if (t === 'location') return <><span aria-hidden>📍</span><span>Location</span></>;
               if (t === 'contacts') return <><span aria-hidden>👤</span><span>Contact</span></>;
+              if (t === 'reaction') return <><span aria-hidden>🙂</span><span>Reaction</span></>;
               // Fallback: detect media by URL extension in text
               if (AUDIO_EXT_RE.test(msg)) return <><span aria-hidden>🎵</span><span>Audio</span></>;
               if (IMAGE_EXT_RE.test(msg)) return <><span aria-hidden>🖼️</span><span>Image</span></>;

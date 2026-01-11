@@ -3310,21 +3310,19 @@ class DatabaseManager:
                 await db.commit()
 
     def _attach_reactions_and_filter(self, ordered: list[dict]) -> list[dict]:
-        """Remove reaction rows from the returned history, but attach reactionsSummary to target messages.
+        """Attach reactionsSummary to target messages.
 
-        This prevents empty 'reaction' bubbles while still showing reactions like WhatsApp (overlay on the target).
+        We keep reaction rows in history (so the UI can render them as bubbles if desired),
+        and we also compute reactionsSummary for the reacted-to message.
         """
         try:
-            msgs: list[dict] = []
             reactions: list[dict] = []
             for r in ordered or []:
                 try:
                     if str(r.get("type") or "") == "reaction":
                         reactions.append(r)
-                    else:
-                        msgs.append(r)
                 except Exception:
-                    msgs.append(r)
+                    continue
 
             # Build summary map: target_wa_id -> {emoji: count}
             summary_by_target: dict[str, dict[str, int]] = {}
@@ -3339,8 +3337,10 @@ class DatabaseManager:
                 bucket[emoji] = int(bucket.get(emoji, 0)) + int(delta)
 
             # Clamp and attach to messages by wa_message_id
-            for m in msgs:
+            for m in ordered or []:
                 try:
+                    if str(m.get("type") or "") == "reaction":
+                        continue
                     mid = str(m.get("wa_message_id") or "").strip()
                     if not mid:
                         continue
@@ -3358,7 +3358,7 @@ class DatabaseManager:
                 except Exception:
                     continue
 
-            return msgs
+            return ordered or []
         except Exception:
             return ordered or []
 
@@ -5917,10 +5917,16 @@ class MessageProcessor:
         timestamp = datetime.utcfromtimestamp(int(message.get("timestamp", 0))).isoformat()
         server_now = datetime.now(timezone.utc).isoformat()
         
-        # Extract contact name from contacts array if available
+        # Extract contact name from the webhook 'contacts' array (we attach one entry to message['contact_info'])
         contact_name = None
-        # Note: contacts info is typically in the webhook's 'contacts' field, not message
-        
+        try:
+            ci = (message.get("contact_info") or {}) if isinstance(message.get("contact_info"), dict) else {}
+            prof = (ci.get("profile") or {}) if isinstance(ci.get("profile"), dict) else {}
+            nm = prof.get("name")
+            contact_name = str(nm).strip() if nm else None
+        except Exception:
+            contact_name = None
+
         await self.db_manager.upsert_user(sender, contact_name, sender)
         # Auto-unarchive: if conversation is marked as Done, remove the tag on any new incoming message
         try:
@@ -5933,7 +5939,7 @@ class MessageProcessor:
             # Non-fatal: do not block message processing
             pass
         
-        # Special case: reactions are not normal bubbles – broadcast an update instead
+        # Reactions: broadcast an update AND store as a bubble so agents can see it in the timeline.
         if msg_type == "reaction":
             reaction = message.get("reaction", {})
             target_id = reaction.get("message_id")
@@ -5952,7 +5958,7 @@ class MessageProcessor:
                 },
             }
             try:
-                # Persist a lightweight record for auditing/history
+                # Persist record for history and for reaction bubble rendering
                 await self.db_manager.upsert_message({
                     "wa_message_id": wa_message_id,
                     "user_id": sender,
@@ -5960,15 +5966,40 @@ class MessageProcessor:
                     "from_me": 0,
                     "status": "received",
                     "timestamp": timestamp,
+                    "server_ts": server_now,
+                    # Allow the UI to reuse the existing quote-preview code path
+                    "reply_to": target_id,
                     "reaction_to": target_id,
                     "reaction_emoji": emoji,
                     "reaction_action": action,
+                    # Convenience fallback for UIs that treat message as text
+                    "message": (str(emoji) if emoji else ""),
                 })
             except Exception:
                 pass
-            # Notify UI
+            # Notify UI (overlay update + bubble)
             await self.connection_manager.send_to_user(sender, reaction_event)
             await self.connection_manager.broadcast_to_admins(reaction_event, exclude_user=sender)
+            try:
+                bubble = {
+                    "id": wa_message_id,
+                    "user_id": sender,
+                    "type": "reaction",
+                    "from_me": False,
+                    "status": "received",
+                    "timestamp": timestamp,
+                    "server_ts": server_now,
+                    "wa_message_id": wa_message_id,
+                    "reply_to": target_id,
+                    "reaction_to": target_id,
+                    "reaction_emoji": emoji,
+                    "reaction_action": action,
+                    "message": (str(emoji) if emoji else ""),
+                }
+                await self.connection_manager.send_to_user(sender, {"type": "message_received", "data": bubble})
+                await self.connection_manager.broadcast_to_admins({"type": "message_received", "data": bubble}, exclude_user=sender)
+            except Exception:
+                pass
             return
 
         # Create message object with proper URL field

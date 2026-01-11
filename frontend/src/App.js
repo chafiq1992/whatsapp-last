@@ -641,8 +641,6 @@ export default function App() {
           onToggleInternal={() => setShowInternalPanel((v) => !v)}
           onSelectInternalAgent={(username)=> { setActiveUser({ user_id: `dm:${username}`, name: `@${username}` }); setShowInternalPanel(false); }}
           onOpenSettings={() => { try { window.location.href = '/#/settings'; } catch {} }}
-          onOpenAutomation={() => { window.open('/#/automation-studio', '_blank', 'noopener,noreferrer'); }}
-          onOpenCustomers={() => { window.open('/#/customers', '_blank', 'noopener,noreferrer'); }}
           currentAgent={currentAgent}
           isAdmin={isAdmin}
           workspace={workspace}

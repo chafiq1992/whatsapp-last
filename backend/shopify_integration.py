@@ -249,9 +249,12 @@ async def _count_customers_for_query(store: str | None, query: str) -> int:
     page_info: str | None = None
     async with httpx.AsyncClient() as client:
         while True:
-            params: dict[str, str | int] = {"limit": 250, "order": "updated_at desc", "query": query.strip()}
+            # IMPORTANT (Shopify cursor pagination): when page_info is present, you must NOT pass other
+            # params like query/order. Only limit + page_info are allowed.
             if page_info:
-                params["page_info"] = page_info
+                params = {"limit": 250, "page_info": page_info}
+            else:
+                params = {"limit": 250, "order": "updated_at desc", "query": query.strip()}
             resp = await client.get(
                 f"{admin_api_base(store)}/customers/search.json",
                 params=params,
@@ -755,15 +758,19 @@ async def shopify_customers(
 ):
     """List Shopify customers (paginated), with optional search."""
     async with httpx.AsyncClient() as client:
-        params: dict[str, str | int] = {"limit": int(limit), "order": "updated_at desc"}
+        # IMPORTANT (Shopify cursor pagination): when page_info is present, do not pass other params
+        # like "order" or "query". Only "limit" + "page_info".
         if page_info:
-            params["page_info"] = page_info
-
-        if q and q.strip():
-            endpoint = f"{admin_api_base(store)}/customers/search.json"
-            params["query"] = q.strip()
+            params: dict[str, str | int] = {"limit": int(limit), "page_info": page_info}
+            # Keep endpoint stable with the original request: if q exists, we were using /customers/search.json.
+            endpoint = f"{admin_api_base(store)}/customers/search.json" if (q and q.strip()) else f"{admin_api_base(store)}/customers.json"
         else:
-            endpoint = f"{admin_api_base(store)}/customers.json"
+            params = {"limit": int(limit), "order": "updated_at desc"}
+            if q and q.strip():
+                endpoint = f"{admin_api_base(store)}/customers/search.json"
+                params["query"] = q.strip()
+            else:
+                endpoint = f"{admin_api_base(store)}/customers.json"
 
         resp = await client.get(endpoint, params=params, timeout=20, **_client_args(store=store))
         if resp.status_code == 403:

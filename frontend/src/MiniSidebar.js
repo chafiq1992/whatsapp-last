@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { HiChatBubbleLeftRight, HiInboxArrowDown, HiArchiveBox, HiCog6Tooth, HiUserCircle, HiPlus, HiArrowLeftOnRectangle } from 'react-icons/hi2';
-import { FaRobot, FaUsers } from 'react-icons/fa';
 import api from './api';
 
 export default function MiniSidebar({
@@ -9,8 +8,6 @@ export default function MiniSidebar({
 	onToggleInternal,
 	onSelectInternalAgent,
 	onOpenSettings,
-	onOpenAutomation,
-  onOpenCustomers,
   currentAgent = '',
   isAdmin = false,
   onStartNewChat,
@@ -401,26 +398,6 @@ export default function MiniSidebar({
 
 			{/* Lower section */}
 			<div className="flex flex-col items-center gap-3">
-				{isAdmin && (
-				<button
-					type="button"
-					title="Automation"
-					onClick={() => onOpenAutomation && onOpenAutomation()}
-					className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-gray-800 text-gray-300 hover:bg-gray-700"
-				>
-					<FaRobot />
-				</button>
-				)}
-        {isAdmin && (
-        <button
-          type="button"
-          title="Customers"
-          onClick={() => onOpenCustomers && onOpenCustomers()}
-          className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-gray-800 text-gray-300 hover:bg-gray-700"
-        >
-          <FaUsers />
-        </button>
-        )}
         <button
           type="button"
           title="Logout"

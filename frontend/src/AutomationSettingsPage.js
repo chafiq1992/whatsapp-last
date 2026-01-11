@@ -392,36 +392,70 @@ export default function AutomationSettingsPage() {
           </div>
         </div>
       )}
-      <header className="h-12 px-3 flex items-center justify-between border-b bg-white/70 backdrop-blur sticky top-0 z-50">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="text-sm font-semibold text-gray-800 truncate">Settings</div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button className="px-3 py-1.5 text-sm bg-gray-200 text-gray-900 rounded border border-gray-300" onClick={() => (window.location.href = '/')}>
+      <header className="h-14 px-4 flex items-center justify-between border-b bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 text-white sticky top-0 z-50">
+        {/* Left: Inbox */}
+        <div className="flex items-center gap-2 min-w-[140px]">
+          <button
+            className="px-3 py-2 text-sm rounded-lg bg-white/10 hover:bg-white/15 border border-white/10"
+            onClick={() => (window.location.href = '/')}
+          >
             Inbox
           </button>
-          <button className="px-3 py-1.5 text-sm bg-gray-200 text-gray-900 rounded border border-gray-300" onClick={() => (window.location.href = '/#/analytics')}>
-            Analytics
-          </button>
-          <button className="px-3 py-1.5 text-sm bg-gray-800 text-white rounded" onClick={() => (window.location.href = '/#/automation-studio')}>
-            Automation
-          </button>
+        </div>
+
+        {/* Middle: Tabs */}
+        <div className="flex items-center justify-center flex-1">
+          <div className="flex items-center gap-1 bg-white/10 border border-white/10 rounded-xl p-1">
+            <button
+              className="px-3 py-1.5 text-sm rounded-lg hover:bg-white/10"
+              onClick={() => (window.location.href = '/#/analytics')}
+            >
+              Analytics
+            </button>
+            <button
+              className="px-3 py-1.5 text-sm rounded-lg hover:bg-white/10"
+              onClick={() => (window.location.href = '/#/automation-studio')}
+            >
+              Automation
+            </button>
+            <button
+              className="px-3 py-1.5 text-sm rounded-lg hover:bg-white/10"
+              onClick={() => (window.location.href = '/#/customers')}
+            >
+              Customers
+            </button>
+            <button
+              className="px-3 py-1.5 text-sm rounded-lg bg-white text-slate-900 font-semibold shadow"
+              onClick={() => (window.location.href = '/#/settings')}
+            >
+              Settings
+            </button>
+            <button
+              type="button"
+              className={`px-3 py-1.5 text-sm rounded-lg ${showDocs ? 'bg-indigo-400/30 border border-indigo-300/30' : 'hover:bg-white/10'}`}
+              onClick={() => setShowDocs(true)}
+              title="Docs"
+            >
+              Docs
+            </button>
+          </div>
+        </div>
+
+        {/* Right: Workspace */}
+        <div className="flex items-center justify-end gap-2 min-w-[240px]">
+          <div className="hidden sm:block text-xs text-white/70">
+            Workspace
+          </div>
           <select
-            className="border rounded px-2 py-1 text-sm"
+            className="bg-white/10 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-white"
             value={workspace}
             onChange={(e) => setWorkspace(normalizeWorkspaceId(e.target.value))}
+            title="Selected workspace"
           >
             {(workspaces || []).map((w) => (
               <option key={w.id} value={w.id}>{w.label || w.id}</option>
             ))}
           </select>
-          <button
-            type="button"
-            className="px-3 py-1.5 text-sm bg-white text-gray-900 rounded border border-gray-300 hover:bg-gray-50"
-            onClick={() => setShowDocs(true)}
-          >
-            Docs
-          </button>
         </div>
       </header>
 

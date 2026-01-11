@@ -68,6 +68,8 @@ import io
 
 # Customer campaigns (Shopify segments -> WhatsApp templates)
 CUSTOMER_CAMPAIGN_JOBS: dict[str, dict] = {}
+# Retargeting jobs (Automations -> Retargeting -> Customer segments)
+RETARGETING_JOBS: dict[str, dict] = {}
 
 # Absolute paths
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -9583,10 +9585,19 @@ async def set_automation_rules_endpoint(request: Request, payload: dict = Body(.
             "name": name[:120],
             "enabled": enabled,
             "cooldown_seconds": int(r.get("cooldown_seconds") or 0),
-            "trigger": {
+            "trigger": (lambda _tr: _tr)({
                 "source": str((trigger or {}).get("source") or "whatsapp"),
                 "event": str((trigger or {}).get("event") or "incoming_message"),
-            },
+                **(
+                    (lambda _t: _t)({
+                        "segment_id": str((trigger or {}).get("segment_id") or "").strip(),
+                        "start_after_minutes": max(0, min(7 * 24 * 60, int(float((trigger or {}).get("start_after_minutes") or 0)))),
+                        "batch_size": max(1, min(500, int((trigger or {}).get("batch_size") or 10))),
+                        "batch_every_minutes": max(1, min(24 * 60, int(float((trigger or {}).get("batch_every_minutes") or 30)))),
+                        "shopify_customer_tag_on_sent": str((trigger or {}).get("shopify_customer_tag_on_sent") or "").strip(),
+                    }) if str((trigger or {}).get("source") or "").lower() == "retargeting" else {}
+                ),
+            }),
             "condition": cond,
             "actions": actions,
         }
@@ -10685,6 +10696,223 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
 @app.get("/customer-campaigns/{job_id}")
 async def get_customer_campaign(job_id: str, agent: dict = Depends(require_admin)):
     j = CUSTOMER_CAMPAIGN_JOBS.get(str(job_id or "").strip())
+    if not j:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return j
+
+
+@app.post("/retargeting/customer-segments/launch")
+async def launch_retargeting_customer_segments(body: dict = Body(...), agent: dict = Depends(require_admin)):
+    """Launch a retargeting job based on a saved customer segment.
+
+    Body:
+      - segment_id: str (required) id from /customer-segments
+      - template_name: str (required)
+      - language: str (optional, default 'en')
+      - components: list (optional)
+      - start_after_minutes: number (optional, default 0)
+      - batch_size: int (optional, default 10)
+      - batch_every_minutes: number (optional, default 30)
+      - shopify_customer_tag_on_sent: str (optional) tag to add to Shopify customer after successful send
+      - limit: int (optional, default 0) 0 = all
+      - workspace: str (optional) override WhatsApp workspace
+    """
+    try:
+        from . import shopify_integration as si  # type: ignore
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Shopify integration unavailable: {exc}")
+
+    segment_id = str((body or {}).get("segment_id") or "").strip()
+    if not segment_id:
+        raise HTTPException(status_code=400, detail="Missing segment_id")
+
+    seg = si.get_customer_segment_by_id(segment_id)
+    if not seg:
+        raise HTTPException(status_code=404, detail="Segment not found")
+
+    template_name = str((body or {}).get("template_name") or "").strip()
+    if not template_name:
+        raise HTTPException(status_code=400, detail="Missing template_name")
+    language = str((body or {}).get("language") or "en").strip() or "en"
+    components = (body or {}).get("components") or []
+    if components and not isinstance(components, list):
+        raise HTTPException(status_code=400, detail="components must be a list")
+
+    # Segment store prefix (e.g. IRRANOVA) is stored with the segment; allow override via body.store if needed.
+    store = str((body or {}).get("store") or seg.get("store") or "").strip().upper() or None
+
+    # Compiled query can be stored with segment; if missing, compile from dsl
+    compiled_query = str(seg.get("compiled_query") or "").strip()
+    if not compiled_query:
+        dsl = str(seg.get("dsl") or "").strip()
+        if not dsl:
+            raise HTTPException(status_code=400, detail="Segment is missing dsl/compiled_query")
+        compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
+    if not compiled_query:
+        raise HTTPException(status_code=400, detail="Could not compile segment")
+
+    def _num(x, default: float) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    start_after_minutes = max(0.0, _num((body or {}).get("start_after_minutes"), 0.0))
+    batch_every_minutes = max(1.0, _num((body or {}).get("batch_every_minutes"), 30.0))
+    try:
+        batch_size = int((body or {}).get("batch_size") or 10)
+    except Exception:
+        batch_size = 10
+    batch_size = max(1, min(500, int(batch_size)))
+    try:
+        limit = int((body or {}).get("limit") or 0)
+    except Exception:
+        limit = 0
+    limit = max(0, int(limit))
+    shopify_customer_tag_on_sent = str((body or {}).get("shopify_customer_tag_on_sent") or "").strip()
+
+    ws = str((body or {}).get("workspace") or "").strip().lower()
+    if not ws:
+        ws = str((store or get_current_workspace()) or "").strip().lower()
+    ws = _coerce_workspace(ws)
+
+    job_id = str(uuid.uuid4())
+    RETARGETING_JOBS[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": agent.get("username"),
+        "segment_id": segment_id,
+        "segment_name": str(seg.get("name") or ""),
+        "store": store,
+        "workspace": ws,
+        "template_name": template_name,
+        "language": language,
+        "start_after_minutes": start_after_minutes,
+        "batch_size": batch_size,
+        "batch_every_minutes": batch_every_minutes,
+        "shopify_customer_tag_on_sent": shopify_customer_tag_on_sent,
+        "limit": limit,
+        "compiled_query": compiled_query,
+        "sent": 0,
+        "failed": 0,
+        "tagged": 0,
+        "last_error": "",
+    }
+
+    async def _run():
+        tok = _CURRENT_WORKSPACE.set(ws)
+        try:
+            RETARGETING_JOBS[job_id]["status"] = "running"
+            if start_after_minutes > 0:
+                RETARGETING_JOBS[job_id]["status"] = "waiting"
+                RETARGETING_JOBS[job_id]["starts_at"] = (datetime.now(timezone.utc) + timedelta(minutes=start_after_minutes)).isoformat()
+                await asyncio.sleep(int(start_after_minutes * 60))
+                RETARGETING_JOBS[job_id]["status"] = "running"
+
+            sent = 0
+            failed = 0
+            tagged = 0
+            in_batch = 0
+            page_info: str | None = None
+
+            async with httpx.AsyncClient() as client:
+                while True:
+                    if limit and sent >= limit:
+                        break
+                    params: dict[str, str | int] = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
+                    if page_info:
+                        params["page_info"] = page_info
+                    resp = await client.get(
+                        f"{si.admin_api_base(store)}/customers/search.json",
+                        params=params,
+                        timeout=25,
+                        **si._client_args(store=store),
+                    )
+                    if resp.status_code == 403:
+                        raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
+                    resp.raise_for_status()
+                    payload = resp.json() or {}
+                    customers = payload.get("customers", []) or []
+                    if not customers:
+                        break
+
+                    for c in customers:
+                        if limit and sent >= limit:
+                            break
+                        raw_phone = (c.get("phone") or "") or ((c.get("default_address") or {}).get("phone") or "")
+                        norm = si.normalize_phone(raw_phone)
+                        digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
+                        if not digits:
+                            continue
+                        if digits.startswith("0") and len(digits) >= 9:
+                            digits = "212" + digits[1:]
+                        try:
+                            await message_processor.whatsapp_messenger.send_template_message(
+                                to=digits,
+                                template_name=template_name,
+                                language=language,
+                                components=components if components else None,
+                            )
+                            sent += 1
+                            in_batch += 1
+                            RETARGETING_JOBS[job_id]["sent"] = sent
+                            RETARGETING_JOBS[job_id]["last_sent_phone"] = digits
+
+                            # Tag the Shopify customer after successful send (best-effort)
+                            if shopify_customer_tag_on_sent:
+                                try:
+                                    cid = c.get("id")
+                                    if cid:
+                                        res = await si.add_shopify_customer_tag(
+                                            customer_id=str(cid),
+                                            tag=shopify_customer_tag_on_sent,
+                                            store=store,
+                                        )
+                                        if isinstance(res, dict) and res.get("ok"):
+                                            tagged += 1
+                                            RETARGETING_JOBS[job_id]["tagged"] = tagged
+                                except Exception:
+                                    pass
+                        except Exception as exc:
+                            failed += 1
+                            RETARGETING_JOBS[job_id]["failed"] = failed
+                            RETARGETING_JOBS[job_id]["last_error"] = str(exc)[:300]
+
+                        # Batch throttle
+                        if in_batch >= int(batch_size):
+                            in_batch = 0
+                            # If we still have more to send, pause before next batch
+                            if batch_every_minutes > 0:
+                                RETARGETING_JOBS[job_id]["status"] = "sleeping"
+                                RETARGETING_JOBS[job_id]["next_batch_at"] = (datetime.now(timezone.utc) + timedelta(minutes=float(batch_every_minutes))).isoformat()
+                                await asyncio.sleep(int(float(batch_every_minutes) * 60))
+                                RETARGETING_JOBS[job_id]["status"] = "running"
+
+                    links = si._parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
+                    page_info = links.get("next")
+                    if not page_info:
+                        break
+
+            RETARGETING_JOBS[job_id]["status"] = "completed"
+            RETARGETING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:
+            RETARGETING_JOBS[job_id]["status"] = "error"
+            RETARGETING_JOBS[job_id]["last_error"] = str(exc)[:300]
+            RETARGETING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        finally:
+            try:
+                _CURRENT_WORKSPACE.reset(tok)
+            except Exception:
+                pass
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@app.get("/retargeting/jobs/{job_id}")
+async def get_retargeting_job(job_id: str, agent: dict = Depends(require_admin)):
+    j = RETARGETING_JOBS.get(str(job_id or "").strip())
     if not j:
         raise HTTPException(status_code=404, detail="Job not found")
     return j

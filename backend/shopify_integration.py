@@ -284,6 +284,69 @@ async def _count_customers_for_query(store: str | None, query: str) -> int:
 async def list_customer_segments():
     return _segments_read()
 
+def get_customer_segment_by_id(segment_id: str) -> dict | None:
+    """Return a saved customer segment entry by id (from customer_segments.json)."""
+    sid = str(segment_id or "").strip()
+    if not sid:
+        return None
+    try:
+        items = _segments_read()
+    except Exception:
+        items = []
+    for s in items or []:
+        try:
+            if isinstance(s, dict) and str(s.get("id") or "").strip() == sid:
+                return s
+        except Exception:
+            continue
+    return None
+
+async def add_shopify_customer_tag(*, customer_id: str | int, tag: str, store: str | None = None) -> dict:
+    """Add a tag to a Shopify customer (best-effort).
+
+    Requires Shopify token with write_customers scope.
+    """
+    base = admin_api_base(store)
+    t = str(tag or "").strip()
+    if not t:
+        return {"ok": False, "error": "missing_tag"}
+    if "," in t:
+        return {"ok": False, "error": "tag_contains_comma"}
+    cid = str(customer_id or "").strip()
+    if not cid:
+        return {"ok": False, "error": "missing_customer_id"}
+    # Coerce gid://shopify/Customer/123 -> 123
+    try:
+        if cid.startswith("gid://"):
+            cid = cid.rsplit("/", 1)[-1]
+    except Exception:
+        pass
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        # Fetch existing tags
+        get_endpoint = f"{base}/customers/{cid}.json"
+        resp = await client.get(get_endpoint, **_client_args(store=store))
+        if resp.status_code == 404:
+            return {"ok": False, "error": "not_found"}
+        if resp.status_code == 403:
+            return {"ok": False, "error": "forbidden", "detail": "Shopify token lacks write_customers scope or app not installed."}
+        if resp.status_code >= 400:
+            return {"ok": False, "error": "shopify_error", "detail": (resp.text or "")[:300]}
+        customer = (resp.json() or {}).get("customer") or {}
+        existing_s = str(customer.get("tags") or "")
+        existing = [x.strip() for x in existing_s.split(",") if x and x.strip()]
+        lower = {x.lower() for x in existing}
+        if t.lower() not in lower:
+            existing.append(t)
+        put_endpoint = f"{base}/customers/{cid}.json"
+        payload = {"customer": {"id": int(cid) if cid.isdigit() else cid, "tags": ", ".join(existing)}}
+        upd = await client.put(put_endpoint, json=payload, **_client_args(store=store))
+        if upd.status_code == 403:
+            return {"ok": False, "error": "forbidden", "detail": "Shopify token lacks write_customers scope or app not installed."}
+        if upd.status_code >= 400:
+            return {"ok": False, "error": "shopify_error", "detail": (upd.text or "")[:300]}
+        return {"ok": True, "customer_id": cid, "tags": existing}
+
 
 @router.post("/customer-segments")
 async def save_customer_segment(body: dict = Body(...)):

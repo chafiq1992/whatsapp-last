@@ -371,6 +371,13 @@ export default function AutomationStudio({ onClose }) {
     shopifyTagOnSent: "",
     deliveryStatuses: "",
     deliveryTestPhones: "",
+    // Retargeting (batch campaigns)
+    retargetingMode: "segments", // segments | conversation_tag | orders
+    retargetingSegmentId: "",
+    retargetingStartAfterMinutes: 0,
+    retargetingBatchSize: 10,
+    retargetingBatchEveryMinutes: 30,
+    retargetingShopifyTagOnSent: "",
     actionMode: "text", // 'text' | 'template' | 'order_confirm' | 'buttons' | 'list' | 'order_status'
     to: "{{ phone }}",
     templateName: "",
@@ -691,6 +698,12 @@ export default function AutomationStudio({ onClose }) {
               shopifyTestPhones: "",
               deliveryStatuses: "",
               deliveryTestPhones: "",
+              retargetingMode: "segments",
+              retargetingSegmentId: "",
+              retargetingStartAfterMinutes: 0,
+              retargetingBatchSize: 10,
+              retargetingBatchEveryMinutes: 30,
+              retargetingShopifyTagOnSent: "",
               actionMode: "text",
               to: "{{ phone }}",
               templateName: "",
@@ -733,6 +746,7 @@ export default function AutomationStudio({ onClose }) {
               ? String(r?.condition?.value || r?.condition?.tag || "")
               : "";
             const isDelivery = source === "delivery";
+            const isRetargeting = source === "retargeting";
             const statuses = Array.isArray(r?.condition?.statuses) ? r.condition.statuses : [];
             const statusesStr = statuses.filter(Boolean).join(", ");
             const trigEvent = String(trig?.event || "orders/paid");
@@ -793,6 +807,7 @@ export default function AutomationStudio({ onClose }) {
               tag: String(aTag?.tag || ""),
               cooldownSeconds: Number(r.cooldown_seconds || 0),
               triggerSource: source === "shopify" ? "shopify" : (source === "delivery" ? "delivery" : "whatsapp"),
+              ...(isRetargeting ? { triggerSource: "retargeting" } : {}),
               waTriggerMode: (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "no_reply")
                 ? "no_reply"
                 : (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "interactive" ? "button" : "incoming"),
@@ -826,6 +841,12 @@ export default function AutomationStudio({ onClose }) {
               shopifyTagOnSent: String((aText?.shopify_tag_on_sent || aTpl?.shopify_tag_on_sent || aOC?.shopify_tag_on_sent) || ""),
               deliveryStatuses: isDelivery ? statusesStr : "",
               deliveryTestPhones: isDelivery ? testPhonesStr : "",
+              retargetingMode: isRetargeting ? (String(trig?.event || "customer_segments").toLowerCase().includes("order") ? "orders" : (String(trig?.event || "customer_segments").toLowerCase().includes("conversation") ? "conversation_tag" : "segments")) : "segments",
+              retargetingSegmentId: isRetargeting ? String(trig?.segment_id || "") : "",
+              retargetingStartAfterMinutes: isRetargeting ? Number(trig?.start_after_minutes || 0) : 0,
+              retargetingBatchSize: isRetargeting ? Number(trig?.batch_size || 10) : 10,
+              retargetingBatchEveryMinutes: isRetargeting ? Number(trig?.batch_every_minutes || 30) : 30,
+              retargetingShopifyTagOnSent: isRetargeting ? String(trig?.shopify_customer_tag_on_sent || "") : "",
               actionMode: aStatus ? "order_status" : (aButtons ? "buttons" : (aList ? "list" : (aOC ? "order_confirm" : (aTpl ? "template" : "text")))),
               to: String((aText?.to || aTpl?.to || aOC?.to) || "{{ phone }}"),
               templateName: String(aTpl?.template_name || aOC?.template_name || ""),
@@ -1141,6 +1162,16 @@ export default function AutomationStudio({ onClose }) {
                       ? { source: "shopify", event: String(shopifyTopicEffective || "orders/paid") }
                       : draft.triggerSource === "delivery"
                         ? { source: "delivery", event: "order_status_changed" }
+                        : draft.triggerSource === "retargeting"
+                          ? {
+                            source: "retargeting",
+                            event: "customer_segments",
+                            segment_id: String(draft.retargetingSegmentId || "").trim(),
+                            start_after_minutes: Number(draft.retargetingStartAfterMinutes || 0),
+                            batch_size: Number(draft.retargetingBatchSize || 10),
+                            batch_every_minutes: Number(draft.retargetingBatchEveryMinutes || 30),
+                            shopify_customer_tag_on_sent: String(draft.retargetingShopifyTagOnSent || "").trim(),
+                          }
                         : {
                           source: "whatsapp",
                           event: (
@@ -1154,6 +1185,8 @@ export default function AutomationStudio({ onClose }) {
                       ? { match: "tag_contains", value: tagged }
                       : draft.triggerSource === "delivery"
                         ? (deliveryStatuses.length ? { match: "status_in", statuses: deliveryStatuses } : { match: "any" })
+                        : draft.triggerSource === "retargeting"
+                          ? { match: "any" }
                         : (String(draft.waTriggerMode || "incoming") === "no_reply"
                           ? { match: "no_reply_for", seconds: Math.max(60, Number(draft.noReplyMinutes || 30) * 60), keywords: kws }
                           : (String(draft.waTriggerMode || "incoming") === "button"
@@ -1164,6 +1197,8 @@ export default function AutomationStudio({ onClose }) {
                     ? { test_phone_numbers: testPhones }
                     : draft.triggerSource === "delivery"
                       ? { test_phone_numbers: deliveryTestPhones }
+                      : draft.triggerSource === "retargeting"
+                        ? {}
                       : (whatsappTestPhones.length ? { test_phone_numbers: whatsappTestPhones } : {})),
                   actions,
                 };
@@ -1176,6 +1211,36 @@ export default function AutomationStudio({ onClose }) {
                 })();
                 await persistRules(next);
                 await loadRuleStats();
+                // If this is a retargeting automation, launch the batch job immediately.
+                try {
+                  if (String(draft.triggerSource || "") === "retargeting") {
+                    const tplAction =
+                      (actions || []).find((a) => String(a?.type || "").toLowerCase() === "send_whatsapp_template") ||
+                      (actions || []).find((a) => String(a?.type || "").toLowerCase() === "order_confirmation_flow") ||
+                      null;
+                    const tn = String(tplAction?.template_name || draft.templateName || "").trim();
+                    const lang = String(tplAction?.language || draft.templateLanguage || "en").trim() || "en";
+                    const comps = Array.isArray(tplAction?.components) ? tplAction.components : [];
+                    const segId = String(draft.retargetingSegmentId || "").trim();
+                    if (tn && segId) {
+                      const res = await api.post("/retargeting/customer-segments/launch", {
+                        segment_id: segId,
+                        template_name: tn,
+                        language: lang,
+                        components: comps,
+                        start_after_minutes: Number(draft.retargetingStartAfterMinutes || 0),
+                        batch_size: Number(draft.retargetingBatchSize || 10),
+                        batch_every_minutes: Number(draft.retargetingBatchEveryMinutes || 30),
+                        shopify_customer_tag_on_sent: String(draft.retargetingShopifyTagOnSent || "").trim(),
+                        workspace: String(currentWorkspace || "").trim().toLowerCase(),
+                      });
+                      const jid = String(res?.data?.job_id || "");
+                      if (jid) alert(`Retargeting started. Job: ${jid}`);
+                    }
+                  }
+                } catch (e) {
+                  alert(e?.response?.data?.detail || "Failed to start retargeting");
+                }
                 setEditorOpen(false);
               }}
             />
@@ -1631,7 +1696,13 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
         </div>
         <div className="flex items-center gap-2">
           <button className="px-3 py-1.5 border rounded text-sm" onClick={onRefresh} disabled={loading || saving}>Refresh</button>
-          <button className="px-3 py-1.5 rounded text-sm bg-blue-600 text-white" onClick={onOpenNew} disabled={loading || saving}>+ New rule</button>
+          <button
+            className="px-6 py-3 rounded-lg text-base font-semibold bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow hover:shadow-md min-w-[220px]"
+            onClick={onOpenNew}
+            disabled={loading || saving}
+          >
+            + New automation
+          </button>
         </div>
       </div>
 
@@ -1641,7 +1712,7 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
       {!loading && (
         <div className="grid gap-2">
           {(rules || []).length === 0 ? (
-            <div className="p-4 rounded border bg-white text-sm text-slate-500">No automations yet. Create your first rule.</div>
+            <div className="p-4 rounded border bg-white text-sm text-slate-500">No automations yet. Create your first automation.</div>
           ) : (
             (rules || []).map((r) => {
               const s = (stats && r && r.id && stats[r.id]) ? stats[r.id] : {};
@@ -1662,6 +1733,8 @@ function SimpleAutomations({ rules, stats, loading, saving, error, onRefresh, on
                         ? `Shopify webhook (${String(r?.trigger?.event || "")})`
                         : String(r?.trigger?.source || "whatsapp") === "delivery"
                           ? "Delivery status"
+                          : String(r?.trigger?.source || "whatsapp") === "retargeting"
+                            ? "Retargeting (Customer segments)"
                           : "WhatsApp incoming message"}
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
@@ -1923,6 +1996,39 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
   const [nameTouched, setNameTouched] = useState(false);
   const initialSnapshotRef = useRef("");
 
+  // Retargeting: saved customer segments (from CustomersSegmentsPage)
+  const [customerSegments, setCustomerSegments] = useState([]);
+  const [segmentsLoading, setSegmentsLoading] = useState(false);
+  const [segmentsError, setSegmentsError] = useState("");
+
+  useEffect(() => {
+    if (String(draft.triggerSource || "") !== "retargeting") return;
+    let alive = true;
+    (async () => {
+      setSegmentsError("");
+      setSegmentsLoading(true);
+      try {
+        const res = await api.get("/customer-segments");
+        const arr = Array.isArray(res?.data) ? res.data : [];
+        if (!alive) return;
+        setCustomerSegments(arr);
+        // Pick first segment by default (best-effort)
+        if (!String(draft.retargetingSegmentId || "").trim() && arr.length) {
+          onChange({ retargetingSegmentId: String(arr[0]?.id || "") });
+        }
+      } catch (e) {
+        if (!alive) return;
+        setCustomerSegments([]);
+        setSegmentsError("Failed to load customer segments.");
+      } finally {
+        if (!alive) return;
+        setSegmentsLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.triggerSource]);
+
   const safeSnap = (obj) => {
     try { return JSON.stringify(obj || {}); } catch { return ""; }
   };
@@ -2145,6 +2251,11 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
   const canSave = useMemo(() => {
     const nm = String(draft.name || "").trim();
     if (!nm) return false;
+    if (String(draft.triggerSource || "") === "retargeting") {
+      // Retargeting campaigns require a segment + template
+      if (!String(draft.retargetingSegmentId || "").trim()) return false;
+      if (!String(draft.templateName || "").trim()) return false;
+    }
     const tagOk = !!String(draft.tag || "").trim();
     if (draft.actionMode === "text") {
       return tagOk || !!String(draft.replyText || "").trim();
@@ -2173,7 +2284,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <div className="font-semibold truncate">{draft.id ? "Edit rule" : "New rule"}</div>
+                <div className="font-semibold truncate">{draft.id ? "Edit automation" : "New automation"}</div>
                 {isDirty && <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Unsaved</span>}
               </div>
               <div className="text-xs text-slate-500 mt-0.5">Build your automation in 3 quick steps.</div>
@@ -2297,6 +2408,13 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   </button>
                   <button className={`px-3 py-2 border rounded-lg text-sm ${draft.triggerSource === "delivery" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ triggerSource: "delivery" })}>
                     Delivery status
+                  </button>
+                  <button
+                    className={`px-3 py-2 border rounded-lg text-sm ${draft.triggerSource === "retargeting" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`}
+                    onClick={() => onChange({ triggerSource: "retargeting", actionMode: "template", to: "{{ phone }}" })}
+                    title="Batch-send WhatsApp templates to a saved customer segment"
+                  >
+                    Retargeting
                   </button>
                 </div>
 
@@ -2460,6 +2578,138 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         If set, the app will add this tag to the Shopify order after the WhatsApp message is sent successfully.
                       </div>
                     </div>
+                  </div>
+                )}
+
+                {draft.triggerSource === "retargeting" && (
+                  <div className="mt-3 border rounded-xl p-3 bg-slate-50">
+                    <div className="text-xs font-semibold text-slate-700 mb-2">Retargeting settings</div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className={`px-3 py-2 border rounded-lg text-sm ${String(draft.retargetingMode || "segments") === "segments" ? "bg-white border-indigo-200" : "bg-white/60 hover:bg-white"}`}
+                        onClick={() => onChange({ retargetingMode: "segments" })}
+                      >
+                        Customer segments
+                      </button>
+                      <button
+                        type="button"
+                        className="px-3 py-2 border rounded-lg text-sm bg-white/60 text-slate-400 cursor-not-allowed"
+                        title="Coming soon"
+                        disabled
+                      >
+                        Conversation + tags (soon)
+                      </button>
+                      <button
+                        type="button"
+                        className="px-3 py-2 border rounded-lg text-sm bg-white/60 text-slate-400 cursor-not-allowed"
+                        title="Coming soon"
+                        disabled
+                      >
+                        Customer orders (soon)
+                      </button>
+                    </div>
+
+                    {String(draft.retargetingMode || "segments") === "segments" && (
+                      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                        <div className="md:col-span-2">
+                          <div className="text-xs text-slate-500 mb-1">Segment</div>
+                          <select
+                            className="w-full border rounded-lg px-3 py-2"
+                            value={String(draft.retargetingSegmentId || "")}
+                            onChange={(e) => onChange({ retargetingSegmentId: e.target.value })}
+                            disabled={segmentsLoading}
+                          >
+                            <option value="">{segmentsLoading ? "Loading segments…" : "Select a segment…"}</option>
+                            {(Array.isArray(customerSegments) ? customerSegments : []).map((s) => {
+                              const id = String(s?.id || "");
+                              if (!id) return null;
+                              const name = String(s?.name || id);
+                              const store = String(s?.store || "");
+                              return (
+                                <option key={id} value={id}>
+                                  {name}{store ? ` (${store})` : ""}
+                                </option>
+                              );
+                            })}
+                          </select>
+                          {segmentsError && <div className="text-[11px] text-rose-700 mt-1">{segmentsError}</div>}
+                          <div className="text-[11px] text-slate-500 mt-1">
+                            Segments are managed in the Customers → Segments page.
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="text-xs text-slate-500 mb-1">Start</div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className={`px-3 py-2 border rounded-lg text-sm ${Number(draft.retargetingStartAfterMinutes || 0) === 0 ? "bg-white border-indigo-200" : "hover:bg-white"}`}
+                              onClick={() => onChange({ retargetingStartAfterMinutes: 0 })}
+                            >
+                              Now
+                            </button>
+                            <button
+                              type="button"
+                              className={`px-3 py-2 border rounded-lg text-sm ${Number(draft.retargetingStartAfterMinutes || 0) === 60 ? "bg-white border-indigo-200" : "hover:bg-white"}`}
+                              onClick={() => onChange({ retargetingStartAfterMinutes: 60 })}
+                            >
+                              After 1 hour
+                            </button>
+                          </div>
+                          <div className="mt-2">
+                            <div className="text-[11px] text-slate-500 mb-1">Or custom delay (minutes)</div>
+                            <input
+                              type="number"
+                              min={0}
+                              className="w-full border rounded-lg px-3 py-2"
+                              value={Number(draft.retargetingStartAfterMinutes || 0)}
+                              onChange={(e) => onChange({ retargetingStartAfterMinutes: Number(e.target.value || 0) })}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="text-xs text-slate-500 mb-1">Batching</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <div className="text-[11px] text-slate-500 mb-1">Customers / batch</div>
+                              <input
+                                type="number"
+                                min={1}
+                                className="w-full border rounded-lg px-3 py-2"
+                                value={Number(draft.retargetingBatchSize || 10)}
+                                onChange={(e) => onChange({ retargetingBatchSize: Math.max(1, Number(e.target.value || 1)) })}
+                              />
+                            </div>
+                            <div>
+                              <div className="text-[11px] text-slate-500 mb-1">Every (minutes)</div>
+                              <input
+                                type="number"
+                                min={1}
+                                className="w-full border rounded-lg px-3 py-2"
+                                value={Number(draft.retargetingBatchEveryMinutes || 30)}
+                                onChange={(e) => onChange({ retargetingBatchEveryMinutes: Math.max(1, Number(e.target.value || 1)) })}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="md:col-span-2">
+                          <div className="text-xs text-slate-500 mb-1">Shopify tag to add after send (optional)</div>
+                          <input
+                            className="w-full border rounded-lg px-3 py-2"
+                            value={String(draft.retargetingShopifyTagOnSent || "")}
+                            onChange={(e) => onChange({ retargetingShopifyTagOnSent: e.target.value })}
+                            placeholder="e.g. retargeted_jan"
+                          />
+                          <div className="text-[11px] text-slate-500 mt-1">
+                            Each customer who receives the message will get this tag in Shopify (requires <span className="font-mono">write_customers</span>).
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

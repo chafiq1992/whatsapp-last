@@ -31,7 +31,7 @@ function defaultDsl() {
   ].join("\n");
 }
 
-export default function CustomersSegmentsPage() {
+export default function CustomersSegmentsPage({ embedded = false }) {
   const [stores, setStores] = useState([]);
   const [storeId, setStoreId] = useState(() => {
     try {
@@ -231,34 +231,61 @@ export default function CustomersSegmentsPage() {
   };
 
   return (
-    <div className="min-h-screen w-screen bg-white">
-      <div className="h-12 border-b flex items-center justify-between px-3">
-        <div className="flex items-center gap-2">
-          <div className="font-medium">Customers</div>
+    <div className={embedded ? "h-full w-full bg-white overflow-auto" : "min-h-screen w-screen bg-white"}>
+      {!embedded && (
+        <div className="h-12 border-b flex items-center justify-between px-3">
+          <div className="flex items-center gap-2">
+            <div className="font-medium">Customers</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {stores.length > 0 && (
+              <select className="border rounded px-2 py-1 text-sm bg-white" value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.id}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button className="px-3 py-1.5 text-sm border rounded" onClick={preview} disabled={loading}>
+              {loading ? "Loading…" : "Preview"}
+            </button>
+            <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={handleSaveSegment}>
+              Save segment
+            </button>
+            <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded disabled:opacity-60" onClick={launchCampaign} disabled={launching}>
+              {launching ? "Launching…" : "Launch campaign"}
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          {stores.length > 0 && (
-            <select className="border rounded px-2 py-1 text-sm bg-white" value={storeId} onChange={(e) => setStoreId(e.target.value)}>
-              {stores.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.id}
-                </option>
-              ))}
-            </select>
-          )}
-          <button className="px-3 py-1.5 text-sm border rounded" onClick={preview} disabled={loading}>
-            {loading ? "Loading…" : "Preview"}
-          </button>
-          <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={handleSaveSegment}>
-            Save segment
-          </button>
-          <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded disabled:opacity-60" onClick={launchCampaign} disabled={launching}>
-            {launching ? "Launching…" : "Launch campaign"}
-          </button>
-        </div>
-      </div>
+      )}
 
-      <div className="max-w-6xl mx-auto px-6 py-6">
+      <div className={embedded ? "max-w-6xl mx-auto px-6 py-6" : "max-w-6xl mx-auto px-6 py-6"}>
+        {embedded && (
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div className="text-xl font-semibold text-slate-900">Customers</div>
+            <div className="flex items-center gap-2">
+              {stores.length > 0 && (
+                <select className="border rounded px-2 py-1 text-sm bg-white" value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.id}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button className="px-3 py-1.5 text-sm border rounded" onClick={preview} disabled={loading}>
+                {loading ? "Loading…" : "Preview"}
+              </button>
+              <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={handleSaveSegment}>
+                Save segment
+              </button>
+              <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded disabled:opacity-60" onClick={launchCampaign} disabled={launching}>
+                {launching ? "Launching…" : "Launch campaign"}
+              </button>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           <div className="lg:col-span-1">
             <div className="text-sm font-medium text-slate-800 mb-2">Saved segments</div>

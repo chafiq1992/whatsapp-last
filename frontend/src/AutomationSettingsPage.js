@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import api from './api';
+import AnalyticsPanel from './AnalyticsPanel';
+import AutomationStudio from './AutomationStudio';
+import CustomersSegmentsPage from './CustomersSegmentsPage';
 
 function normalizeWorkspaceId(v) {
   try {
@@ -13,7 +16,7 @@ export default function AutomationSettingsPage() {
   const [allowed, setAllowed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [showDocs, setShowDocs] = useState(false);
+  const [activeTab, setActiveTab] = useState('settings'); // analytics | automation | customers | settings | docs
 
   const [workspaces, setWorkspaces] = useState([]);
   const [defaultWorkspace, setDefaultWorkspace] = useState('irranova');
@@ -320,78 +323,51 @@ export default function AutomationSettingsPage() {
     return (shopifyDraft.webhook_url_example || path);
   }, [workspace, shopifyDraft.webhook_url_example]);
 
+  const detectTabFromLocation = () => {
+    try {
+      const hash = String(window.location.hash || '');
+      const path = String(window.location.pathname || '');
+      const key = (hash || path).toLowerCase();
+      // Prefer /settings/<tab>
+      if (key.includes('/settings/analytics') || key.includes('/#/settings/analytics')) return 'analytics';
+      if (key.includes('/settings/automation') || key.includes('/#/settings/automation') || key.includes('/automation-studio')) return 'automation';
+      if (key.includes('/settings/customers') || key.includes('/#/settings/customers') || key.includes('/customers')) return 'customers';
+      if (key.includes('/settings/docs') || key.includes('/#/settings/docs')) return 'docs';
+      if (key.includes('/settings')) return 'settings';
+      // Back-compat
+      if (key.includes('/analytics')) return 'analytics';
+      return 'settings';
+    } catch {
+      return 'settings';
+    }
+  };
+
+  useEffect(() => {
+    const apply = () => setActiveTab(detectTabFromLocation());
+    apply();
+    window.addEventListener('hashchange', apply);
+    window.addEventListener('popstate', apply);
+    return () => {
+      window.removeEventListener('hashchange', apply);
+      window.removeEventListener('popstate', apply);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const goTab = (tab) => {
+    const t = String(tab || 'settings');
+    setActiveTab(t);
+    try {
+      const next = t === 'settings' ? '/#/settings' : `/#/settings/${t}`;
+      window.location.hash = next.replace('/#', '#');
+    } catch {}
+  };
+
   if (!allowed && loading) return null;
   if (!allowed) return null;
 
   return (
     <div className="h-screen w-screen bg-white">
-      {showDocs && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={() => setShowDocs(false)}>
-          <div className="w-full max-w-3xl rounded-lg bg-white shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between border-b px-4 py-3">
-              <div className="text-sm font-semibold">Settings documentation</div>
-              <button type="button" className="text-sm px-2 py-1 rounded hover:bg-slate-100" onClick={() => setShowDocs(false)}>Close</button>
-            </div>
-            <div className="p-4 space-y-4 text-sm">
-              <div className="border rounded p-3 bg-slate-50">
-                <div className="font-semibold mb-1">Shopify webhook URL (this workspace)</div>
-                <div className="text-xs text-slate-600 mb-2">
-                  In Shopify Admin → Settings → Notifications → Webhooks, set the delivery URL to:
-                </div>
-                <div className="flex items-center gap-2">
-                  <input readOnly className="flex-1 border rounded px-2 py-1 font-mono text-xs bg-white" value={effectiveShopifyWebhookUrl} />
-                  <button
-                    type="button"
-                    className="px-2 py-1 rounded bg-gray-800 text-white"
-                    onClick={() => {
-                      try { navigator.clipboard.writeText(effectiveShopifyWebhookUrl); } catch {}
-                    }}
-                  >
-                    Copy
-                  </button>
-                </div>
-              </div>
-
-              <div className="border rounded p-3">
-                <div className="font-semibold mb-1">Webhook authentication (HMAC)</div>
-                <div className="text-xs text-slate-600">
-                  Shopify signs the raw request body and sends the signature in <span className="font-mono">X-Shopify-Hmac-Sha256</span>.
-                  This app verifies it when a secret is configured.
-                </div>
-                <div className="mt-2 text-xs text-slate-700 space-y-1">
-                  <div><span className="font-semibold">Per-workspace env</span>: <span className="font-mono">SHOPIFY_WEBHOOK_SECRET_{String((normalizeWorkspaceId(workspace) || 'irranova')).toUpperCase()}</span></div>
-                  <div><span className="font-semibold">Global env fallback</span>: <span className="font-mono">SHOPIFY_WEBHOOK_SECRET</span></div>
-                  <div><span className="font-semibold">UI/DB override</span>: “Use DB secret” stores a secret per workspace and takes priority over env.</div>
-                </div>
-              </div>
-
-              <div className="border rounded p-3">
-                <div className="font-semibold mb-1">Topic-driven processing (X-Shopify-Topic)</div>
-                <div className="text-xs text-slate-600">
-                  Shopify includes <span className="font-mono">X-Shopify-Topic</span> (example: <span className="font-mono">orders/paid</span>).
-                  Our automations match rules where <span className="font-mono">trigger.source=shopify</span> and <span className="font-mono">trigger.event</span> equals the topic exactly.
-                </div>
-              </div>
-
-              <div className="border rounded p-3">
-                <div className="font-semibold mb-1">Environment variables (high-signal)</div>
-                <div className="text-xs text-slate-700 space-y-1">
-                  <div><span className="font-semibold">WORKSPACES / DEFAULT_WORKSPACE</span>: define which workspace ids exist and the default.</div>
-                  <div><span className="font-semibold">BASE_URL</span>: used for server-side URL examples/logs (UI uses your browser origin).</div>
-                  <div><span className="font-semibold">WHATSAPP_VERIFY_TOKEN</span>: Meta webhook verification token (optional if you store override in DB).</div>
-                  <div><span className="font-semibold">WHATSAPP_ACCESS_TOKEN_&lt;WS&gt;</span> / <span className="font-semibold">WHATSAPP_PHONE_NUMBER_ID_&lt;WS&gt;</span>: per-workspace WhatsApp Cloud env fallback.</div>
-                  <div><span className="font-semibold">CATALOG_ID_&lt;WS&gt;</span>: per-workspace catalog env fallback.</div>
-                  <div><span className="font-semibold">ALLOWED_PHONE_NUMBER_IDS</span>: webhook routing allowlist.</div>
-                  <div><span className="font-semibold">SURVEY_TEST_NUMBERS / AUTO_REPLY_TEST_NUMBERS</span>: digits-only test numbers.</div>
-                </div>
-              </div>
-            </div>
-            <div className="border-t px-4 py-3 flex justify-end">
-              <button type="button" className="px-3 py-1.5 rounded bg-gray-800 text-white" onClick={() => setShowDocs(false)}>Done</button>
-            </div>
-          </div>
-        </div>
-      )}
       <header className="h-14 px-4 flex items-center justify-between border-b bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 text-white sticky top-0 z-50">
         {/* Left: Inbox */}
         <div className="flex items-center gap-2 min-w-[140px]">
@@ -407,33 +383,33 @@ export default function AutomationSettingsPage() {
         <div className="flex items-center justify-center flex-1">
           <div className="flex items-center gap-1 bg-white/10 border border-white/10 rounded-xl p-1">
             <button
-              className="px-3 py-1.5 text-sm rounded-lg hover:bg-white/10"
-              onClick={() => (window.location.href = '/#/analytics')}
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'analytics' ? 'bg-emerald-400/20 border border-emerald-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('analytics')}
             >
               Analytics
             </button>
             <button
-              className="px-3 py-1.5 text-sm rounded-lg hover:bg-white/10"
-              onClick={() => (window.location.href = '/#/automation-studio')}
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'automation' ? 'bg-blue-400/20 border border-blue-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('automation')}
             >
               Automation
             </button>
             <button
-              className="px-3 py-1.5 text-sm rounded-lg hover:bg-white/10"
-              onClick={() => (window.location.href = '/#/customers')}
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'customers' ? 'bg-purple-400/20 border border-purple-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('customers')}
             >
               Customers
             </button>
             <button
-              className="px-3 py-1.5 text-sm rounded-lg bg-white text-slate-900 font-semibold shadow"
-              onClick={() => (window.location.href = '/#/settings')}
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'settings' ? 'bg-white text-slate-900 font-semibold shadow' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('settings')}
             >
               Settings
             </button>
             <button
               type="button"
-              className={`px-3 py-1.5 text-sm rounded-lg ${showDocs ? 'bg-indigo-400/30 border border-indigo-300/30' : 'hover:bg-white/10'}`}
-              onClick={() => setShowDocs(true)}
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'docs' ? 'bg-indigo-400/30 border border-indigo-300/30' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('docs')}
               title="Docs"
             >
               Docs
@@ -463,7 +439,69 @@ export default function AutomationSettingsPage() {
         {error && <div className="mb-3 p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{error}</div>}
         {loading && <div className="text-sm text-slate-500">Loading…</div>}
 
-        {!loading && (
+        {!loading && activeTab === 'analytics' && (
+          <div className="rounded-xl border border-slate-200 bg-white">
+            <div className="p-3">
+              <AnalyticsPanel key={String(workspace || 'irranova')} />
+            </div>
+          </div>
+        )}
+
+        {!loading && activeTab === 'automation' && (
+          <div className="h-[calc(100vh-5rem)] border rounded-xl overflow-hidden bg-white">
+            <AutomationStudio embedded />
+          </div>
+        )}
+
+        {!loading && activeTab === 'customers' && (
+          <div className="h-[calc(100vh-5rem)] border rounded-xl overflow-hidden bg-white">
+            <CustomersSegmentsPage embedded />
+          </div>
+        )}
+
+        {!loading && activeTab === 'docs' && (
+          <div className="space-y-3">
+            <div className="border rounded p-3 bg-slate-50">
+              <div className="font-semibold mb-1">Shopify webhook URL (this workspace)</div>
+              <div className="text-xs text-slate-600 mb-2">
+                In Shopify Admin → Settings → Notifications → Webhooks, set the delivery URL to:
+              </div>
+              <div className="flex items-center gap-2">
+                <input readOnly className="flex-1 border rounded px-2 py-1 font-mono text-xs bg-white" value={effectiveShopifyWebhookUrl} />
+                <button
+                  type="button"
+                  className="px-2 py-1 rounded bg-gray-800 text-white"
+                  onClick={() => {
+                    try { navigator.clipboard.writeText(effectiveShopifyWebhookUrl); } catch {}
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+            <div className="border rounded p-3">
+              <div className="font-semibold mb-1">Webhook authentication (HMAC)</div>
+              <div className="text-xs text-slate-600">
+                Shopify signs the raw request body and sends the signature in <span className="font-mono">X-Shopify-Hmac-Sha256</span>.
+                This app verifies it when a secret is configured.
+              </div>
+              <div className="mt-2 text-xs text-slate-700 space-y-1">
+                <div><span className="font-semibold">Per-workspace env</span>: <span className="font-mono">SHOPIFY_WEBHOOK_SECRET_{String((normalizeWorkspaceId(workspace) || 'irranova')).toUpperCase()}</span></div>
+                <div><span className="font-semibold">Global env fallback</span>: <span className="font-mono">SHOPIFY_WEBHOOK_SECRET</span></div>
+                <div><span className="font-semibold">UI/DB override</span>: “Use DB secret” stores a secret per workspace and takes priority over env.</div>
+              </div>
+            </div>
+            <div className="border rounded p-3">
+              <div className="font-semibold mb-1">Topic-driven processing (X-Shopify-Topic)</div>
+              <div className="text-xs text-slate-600">
+                Shopify includes <span className="font-mono">X-Shopify-Topic</span> (example: <span className="font-mono">orders/paid</span>).
+                Our automations match rules where <span className="font-mono">trigger.source=shopify</span> and <span className="font-mono">trigger.event</span> equals the topic exactly.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!loading && activeTab === 'settings' && (
           <div className="grid grid-cols-12 gap-4">
             {/* Left: workspace list + add */}
             <div className="col-span-12 md:col-span-4 space-y-3">

@@ -332,7 +332,7 @@ function makeEdge(from, fromPort, to, toPort) {
   return { id: nextId(), from, fromPort, to, toPort };
 }
 
-export default function AutomationStudio({ onClose }) {
+export default function AutomationStudio({ onClose, embedded = false }) {
   // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
   // Settings are now in a dedicated page (/#/automation-settings).
   const [mode, setMode] = useState("simple"); // simple | templates | (legacy flow editor)
@@ -623,6 +623,7 @@ export default function AutomationStudio({ onClose }) {
 
   return (
     <div className="h-full w-full bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-sky-50 via-white to-indigo-50 text-slate-800">
+      {!embedded && (
       <header className="h-12 px-3 flex items-center justify-between border-b bg-white/70 backdrop-blur sticky top-0 z-50">
         <div className="flex items-center gap-2">
           <Rocket className="w-5 h-5 text-blue-600" />
@@ -653,7 +654,7 @@ export default function AutomationStudio({ onClose }) {
           </button>
           <button
             className="px-2 py-1 border rounded text-sm"
-            onClick={() => { try { window.location.href = '/#/analytics'; } catch {} }}
+            onClick={() => { try { window.location.href = '/#/settings/analytics'; } catch {} }}
             title="Analytics"
           >
             Analytics
@@ -670,6 +671,7 @@ export default function AutomationStudio({ onClose }) {
           )}
         </div>
       </header>
+      )}
 
       {mode === "simple" ? (
         <SimpleAutomations
@@ -1255,7 +1257,7 @@ export default function AutomationStudio({ onClose }) {
         />
       ) : (
         <>
-          <div className="grid grid-cols-12 gap-3 p-3 h-[calc(100%-3rem)]">
+          <div className={`grid grid-cols-12 gap-3 p-3 ${embedded ? 'h-full' : 'h-[calc(100%-3rem)]'}`}>
           <aside className="col-span-12 md:col-span-3 space-y-3 overflow-y-auto pb-20">
           <div className="border rounded">
             <div className="px-3 py-2 border-b text-sm font-medium flex items-center gap-2"><Webhook className="w-4 h-4"/>Triggers</div>
@@ -1365,6 +1367,7 @@ export default function AutomationStudio({ onClose }) {
         </aside>
         </div>
 
+          {!embedded && (
           <footer className="sticky bottom-3 left-0 right-0 flex justify-center">
             <div className="flex items-center gap-2 bg-white/80 backdrop-blur rounded-full shadow px-3 py-2 border">
               <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3 h-3"/>Validated</span>
@@ -1375,6 +1378,7 @@ export default function AutomationStudio({ onClose }) {
               <button className="px-2 py-1 rounded text-sm bg-blue-600 text-white" onClick={()=>alert("Published!")}><span className="inline-flex items-center gap-1"><CirclePlay className="w-4 h-4"/>Publish</span></button>
             </div>
           </footer>
+          )}
         </>
       )}
     </div>

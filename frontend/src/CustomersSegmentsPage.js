@@ -231,7 +231,7 @@ export default function CustomersSegmentsPage({ embedded = false }) {
   };
 
   return (
-    <div className={embedded ? "h-full w-full bg-white overflow-auto" : "min-h-screen w-screen bg-white"}>
+    <div className={embedded ? "h-full w-full bg-transparent overflow-auto" : "min-h-screen w-screen bg-white"}>
       {!embedded && (
         <div className="h-12 border-b flex items-center justify-between px-3">
           <div className="flex items-center gap-2">

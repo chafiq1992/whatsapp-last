@@ -3,6 +3,8 @@ import api from './api';
 import AnalyticsPanel from './AnalyticsPanel';
 import AutomationStudio from './AutomationStudio';
 import CustomersSegmentsPage from './CustomersSegmentsPage';
+import WhatsAppTemplatesPanel from './WhatsAppTemplatesPanel';
+import { BarChart3, Bot, MessageSquareText, Users, Settings as SettingsIcon, BookOpen, Home } from 'lucide-react';
 
 function normalizeWorkspaceId(v) {
   try {
@@ -16,7 +18,7 @@ export default function AutomationSettingsPage() {
   const [allowed, setAllowed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('settings'); // analytics | automation | customers | settings | docs
+  const [activeTab, setActiveTab] = useState('settings'); // analytics | automation | templates | customers | settings | docs
 
   const [workspaces, setWorkspaces] = useState([]);
   const [defaultWorkspace, setDefaultWorkspace] = useState('irranova');
@@ -323,6 +325,25 @@ export default function AutomationSettingsPage() {
     return (shopifyDraft.webhook_url_example || path);
   }, [workspace, shopifyDraft.webhook_url_example]);
 
+  // WhatsApp templates (Meta)
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesError, setTemplatesError] = useState('');
+  const [templates, setTemplates] = useState([]);
+  const loadTemplates = async () => {
+    setTemplatesError('');
+    setTemplatesLoading(true);
+    try {
+      const res = await api.get('/admin/whatsapp/templates');
+      const arr = Array.isArray(res?.data?.templates) ? res.data.templates : [];
+      setTemplates(arr);
+    } catch {
+      setTemplatesError('Failed to load WhatsApp templates. Check WABA ID + permissions.');
+      setTemplates([]);
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
   const detectTabFromLocation = () => {
     try {
       const hash = String(window.location.hash || '');
@@ -331,6 +352,7 @@ export default function AutomationSettingsPage() {
       // Prefer /settings/<tab>
       if (key.includes('/settings/analytics') || key.includes('/#/settings/analytics')) return 'analytics';
       if (key.includes('/settings/automation') || key.includes('/#/settings/automation') || key.includes('/automation-studio')) return 'automation';
+      if (key.includes('/settings/templates') || key.includes('/#/settings/templates') || key.includes('/whatsapp-templates')) return 'templates';
       if (key.includes('/settings/customers') || key.includes('/#/settings/customers') || key.includes('/customers')) return 'customers';
       if (key.includes('/settings/docs') || key.includes('/#/settings/docs')) return 'docs';
       if (key.includes('/settings')) return 'settings';
@@ -363,18 +385,26 @@ export default function AutomationSettingsPage() {
     } catch {}
   };
 
+  useEffect(() => {
+    // Lazy-load templates when needed
+    if (activeTab !== 'templates') return;
+    loadTemplates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
   if (!allowed && loading) return null;
   if (!allowed) return null;
 
   return (
-    <div className="h-screen w-screen bg-white">
+    <div className="h-screen w-screen bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-sky-50 via-white to-indigo-50 text-slate-800">
       <header className="h-14 px-4 flex items-center justify-between border-b bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 text-white sticky top-0 z-50">
         {/* Left: Inbox */}
         <div className="flex items-center gap-2 min-w-[140px]">
           <button
-            className="px-3 py-2 text-sm rounded-lg bg-white/10 hover:bg-white/15 border border-white/10"
+            className="px-3 py-2 text-sm rounded-lg bg-white/10 hover:bg-white/15 border border-white/10 inline-flex items-center gap-2"
             onClick={() => (window.location.href = '/')}
           >
+            <Home className="w-4 h-4" />
             Inbox
           </button>
         </div>
@@ -386,25 +416,31 @@ export default function AutomationSettingsPage() {
               className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'analytics' ? 'bg-emerald-400/20 border border-emerald-300/20' : 'hover:bg-white/10'}`}
               onClick={() => goTab('analytics')}
             >
-              Analytics
+              <span className="inline-flex items-center gap-2"><BarChart3 className="w-4 h-4" />Analytics</span>
             </button>
             <button
               className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'automation' ? 'bg-blue-400/20 border border-blue-300/20' : 'hover:bg-white/10'}`}
               onClick={() => goTab('automation')}
             >
-              Automation
+              <span className="inline-flex items-center gap-2"><Bot className="w-4 h-4" />Automation</span>
+            </button>
+            <button
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'templates' ? 'bg-sky-400/20 border border-sky-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('templates')}
+            >
+              <span className="inline-flex items-center gap-2"><MessageSquareText className="w-4 h-4" />WhatsApp Templates</span>
             </button>
             <button
               className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'customers' ? 'bg-purple-400/20 border border-purple-300/20' : 'hover:bg-white/10'}`}
               onClick={() => goTab('customers')}
             >
-              Customers
+              <span className="inline-flex items-center gap-2"><Users className="w-4 h-4" />Customers</span>
             </button>
             <button
               className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'settings' ? 'bg-white text-slate-900 font-semibold shadow' : 'hover:bg-white/10'}`}
               onClick={() => goTab('settings')}
             >
-              Settings
+              <span className="inline-flex items-center gap-2"><SettingsIcon className="w-4 h-4" />Settings</span>
             </button>
             <button
               type="button"
@@ -412,7 +448,7 @@ export default function AutomationSettingsPage() {
               onClick={() => goTab('docs')}
               title="Docs"
             >
-              Docs
+              <span className="inline-flex items-center gap-2"><BookOpen className="w-4 h-4" />Docs</span>
             </button>
           </div>
         </div>
@@ -440,21 +476,29 @@ export default function AutomationSettingsPage() {
         {loading && <div className="text-sm text-slate-500">Loading…</div>}
 
         {!loading && activeTab === 'analytics' && (
-          <div className="rounded-xl border border-slate-200 bg-white">
-            <div className="p-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur shadow-sm">
+            <div className="p-4">
               <AnalyticsPanel key={String(workspace || 'irranova')} />
             </div>
           </div>
         )}
 
         {!loading && activeTab === 'automation' && (
-          <div className="h-[calc(100vh-5rem)] border rounded-xl overflow-hidden bg-white">
+          <div className="h-[calc(100vh-5rem)] border rounded-2xl overflow-hidden bg-white/50 backdrop-blur shadow-sm">
             <AutomationStudio embedded />
           </div>
         )}
 
+        {!loading && activeTab === 'templates' && (
+          <div className="h-[calc(100vh-5rem)] border rounded-2xl overflow-hidden bg-white/50 backdrop-blur shadow-sm">
+            <div className="h-full overflow-auto">
+              <WhatsAppTemplatesPanel templates={templates} loading={templatesLoading} error={templatesError} onRefresh={loadTemplates} />
+            </div>
+          </div>
+        )}
+
         {!loading && activeTab === 'customers' && (
-          <div className="h-[calc(100vh-5rem)] border rounded-xl overflow-hidden bg-white">
+          <div className="h-[calc(100vh-5rem)] border rounded-2xl overflow-hidden bg-white/50 backdrop-blur shadow-sm">
             <CustomersSegmentsPage embedded />
           </div>
         )}

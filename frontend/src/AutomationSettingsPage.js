@@ -733,7 +733,7 @@ export default function AutomationSettingsPage() {
               <div className="border rounded bg-white">
                 <div className="px-3 py-2 border-b text-sm font-medium flex items-center justify-between">
                   <span>Shopify webhooks (per workspace)</span>
-                  <button type="button" className="text-xs px-2 py-1 rounded border bg-white hover:bg-slate-50" onClick={() => setShowDocs(true)}>
+                  <button type="button" className="text-xs px-2 py-1 rounded border bg-white hover:bg-slate-50" onClick={() => goTab('docs')}>
                     Docs
                   </button>
                 </div>

@@ -66,6 +66,9 @@ from fastapi.responses import RedirectResponse
 from PIL import Image, ImageOps  # type: ignore
 import io
 
+# Customer campaigns (Shopify segments -> WhatsApp templates)
+CUSTOMER_CAMPAIGN_JOBS: dict[str, dict] = {}
+
 # Absolute paths
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MEDIA_DIR = ROOT_DIR / "media"
@@ -10545,6 +10548,146 @@ async def upload_template_header_image_endpoint(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+
+@app.post("/customer-campaigns/launch")
+async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends(require_admin)):
+    """Launch a WhatsApp template campaign to customers matching a Shopify segment DSL.
+
+    Body:
+      - dsl: str (required)
+      - store: str (optional) Shopify store prefix
+      - workspace: str (optional) WhatsApp workspace to send from (defaults to store lowercased)
+      - template_name: str (required)
+      - language: str (optional, default 'en')
+      - components: list (optional)
+      - limit: int (optional, default 50). Use 0 to send all.
+    """
+    try:
+        from . import shopify_integration as si  # local import to avoid any circular import surprises
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Shopify integration unavailable: {exc}")
+
+    dsl = str((body or {}).get("dsl") or "").strip()
+    if not dsl:
+        raise HTTPException(status_code=400, detail="Missing dsl")
+    store = str((body or {}).get("store") or "").strip().upper() or None
+    template_name = str((body or {}).get("template_name") or "").strip()
+    if not template_name:
+        raise HTTPException(status_code=400, detail="Missing template_name")
+    language = str((body or {}).get("language") or "en").strip() or "en"
+    components = (body or {}).get("components") or []
+    if components and not isinstance(components, list):
+        raise HTTPException(status_code=400, detail="components must be a list")
+    limit = int((body or {}).get("limit") or 50)
+    if limit < 0:
+        limit = 50
+
+    compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
+    if not compiled_query:
+        raise HTTPException(status_code=400, detail="Could not compile DSL (no supported conditions found).")
+
+    ws = str((body or {}).get("workspace") or "").strip().lower()
+    if not ws:
+        ws = str(store or get_current_workspace()).strip().lower()
+    ws = _coerce_workspace(ws)
+
+    job_id = str(uuid.uuid4())
+    CUSTOMER_CAMPAIGN_JOBS[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": agent.get("username"),
+        "store": store,
+        "workspace": ws,
+        "template_name": template_name,
+        "language": language,
+        "limit": limit,
+        "compiled_query": compiled_query,
+        "sent": 0,
+        "failed": 0,
+        "last_error": "",
+    }
+
+    async def _run():
+        tok = _CURRENT_WORKSPACE.set(ws)
+        try:
+            CUSTOMER_CAMPAIGN_JOBS[job_id]["status"] = "running"
+            sent = 0
+            failed = 0
+            page_info: str | None = None
+            async with httpx.AsyncClient() as client:
+                while True:
+                    if limit and sent >= limit:
+                        break
+                    params: dict[str, str | int] = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
+                    if page_info:
+                        params["page_info"] = page_info
+                    resp = await client.get(
+                        f"{si.admin_api_base(store)}/customers/search.json",
+                        params=params,
+                        timeout=25,
+                        **si._client_args(store=store),
+                    )
+                    if resp.status_code == 403:
+                        raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
+                    resp.raise_for_status()
+                    payload = resp.json() or {}
+                    customers = payload.get("customers", []) or []
+                    if not customers:
+                        break
+
+                    for c in customers:
+                        if limit and sent >= limit:
+                            break
+                        raw_phone = (c.get("phone") or "") or ((c.get("default_address") or {}).get("phone") or "")
+                        norm = si.normalize_phone(raw_phone)
+                        digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
+                        if not digits:
+                            continue
+                        if digits.startswith("0") and len(digits) >= 9:
+                            digits = "212" + digits[1:]
+                        try:
+                            await message_processor.whatsapp_messenger.send_template_message(
+                                to=digits,
+                                template_name=template_name,
+                                language=language,
+                                components=components if components else None,
+                            )
+                            sent += 1
+                            CUSTOMER_CAMPAIGN_JOBS[job_id]["sent"] = sent
+                        except Exception as exc:
+                            failed += 1
+                            CUSTOMER_CAMPAIGN_JOBS[job_id]["failed"] = failed
+                            CUSTOMER_CAMPAIGN_JOBS[job_id]["last_error"] = str(exc)[:300]
+
+                    links = si._parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
+                    page_info = links.get("next")
+                    if not page_info:
+                        break
+
+            CUSTOMER_CAMPAIGN_JOBS[job_id]["status"] = "completed"
+            CUSTOMER_CAMPAIGN_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:
+            CUSTOMER_CAMPAIGN_JOBS[job_id]["status"] = "error"
+            CUSTOMER_CAMPAIGN_JOBS[job_id]["last_error"] = str(exc)[:300]
+            CUSTOMER_CAMPAIGN_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+        finally:
+            try:
+                _CURRENT_WORKSPACE.reset(tok)
+            except Exception:
+                pass
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@app.get("/customer-campaigns/{job_id}")
+async def get_customer_campaign(job_id: str, agent: dict = Depends(require_admin)):
+    j = CUSTOMER_CAMPAIGN_JOBS.get(str(job_id or "").strip())
+    if not j:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return j
 
 
 @app.post("/shopify/webhook/{workspace}")

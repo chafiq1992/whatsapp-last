@@ -1,6 +1,11 @@
 import httpx
 import logging
 import os
+import json
+import time
+import uuid
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from fastapi import APIRouter, Body, Query, HTTPException
 
 # ================= CONFIG ==================
@@ -132,6 +137,221 @@ def _split_name(full_name: str) -> tuple[str, str]:
 
 # =============== FASTAPI ROUTER ===============
 router = APIRouter()
+
+_SEGMENTS_FILE = Path(__file__).resolve().parent / "customer_segments.json"
+_SEGMENTS_LOCK: float = 0.0  # best-effort local lock (single-process)
+
+_COUNT_CACHE: dict[str, tuple[float, int]] = {}  # key -> (ts, count)
+_COUNT_CACHE_TTL_SEC = 5 * 60
+
+
+def _segments_read() -> list[dict]:
+    try:
+        if not _SEGMENTS_FILE.exists():
+            return []
+        raw = _SEGMENTS_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw) if raw else []
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _segments_write(items: list[dict]) -> None:
+    # atomic write
+    tmp = _SEGMENTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_SEGMENTS_FILE)
+
+
+def _days_ago_to_date(days: int) -> str:
+    dt = datetime.now(timezone.utc) - timedelta(days=int(days))
+    return dt.strftime("%Y-%m-%d")
+
+
+def compile_segment_dsl_to_shopify_query(dsl: str) -> tuple[str, list[str], str]:
+    """
+    Compile a Shopify-like segment DSL into a Shopify customer search query.
+
+    Supported:
+    - number_of_orders > N  -> orders_count:>N
+    - last_order_date < -90d -> last_order_date:<YYYY-MM-DD
+    """
+    text = str(dsl or "")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    conds: list[str] = []
+    human: list[str] = []
+
+    for ln in lines:
+        up = ln.upper()
+        if up.startswith("WHERE "):
+            conds.append(ln[6:].strip())
+        elif up.startswith("AND "):
+            conds.append(ln[4:].strip())
+
+    tokens: list[str] = []
+    for c in conds:
+        # field op value
+        parts = c.replace("\t", " ").split()
+        if len(parts) < 3:
+            continue
+        field = parts[0].strip().lower()
+        op = parts[1].strip()
+        value = " ".join(parts[2:]).strip()
+
+        if field in ("number_of_orders", "orders", "orders_count"):
+            try:
+                n = int(float(value))
+            except Exception:
+                continue
+            if op not in (">", ">=", "<", "<=", "="):
+                continue
+            tokens.append(f"orders_count:{op}{n}")
+            human.append(f"placed {op} {n} orders".replace(">=", "at least").replace(">", "more than").replace("<=", "at most").replace("<", "less than").replace("= ", ""))
+            continue
+
+        if field in ("last_order_date", "last_order"):
+            # supports -90d
+            vv = value
+            if vv.startswith("-") and vv.lower().endswith("d"):
+                try:
+                    days = int(vv[1:-1])
+                    vv = _days_ago_to_date(days)
+                except Exception:
+                    continue
+            # Shopify expects date YYYY-MM-DD
+            if op not in (">", ">=", "<", "<=", "="):
+                continue
+            tokens.append(f"last_order_date:{op}{vv}")
+            human.append(f"last order {op} {vv}")
+            continue
+
+    query = " ".join(tokens).strip()
+    # Description similar to Shopify
+    desc = ""
+    if human:
+        desc = "Customers who have " + " and ".join(human) + "."
+        desc = desc.replace("last order < ", "whose last order was placed before ").replace("last order <= ", "whose last order was placed on or before ")
+        desc = desc.replace("last order > ", "whose last order was placed after ").replace("last order >= ", "whose last order was placed on or after ")
+    return query, conds, desc
+
+
+async def _count_customers_for_query(store: str | None, query: str) -> int:
+    key = f"{(store or '').strip().upper()}|{query.strip()}"
+    now = time.time()
+    try:
+        ts, cnt = _COUNT_CACHE.get(key, (0.0, -1))
+        if cnt >= 0 and (now - ts) < _COUNT_CACHE_TTL_SEC:
+            return cnt
+    except Exception:
+        pass
+
+    total = 0
+    page_info: str | None = None
+    async with httpx.AsyncClient() as client:
+        while True:
+            params: dict[str, str | int] = {"limit": 250, "order": "updated_at desc", "query": query.strip()}
+            if page_info:
+                params["page_info"] = page_info
+            resp = await client.get(
+                f"{admin_api_base(store)}/customers/search.json",
+                params=params,
+                timeout=25,
+                **_client_args(store=store),
+            )
+            if resp.status_code == 403:
+                raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
+            if resp.status_code >= 400:
+                raise HTTPException(status_code=resp.status_code, detail=(resp.text or "Shopify error")[:300])
+            payload = resp.json() or {}
+            customers = payload.get("customers", []) or []
+            total += len(customers)
+            # safety cap
+            if total >= 200000:
+                break
+            links = _parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
+            page_info = links.get("next")
+            if not page_info:
+                break
+
+    try:
+        _COUNT_CACHE[key] = (now, int(total))
+    except Exception:
+        pass
+    return int(total)
+
+
+@router.get("/customer-segments")
+async def list_customer_segments():
+    return _segments_read()
+
+
+@router.post("/customer-segments")
+async def save_customer_segment(body: dict = Body(...)):
+    name = str((body or {}).get("name") or "").strip() or "Segment"
+    dsl = str((body or {}).get("dsl") or "").strip()
+    store = str((body or {}).get("store") or "").strip().upper() or None
+    seg_id = str((body or {}).get("id") or "").strip() or str(uuid.uuid4())
+    if not dsl:
+        raise HTTPException(status_code=400, detail="Missing dsl")
+    items = _segments_read()
+    now = datetime.now(timezone.utc).isoformat()
+    compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
+    entry = {
+        "id": seg_id,
+        "name": name,
+        "store": store,
+        "dsl": dsl,
+        "compiled_query": compiled_query,
+        "conditions": conds,
+        "description": desc,
+        "updated_at": now,
+        "created_at": (next((x.get("created_at") for x in items if x.get("id") == seg_id), None) or now),
+    }
+    next_items = [x for x in items if x.get("id") != seg_id]
+    next_items.insert(0, entry)
+    _segments_write(next_items)
+    return entry
+
+
+@router.delete("/customer-segments/{segment_id}")
+async def delete_customer_segment(segment_id: str):
+    sid = str(segment_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="Missing segment id")
+    items = _segments_read()
+    next_items = [x for x in items if str(x.get("id") or "") != sid]
+    _segments_write(next_items)
+    return {"ok": True}
+
+
+@router.get("/shopify-segment-preview")
+async def shopify_segment_preview(
+    dsl: str = Query("", description="Segment DSL (Shopify-like FROM/SHOW/WHERE/AND/ORDER BY)"),
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    page_info: str | None = Query(None, description="Cursor for pagination (Shopify page_info)"),
+):
+    compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
+    if not compiled_query:
+        raise HTTPException(status_code=400, detail="Could not compile DSL (no supported conditions found).")
+    # base count
+    base_count: int | None = None
+    async with httpx.AsyncClient() as client:
+        try:
+            c_resp = await client.get(f"{admin_api_base(store)}/customers/count.json", timeout=20, **_client_args(store=store))
+            if c_resp.status_code == 200:
+                base_count = int((c_resp.json() or {}).get("count") or 0)
+        except Exception:
+            base_count = None
+
+    segment_count = await _count_customers_for_query(store, compiled_query)
+    preview = await shopify_customers(store=store, limit=50, page_info=page_info, q=compiled_query)
+    # attach meta
+    preview["compiled_query"] = compiled_query
+    preview["conditions"] = conds
+    preview["description"] = desc
+    preview["segment_count"] = segment_count
+    preview["base_count"] = base_count
+    return preview
 
 @router.get("/shopify-stores")
 async def shopify_stores():
@@ -544,6 +764,9 @@ async def shopify_customers(
                     "location": fmt_location(c),
                     "orders": int(c.get("orders_count") or 0),
                     "amount_spent": {"value": round(spent_val, 2), "currency": currency},
+                    # for campaigns / internal tooling (not shown in table)
+                    "email": c.get("email") or "",
+                    "phone": c.get("phone") or "",
                     "updated_at": c.get("updated_at"),
                 }
             )

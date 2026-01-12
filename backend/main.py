@@ -716,6 +716,9 @@ def _is_public_path(path: str) -> bool:
     # Health/version
     if path in ("/health", "/version"):
         return True
+    # Legal pages (must be publicly reachable for platform reviews/crawlers)
+    if path in ("/privacy-policy",):
+        return True
     # Auth endpoints (login/refresh/logout are public; /auth/me is protected)
     if path in ("/auth/login", "/auth/refresh", "/auth/logout"):
         return True
@@ -11992,6 +11995,106 @@ async def health_check():
             "verify_token_configured": bool(VERIFY_TOKEN)
         }
     }
+
+@app.get("/privacy-policy")
+async def privacy_policy():
+    """Public privacy policy page (required for Meta app review)."""
+    # Keep this plain HTML so Meta crawlers can fetch it without JS.
+    html_doc = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy</title>
+    <style>
+      body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #0b1220; color: #e5e7eb; }}
+      .wrap {{ max-width: 920px; margin: 0 auto; padding: 28px 18px; }}
+      a {{ color: #93c5fd; }}
+      h1 {{ margin: 0 0 6px 0; font-size: 28px; }}
+      h2 {{ margin-top: 22px; font-size: 18px; }}
+      p, li {{ color: #cbd5e1; line-height: 1.55; }}
+      .card {{ background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-radius: 14px; padding: 16px; margin-top: 14px; }}
+      .muted {{ color: #94a3b8; font-size: 13px; }}
+      code {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95em; }}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Privacy Policy</h1>
+      <div class="muted">Last updated: {html.escape(datetime.utcnow().strftime("%Y-%m-%d"))}</div>
+
+      <div class="card">
+        <p>
+          This Privacy Policy explains how this application (“we”, “our”, “the App”) collects, uses, and protects information
+          when you use our WhatsApp inbox and automation features.
+        </p>
+        <p class="muted">
+          This page is intended to be publicly accessible and readable by platform review crawlers (e.g., Meta App Review).
+        </p>
+      </div>
+
+      <h2>Information we collect</h2>
+      <ul>
+        <li><strong>Account/admin data</strong>: agent username and authentication/session information to secure access.</li>
+        <li><strong>Workspace configuration</strong>: workspace identifiers and settings (e.g., connected WhatsApp Phone Number ID and WABA ID).</li>
+        <li><strong>WhatsApp message data</strong>: message content and metadata needed to display and send messages (e.g., phone number, timestamps, message IDs, delivery status), and media files you send/receive.</li>
+        <li><strong>Technical data</strong>: logs for security and troubleshooting (e.g., request IDs, error logs).</li>
+      </ul>
+
+      <h2>How we use information</h2>
+      <ul>
+        <li>Provide the inbox experience (receive, display, and send WhatsApp messages).</li>
+        <li>Run automations you configure (e.g., replies, tagging, campaigns).</li>
+        <li>Maintain security, prevent abuse, and troubleshoot issues.</li>
+      </ul>
+
+      <h2>How we share information</h2>
+      <ul>
+        <li><strong>Meta/WhatsApp</strong>: We transmit messages and related metadata to Meta’s WhatsApp Cloud API to deliver messages and manage connected assets.</li>
+        <li><strong>Service providers</strong>: We may use infrastructure providers (e.g., hosting/storage) to run the service.</li>
+        <li><strong>Legal</strong>: We may disclose information if required by law or to protect our rights and users.</li>
+      </ul>
+
+      <h2>Data retention</h2>
+      <p>
+        We retain data only as long as necessary to operate the service and comply with legal obligations.
+        Workspace owners can request deletion of stored data (see “Your rights”).
+      </p>
+
+      <h2>Security</h2>
+      <p>
+        We use reasonable administrative, technical, and physical safeguards to protect data.
+        No method of transmission or storage is 100% secure, but we work to protect your information.
+      </p>
+
+      <h2>Your rights</h2>
+      <ul>
+        <li>Request access to, correction of, or deletion of your data.</li>
+        <li>Disconnect your WhatsApp account/workspace from the App.</li>
+      </ul>
+
+      <h2>Contact</h2>
+      <p>
+        For privacy requests, contact us at: <strong>support@your-domain.example</strong>
+        (replace this email with your real support email before submitting to Meta).
+      </p>
+
+      <h2>Changes to this policy</h2>
+      <p>
+        We may update this Privacy Policy from time to time. We will post updates on this page.
+      </p>
+
+      <div class="card">
+        <p class="muted">
+          Service URL: <code>{html.escape(str(BASE_URL or '').rstrip('/'))}</code>
+        </p>
+      </div>
+    </div>
+  </body>
+</html>
+"""
+    return HTMLResponse(content=html_doc, status_code=200)
+
 
 # ----- Payout and archive endpoints -----
 

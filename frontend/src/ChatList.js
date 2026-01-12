@@ -624,7 +624,7 @@ const ConversationRow = memo(function Row({
         {conv.avatar ? (
           <img
             src={conv.avatar}
-            alt={conv.name || conv.user_id}
+            alt={`${conv.user_id}${conv.name ? ` — ${conv.name}` : ''}`}
             className={`w-10 h-10 rounded-full object-cover bg-gray-700 ${
               typeof conv.last_message_from_me === 'boolean'
                 ? (conv.last_message_from_me ? 'ring-2 ring-green-500' : 'ring-2 ring-blue-500')
@@ -646,7 +646,7 @@ const ConversationRow = memo(function Row({
             return (
               <div
                 className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-semibold ${colorClass}`}
-                aria-label={conv.name || conv.user_id}
+                aria-label={`${conv.user_id}${conv.name ? ` — ${conv.name}` : ''}`}
               >
                 {initial || <FiUser className="opacity-90" />}
               </div>
@@ -666,7 +666,10 @@ const ConversationRow = memo(function Row({
         {/* Top line */}
         <div className="flex justify-between items-center">
           <span className="truncate font-medium">
-            {conv.name || conv.user_id}
+            <span className="font-mono">{conv.user_id}</span>
+            {conv.name && String(conv.name).trim() && String(conv.name).trim() !== String(conv.user_id) && (
+              <span className="ml-2 font-sans opacity-90">— {String(conv.name).trim()}</span>
+            )}
           </span>
           <span className="text-xs opacity-80">
             {formatTime(conv.last_message_time)}

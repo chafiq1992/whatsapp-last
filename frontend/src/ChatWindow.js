@@ -1240,7 +1240,12 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
       onPaste={handlePaste}
     >
       <div className="p-2 bg-gray-800 border-b border-gray-700 flex items-center justify-between gap-2">
-        <strong className="px-2">{activeUser?.name || activeUser?.user_id}</strong>
+        <strong className="px-2 truncate">
+          <span className="font-mono">{activeUser?.user_id || ''}</span>
+          {activeUser?.name && String(activeUser.name).trim() && String(activeUser.name).trim() !== String(activeUser?.user_id || '') && (
+            <span className="ml-2 font-sans opacity-90">— {String(activeUser.name).trim()}</span>
+          )}
+        </strong>
         {/* Search box */}
         <div className="flex items-center gap-1 flex-1 max-w-[420px]">
           <input

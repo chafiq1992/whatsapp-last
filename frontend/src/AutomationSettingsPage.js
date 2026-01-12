@@ -219,7 +219,6 @@ export default function AutomationSettingsPage() {
         waba_id: envDraft.waba_id,
         catalog_id: envDraft.catalog_id,
         phone_number_id: envDraft.phone_number_id,
-        meta_app_id: envDraft.meta_app_id,
         ...(envDraft.webhook_verify_token ? { webhook_verify_token: envDraft.webhook_verify_token } : {}),
         ...(envDraft.access_token ? { access_token: envDraft.access_token } : {}),
         ...(envDraft.access_token_source === 'env' ? { clear_access_token: true } : {}),
@@ -626,6 +625,31 @@ export default function AutomationSettingsPage() {
                   <button type="button" className="px-3 py-1.5 rounded bg-gray-800 text-white disabled:opacity-50" disabled={savingWorkspace} onClick={saveWorkspaceMeta}>
                     {savingWorkspace ? 'Saving…' : 'Save workspace'}
                   </button>
+
+                  <div className="pt-2 border-t">
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                      onClick={() => {
+                        try {
+                          const ws = normalizeWorkspaceId(workspace) || 'irranova';
+                          const returnTo = '/#/settings?wa=connected';
+                          window.location.href = `/admin/whatsapp/oauth/start?workspace=${encodeURIComponent(ws)}&return_to=${encodeURIComponent(returnTo)}`;
+                        } catch {}
+                      }}
+                      title="Connect Meta WhatsApp (OAuth) and fetch WABA + Phone Number ID"
+                    >
+                      {/* Simple WhatsApp icon (inline SVG) */}
+                      <svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true" focusable="false">
+                        <path fill="currentColor" d="M19.11 17.46c-.3-.16-1.78-.88-2.06-.98-.28-.1-.49-.16-.7.16-.2.3-.8.98-.98 1.18-.18.2-.36.22-.66.06-.3-.16-1.28-.47-2.44-1.5-.9-.8-1.5-1.78-1.68-2.08-.18-.3-.02-.46.14-.62.14-.14.3-.36.46-.54.16-.18.2-.3.3-.5.1-.2.04-.38-.02-.54-.06-.16-.7-1.68-.96-2.3-.26-.62-.52-.54-.7-.54h-.6c-.2 0-.54.08-.82.38-.28.3-1.08 1.06-1.08 2.6s1.1 3.02 1.26 3.22c.16.2 2.16 3.3 5.24 4.62.74.32 1.32.5 1.78.64.74.24 1.42.2 1.96.12.6-.1 1.78-.72 2.04-1.42.26-.7.26-1.3.18-1.42-.08-.12-.28-.2-.58-.36z"/>
+                        <path fill="currentColor" d="M16 3C9.38 3 4 8.38 4 15c0 2.04.52 4 1.5 5.74L4 29l8.46-1.46A11.9 11.9 0 0 0 16 27c6.62 0 12-5.38 12-12S22.62 3 16 3zm0 21.5c-1.66 0-3.28-.44-4.7-1.28l-.34-.2-5.02.86.9-4.9-.22-.36A9.4 9.4 0 0 1 6.6 15c0-5.18 4.22-9.4 9.4-9.4s9.4 4.22 9.4 9.4-4.22 9.4-9.4 9.4z"/>
+                      </svg>
+                      Connect WhatsApp
+                    </button>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      This will connect the client’s Meta Business and auto-fill <span className="font-mono">WABA ID</span>, <span className="font-mono">Phone Number ID</span>, and store the token for this workspace.
+                    </div>
+                  </div>
                   {selectedWsObj?.source === 'db' && normalizeWorkspaceId(workspace) !== normalizeWorkspaceId(reservedDefaultWorkspace()) && (
                     <div className="pt-2 border-t">
                       <button
@@ -734,8 +758,11 @@ export default function AutomationSettingsPage() {
                     <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.phone_number_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, phone_number_id: e.target.value }))} />
                   </div>
                   <div className="md:col-span-2">
-                    <div className="text-xs text-slate-500 mb-1">Meta App ID (per workspace)</div>
-                    <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.meta_app_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, meta_app_id: e.target.value }))} />
+                    <div className="text-xs text-slate-500 mb-1">Meta App ID (global; from server env)</div>
+                    <input className="w-full border rounded px-2 py-1 font-mono text-xs bg-slate-50" value={envDraft.meta_app_id || ''} readOnly />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      This should be the same Meta App for all workspaces/clients. Configure it in Cloud Run env (<span className="font-mono">META_APP_ID</span>/<span className="font-mono">META_APP_SECRET</span>).
+                    </div>
                   </div>
                   <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">Webhook Verify Token (optional)</div>

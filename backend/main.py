@@ -12075,7 +12075,7 @@ async def privacy_policy():
 
       <h2>Contact</h2>
       <p>
-        For privacy requests, contact us at: <strong>support@your-domain.example</strong>
+        For privacy requests, contact us at: <strong>chouquinoura@gmail.com</strong>
         (replace this email with your real support email before submitting to Meta).
       </p>
 

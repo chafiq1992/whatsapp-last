@@ -10384,13 +10384,15 @@ async def meta_whatsapp_oauth_callback(
             </form>
             """
         )
-    chooser_html = (
-        "<html><body style='font-family:system-ui;padding:18px;max-width:720px;margin:0 auto'>"
-        "<h2>Select a WhatsApp phone number</h2>"
-        f"<p>Workspace: <code>{html.escape(ws)}</code></p>"
-        + "".join(rows)
-        f"<p style='margin-top:14px'><a href='{safe_return}'>Cancel</a></p>"
-        "</body></html>"
+    chooser_html = "".join(
+        [
+            "<html><body style='font-family:system-ui;padding:18px;max-width:720px;margin:0 auto'>",
+            "<h2>Select a WhatsApp phone number</h2>",
+            f"<p>Workspace: <code>{html.escape(ws)}</code></p>",
+            "".join(rows),
+            f"<p style='margin-top:14px'><a href='{safe_return}'>Cancel</a></p>",
+            "</body></html>",
+        ]
     )
     return HTMLResponse(content=chooser_html, status_code=200)
 

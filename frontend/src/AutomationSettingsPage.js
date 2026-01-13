@@ -4,7 +4,8 @@ import AnalyticsPanel from './AnalyticsPanel';
 import AutomationStudio from './AutomationStudio';
 import CustomersSegmentsPage from './CustomersSegmentsPage';
 import WhatsAppTemplatesPanel from './WhatsAppTemplatesPanel';
-import { BarChart3, Bot, MessageSquareText, Users, Settings as SettingsIcon, BookOpen, Home } from 'lucide-react';
+import UsersTagsAdminPanel from './UsersTagsAdminPanel';
+import { BarChart3, Bot, MessageSquareText, Users, Settings as SettingsIcon, BookOpen, Home, UserCog, Tag } from 'lucide-react';
 
 function normalizeWorkspaceId(v) {
   try {
@@ -18,7 +19,7 @@ export default function AutomationSettingsPage() {
   const [allowed, setAllowed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('settings'); // analytics | automation | templates | customers | settings | docs
+  const [activeTab, setActiveTab] = useState('workspaces'); // analytics | automation | templates | customers | users_tags | workspaces | docs
 
   const [workspaces, setWorkspaces] = useState([]);
   const [defaultWorkspace, setDefaultWorkspace] = useState('irranova');
@@ -353,13 +354,14 @@ export default function AutomationSettingsPage() {
       if (key.includes('/settings/automation') || key.includes('/#/settings/automation') || key.includes('/automation-studio')) return 'automation';
       if (key.includes('/settings/templates') || key.includes('/#/settings/templates') || key.includes('/whatsapp-templates')) return 'templates';
       if (key.includes('/settings/customers') || key.includes('/#/settings/customers') || key.includes('/customers')) return 'customers';
+      if (key.includes('/settings/users') || key.includes('/#/settings/users') || key.includes('/settings/tags') || key.includes('/#/settings/tags') || key.includes('/settings/users-tags') || key.includes('/#/settings/users-tags')) return 'users_tags';
       if (key.includes('/settings/docs') || key.includes('/#/settings/docs')) return 'docs';
-      if (key.includes('/settings')) return 'settings';
+      if (key.includes('/settings')) return 'workspaces';
       // Back-compat
       if (key.includes('/analytics')) return 'analytics';
-      return 'settings';
+      return 'workspaces';
     } catch {
-      return 'settings';
+      return 'workspaces';
     }
   };
 
@@ -376,10 +378,10 @@ export default function AutomationSettingsPage() {
   }, []);
 
   const goTab = (tab) => {
-    const t = String(tab || 'settings');
+    const t = String(tab || 'workspaces');
     setActiveTab(t);
     try {
-      const next = t === 'settings' ? '/#/settings' : `/#/settings/${t}`;
+      const next = t === 'workspaces' ? '/#/settings' : `/#/settings/${t === 'users_tags' ? 'users-tags' : t}`;
       window.location.hash = next.replace('/#', '#');
     } catch {}
   };
@@ -436,10 +438,18 @@ export default function AutomationSettingsPage() {
               <span className="inline-flex items-center gap-2"><Users className="w-4 h-4" />Customers</span>
             </button>
             <button
-              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'settings' ? 'bg-white text-slate-900 font-semibold shadow' : 'hover:bg-white/10'}`}
-              onClick={() => goTab('settings')}
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'users_tags' ? 'bg-amber-400/20 border border-amber-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('users_tags')}
+              title="Users & tags"
             >
-              <span className="inline-flex items-center gap-2"><SettingsIcon className="w-4 h-4" />Settings</span>
+              <span className="inline-flex items-center gap-2"><UserCog className="w-4 h-4" /><Tag className="w-4 h-4" />Users &amp; Tags</span>
+            </button>
+            <button
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'workspaces' ? 'bg-white text-slate-900 font-semibold shadow' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('workspaces')}
+              title="Workspaces"
+            >
+              <span className="inline-flex items-center gap-2"><SettingsIcon className="w-4 h-4" />Workspaces</span>
             </button>
             <button
               type="button"
@@ -544,7 +554,11 @@ export default function AutomationSettingsPage() {
           </div>
         )}
 
-        {!loading && activeTab === 'settings' && (
+        {!loading && activeTab === 'users_tags' && (
+          <UsersTagsAdminPanel />
+        )}
+
+        {!loading && activeTab === 'workspaces' && (
           <div className="grid grid-cols-12 gap-4">
             {/* Left: workspace list + add */}
             <div className="col-span-12 md:col-span-4 space-y-3">

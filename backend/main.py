@@ -11552,6 +11552,72 @@ async def delete_agent_endpoint(username: str, _: dict = Depends(require_admin))
         pass
     return {"ok": True}
 
+
+@app.put("/admin/agents/{username}")
+async def update_agent_endpoint(username: str, payload: dict = Body(...), _: dict = Depends(require_admin)):
+    """Update an agent (admin-only).
+
+    Supports:
+      - name (optional)
+      - is_admin (optional)
+      - password (optional; if present and non-empty, resets password)
+    """
+    uname = str(username or "").strip()
+    if not uname:
+        raise HTTPException(status_code=400, detail="username is required")
+
+    # Read current record so updates can be partial.
+    existing = None
+    try:
+        # list_agents is cheap and omits password_hash; use it to get current name/is_admin.
+        agents = await auth_db_manager.list_agents()
+        for a in agents or []:
+            if str((a or {}).get("username") or "").strip() == uname:
+                existing = a
+                break
+    except Exception:
+        existing = None
+
+    if not existing:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+    next_name = str(payload.get("name") if payload.get("name") is not None else (existing.get("name") or uname)).strip() or uname
+    if "is_admin" in payload:
+        next_is_admin = int(bool(payload.get("is_admin")))
+    else:
+        try:
+            next_is_admin = int(existing.get("is_admin") or 0)
+        except Exception:
+            next_is_admin = 0
+
+    password = payload.get("password")
+    if password is not None:
+        password = str(password)
+    if password:
+        next_hash = hash_password(password)
+    else:
+        # Keep existing hash if password not provided/empty
+        next_hash = await auth_db_manager.get_agent_password_hash(uname)
+        if not next_hash:
+            raise HTTPException(status_code=404, detail="agent auth record not found")
+
+    await auth_db_manager.create_agent(username=uname, name=next_name, password_hash=next_hash, is_admin=int(next_is_admin))
+
+    # Refresh Redis auth cache for robustness
+    try:
+        await redis_manager.set_agent_auth_record(uname, next_hash, int(next_is_admin))
+    except Exception:
+        pass
+
+    # If we changed privilege or rotated password, revoke all refresh tokens so old sessions don't linger.
+    try:
+        if ("is_admin" in payload) or (password and str(password).strip()):
+            await auth_db_manager.revoke_all_refresh_tokens_for_agent(uname)
+    except Exception:
+        pass
+
+    return {"ok": True, "username": uname, "name": next_name, "is_admin": bool(next_is_admin)}
+
 def _parse_dt_any(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None

@@ -416,7 +416,7 @@ export default function MiniSidebar({
         </button>
 				<button
 					type="button"
-					title="Settings"
+					title="Workspaces"
 					onClick={() => onOpenSettings && onOpenSettings()}
 					className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl bg-gray-800 text-gray-300 hover:bg-gray-700"
 				>

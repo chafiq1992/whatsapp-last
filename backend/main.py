@@ -809,6 +809,12 @@ META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", ACCESS_TOKEN)
 META_APP_ID = os.getenv("META_APP_ID", "") or os.getenv("FB_APP_ID", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "") or os.getenv("FB_APP_SECRET", "")
 
+# Embedded Signup (Facebook Login for Business) configuration.
+# This is NOT a secret; it's the "Configuration ID" (config_id) you create in Meta App Dashboard.
+WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID = (os.getenv("WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID", "") or os.getenv("WHATSAPP_CONFIG_ID", "")).strip()
+# JS SDK uses a Graph API version string like "v24.0" (Meta doc example). Keep independent of WhatsApp API version.
+META_GRAPH_API_VERSION_FOR_SDK = (os.getenv("META_GRAPH_API_VERSION_FOR_SDK", "v24.0") or "v24.0").strip()
+
 # Workspace-specific WhatsApp credentials (optional, for ENABLE_MULTI_WORKSPACE=1).
 # Requirement: keep irrakids envs unchanged (WHATSAPP_ACCESS_TOKEN/WHATSAPP_PHONE_NUMBER_ID),
 # and only add NOVA envs for irranova.
@@ -10256,6 +10262,67 @@ async def meta_whatsapp_oauth_start(
     }
     url = f"https://www.facebook.com/{WHATSAPP_API_VERSION}/dialog/oauth?{urlencode(params)}"
     return RedirectResponse(url=url, status_code=302)
+
+
+@app.get("/admin/whatsapp/embedded-signup/config")
+async def meta_whatsapp_embedded_signup_config(_: dict = Depends(require_admin)):
+    """Return Embedded Signup config used by the frontend (app_id + config_id)."""
+    return {
+        "app_id": str(META_APP_ID or "").strip(),
+        "config_id": str(WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID or "").strip(),
+        "graph_api_version": str(META_GRAPH_API_VERSION_FOR_SDK or "v24.0").strip(),
+    }
+
+
+@app.post("/admin/whatsapp/embedded-signup/complete")
+async def meta_whatsapp_embedded_signup_complete(
+    request: Request,
+    payload: dict = Body(...),
+    agent: dict = Depends(require_admin),
+):
+    """Complete Embedded Signup by exchanging code -> token and saving WABA + phone number IDs."""
+    _ = agent  # keep auth requirement explicit
+    ws = _coerce_workspace((payload or {}).get("workspace") or _workspace_from_request(request))
+    code = str((payload or {}).get("code") or "").strip()
+    waba_id = str((payload or {}).get("waba_id") or "").strip()
+    phone_number_id = str((payload or {}).get("phone_number_id") or "").strip()
+    return_to = _safe_return_to((payload or {}).get("return_to") or "/#/settings")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing embedded-signup code")
+    if not (waba_id and phone_number_id):
+        raise HTTPException(status_code=400, detail="Missing waba_id/phone_number_id from embedded signup")
+    if not (META_APP_ID and META_APP_SECRET):
+        raise HTTPException(status_code=400, detail="META_APP_ID/META_APP_SECRET not configured on server")
+
+    # Exchange code for the customer's business token (short-lived code TTL ~30s per Meta doc).
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        token_resp = await client.get(
+            f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/oauth/access_token",
+            params={
+                "client_id": META_APP_ID,
+                "client_secret": META_APP_SECRET,
+                "code": code,
+            },
+        )
+        if token_resp.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Embedded signup token exchange failed: {token_resp.text}")
+        token_data = token_resp.json() or {}
+        access_token = str(token_data.get("access_token") or "").strip()
+        if not access_token:
+            raise HTTPException(status_code=400, detail="No access_token returned by Meta (embedded signup)")
+
+    await _save_workspace_whatsapp_oauth(
+        workspace=ws,
+        access_token=access_token,
+        waba_id=waba_id,
+        phone_number_id=phone_number_id,
+    )
+    # Return a redirect URL for the frontend to navigate.
+    try:
+        redirect_url = _safe_return_to(return_to + ("&" if "?" in return_to else "?") + "wa=connected")
+    except Exception:
+        redirect_url = "/#/settings?wa=connected"
+    return {"ok": True, "workspace": ws, "redirect_url": redirect_url}
 
 
 @app.get("/admin/whatsapp/oauth/callback")

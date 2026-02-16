@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import api from './api';
 import AnalyticsPanel from './AnalyticsPanel';
 import AutomationStudio from './AutomationStudio';
@@ -13,6 +13,49 @@ function normalizeWorkspaceId(v) {
   } catch {
     return '';
   }
+}
+
+function loadFacebookSdk({ appId, version }) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (window.FB) return resolve(window.FB);
+      // If script tag already exists, wait for fbAsyncInit to run.
+      const existing = document.getElementById('facebook-jssdk');
+      if (existing) {
+        const t0 = Date.now();
+        const tick = () => {
+          if (window.FB) return resolve(window.FB);
+          if (Date.now() - t0 > 15000) return reject(new Error('Facebook SDK load timeout'));
+          setTimeout(tick, 50);
+        };
+        tick();
+        return;
+      }
+      window.fbAsyncInit = function () {
+        try {
+          window.FB.init({
+            appId,
+            autoLogAppEvents: true,
+            xfbml: true,
+            version,
+          });
+          resolve(window.FB);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      const js = document.createElement('script');
+      js.id = 'facebook-jssdk';
+      js.async = true;
+      js.defer = true;
+      js.crossOrigin = 'anonymous';
+      js.src = 'https://connect.facebook.net/en_US/sdk.js';
+      js.onerror = () => reject(new Error('Failed to load Facebook SDK'));
+      document.body.appendChild(js);
+    } catch (e) {
+      reject(e);
+    }
+  });
 }
 
 export default function AutomationSettingsPage() {
@@ -55,6 +98,12 @@ export default function AutomationSettingsPage() {
     access_token_source: '',
   });
   const [savingEnv, setSavingEnv] = useState(false);
+  const [waConnectBusy, setWaConnectBusy] = useState(false);
+  const [waConnectError, setWaConnectError] = useState('');
+  const waCodeRef = useRef('');
+  const waIdsRef = useRef({ waba_id: '', phone_number_id: '' });
+  const waCompleteInFlight = useRef(false);
+  const waEmbedCfgRef = useRef(null);
 
   const [shopifyDraft, setShopifyDraft] = useState({
     use_db_secret: false,
@@ -71,6 +120,81 @@ export default function AutomationSettingsPage() {
     const ws = normalizeWorkspaceId(workspace);
     return (workspaces || []).find((w) => normalizeWorkspaceId(w.id) === ws) || null;
   }, [workspaces, workspace]);
+
+  const _safeText = (v) => {
+    try { return String(v || '').trim(); } catch { return ''; }
+  };
+
+  const getEmbeddedSignupConfig = async () => {
+    if (waEmbedCfgRef.current) return waEmbedCfgRef.current;
+    const res = await api.get('/admin/whatsapp/embedded-signup/config');
+    waEmbedCfgRef.current = res?.data || null;
+    return waEmbedCfgRef.current;
+  };
+
+  const maybeCompleteEmbeddedSignup = async () => {
+    try {
+      if (waCompleteInFlight.current) return;
+      const code = _safeText(waCodeRef.current);
+      const wabaId = _safeText(waIdsRef.current?.waba_id);
+      const phoneId = _safeText(waIdsRef.current?.phone_number_id);
+      if (!code || !wabaId || !phoneId) return;
+      waCompleteInFlight.current = true;
+      setWaConnectBusy(true);
+      setWaConnectError('');
+      const ws = normalizeWorkspaceId(workspace) || 'irranova';
+      const returnTo = '/#/settings?wa=connected';
+      const res = await api.post('/admin/whatsapp/embedded-signup/complete', {
+        workspace: ws,
+        code,
+        waba_id: wabaId,
+        phone_number_id: phoneId,
+        return_to: returnTo,
+      });
+      const redirectUrl = res?.data?.redirect_url || returnTo;
+      window.location.href = redirectUrl;
+    } catch (e) {
+      setWaConnectError(_safeText(e?.response?.data?.detail) || _safeText(e?.message) || 'Embedded signup failed');
+      setWaConnectBusy(false);
+    } finally {
+      waCompleteInFlight.current = false;
+    }
+  };
+
+  // Listen for WA embedded signup events (FINISH/CANCEL) and capture the generated WABA + phone ids.
+  useEffect(() => {
+    const handler = (event) => {
+      try {
+        const origin = _safeText(event?.origin);
+        // Meta doc suggests checking origin endswith facebook.com
+        if (!origin || !origin.endsWith('facebook.com')) return;
+        let data = event?.data;
+        if (typeof data === 'string') {
+          try { data = JSON.parse(data); } catch { return; }
+        }
+        if (!data || data.type !== 'WA_EMBEDDED_SIGNUP') return;
+        const ev = _safeText(data.event);
+        const payload = data.data || {};
+        const wabaId = _safeText(payload.waba_id || payload.customer_waba_id || payload.wabaId);
+        const phoneId = _safeText(payload.phone_number_id || payload.customer_business_phone_number_id || payload.business_phone_number_id || payload.phoneNumberId);
+        if (ev && ev.toUpperCase().startsWith('CANCEL')) {
+          // User cancelled / abandoned; show a soft error
+          setWaConnectError('WhatsApp connect was cancelled in Meta onboarding.');
+          setWaConnectBusy(false);
+          return;
+        }
+        if (wabaId || phoneId) {
+          waIdsRef.current = { waba_id: wabaId, phone_number_id: phoneId };
+          maybeCompleteEmbeddedSignup();
+        }
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace]);
 
   const loadWorkspaces = async () => {
     const res = await api.get('/admin/workspaces');
@@ -648,10 +772,58 @@ export default function AutomationSettingsPage() {
                         try {
                           const ws = normalizeWorkspaceId(workspace) || 'irranova';
                           const returnTo = '/#/settings?wa=connected';
-                          window.location.href = `/admin/whatsapp/oauth/start?workspace=${encodeURIComponent(ws)}&return_to=${encodeURIComponent(returnTo)}`;
+                          // Prefer Meta Embedded Signup (auto-returns WABA + phone_number_id).
+                          // Fallback to legacy OAuth start if config is missing.
+                          (async () => {
+                            try {
+                              setWaConnectBusy(true);
+                              setWaConnectError('');
+                              waCodeRef.current = '';
+                              waIdsRef.current = { waba_id: '', phone_number_id: '' };
+                              const cfg = await getEmbeddedSignupConfig();
+                              const appId = _safeText(cfg?.app_id);
+                              const configId = _safeText(cfg?.config_id);
+                              const ver = _safeText(cfg?.graph_api_version) || 'v24.0';
+                              if (!appId || !configId) {
+                                // Legacy OAuth
+                                window.location.href = `/admin/whatsapp/oauth/start?workspace=${encodeURIComponent(ws)}&return_to=${encodeURIComponent(returnTo)}`;
+                                return;
+                              }
+                              await loadFacebookSdk({ appId, version: ver });
+                              const fbLoginCallback = (response) => {
+                                try {
+                                  const code = _safeText(response?.authResponse?.code);
+                                  if (!code) {
+                                    setWaConnectError('Meta login did not return a code. Please retry.');
+                                    setWaConnectBusy(false);
+                                    return;
+                                  }
+                                  waCodeRef.current = code;
+                                  // Wait for WA_EMBEDDED_SIGNUP message (waba_id + phone_number_id), or complete if already received.
+                                  maybeCompleteEmbeddedSignup();
+                                } catch {
+                                  setWaConnectError('Meta login callback failed. Please retry.');
+                                  setWaConnectBusy(false);
+                                }
+                              };
+                              window.FB.login(
+                                fbLoginCallback,
+                                {
+                                  config_id: configId,
+                                  response_type: 'code',
+                                  override_default_response_type: true,
+                                  extras: { setup: {} },
+                                }
+                              );
+                            } catch (e) {
+                              setWaConnectError(_safeText(e?.message) || 'Failed to start Embedded Signup');
+                              setWaConnectBusy(false);
+                            }
+                          })();
                         } catch {}
                       }}
                       title="Connect Meta WhatsApp (OAuth) and fetch WABA + Phone Number ID"
+                      disabled={waConnectBusy}
                     >
                       {/* Simple WhatsApp icon (inline SVG) */}
                       <svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true" focusable="false">
@@ -660,6 +832,9 @@ export default function AutomationSettingsPage() {
                       </svg>
                       Connect WhatsApp
                     </button>
+                    {waConnectError ? (
+                      <div className="text-[11px] text-rose-700 mt-1">{waConnectError}</div>
+                    ) : null}
                     <div className="text-[11px] text-slate-500 mt-1">
                       This will connect the client’s Meta Business and auto-fill <span className="font-mono">WABA ID</span>, <span className="font-mono">Phone Number ID</span>, and store the token for this workspace.
                     </div>

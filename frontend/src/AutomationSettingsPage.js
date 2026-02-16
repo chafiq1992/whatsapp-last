@@ -812,6 +812,9 @@ export default function AutomationSettingsPage() {
                                   config_id: configId,
                                   response_type: 'code',
                                   override_default_response_type: true,
+                                  // Make redirect_uri stable/predictable so it can be whitelisted once in Meta dashboard.
+                                  // (Fragments like "/#/settings" are never included in redirect_uri; use origin root.)
+                                  redirect_uri: `${window.location.origin}/`,
                                   extras: { setup: {} },
                                 }
                               );

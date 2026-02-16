@@ -81,6 +81,22 @@ RETARGETING_JOBS: dict[str, dict] = {}
 # Absolute paths
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
+
+def _meta_oauth_redirect_uri(request: Request) -> str:
+    """Build redirect URI using the current public domain.
+
+    This avoids cross-domain cookie/session issues when Cloud Run serves on *.run.app
+    but users access the app via a custom domain (e.g. wtp.chattbase.site).
+    """
+    try:
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
+        base = f"{proto}://{host}".rstrip("/")
+        return f"{base}/admin/whatsapp/oauth/callback"
+    except Exception:
+        # Fallback to BASE_URL (legacy behavior)
+        return f"{str(BASE_URL or '').rstrip('/')}/admin/whatsapp/oauth/callback"
+
 # Load environment variables as early as possible so paths below can be overridden by env.
 # In managed platforms (Cloud Run/Render), environment variables are injected directly and this is a no-op.
 load_dotenv()
@@ -10229,14 +10245,14 @@ async def meta_whatsapp_oauth_start(
         },
     )
 
-    redirect_uri = f"{str(BASE_URL or '').rstrip('/')}/admin/whatsapp/oauth/callback"
+    redirect_uri = _meta_oauth_redirect_uri(request)
     params = {
         "client_id": META_APP_ID,
         "redirect_uri": redirect_uri,
         "state": state,
         "response_type": "code",
         # WhatsApp Cloud API management
-        "scope": "whatsapp_business_management,whatsapp_business_messaging,business_management",
+        "scope": "whatsapp_business_management,whatsapp_business_messaging",
     }
     url = f"https://www.facebook.com/{WHATSAPP_API_VERSION}/dialog/oauth?{urlencode(params)}"
     return RedirectResponse(url=url, status_code=302)
@@ -10276,7 +10292,7 @@ async def meta_whatsapp_oauth_callback(
     ws = _coerce_workspace(str(st.get("workspace") or ""))
     safe_return = _safe_return_to(st.get("return_to"))
 
-    redirect_uri = f"{str(BASE_URL or '').rstrip('/')}/admin/whatsapp/oauth/callback"
+    redirect_uri = _meta_oauth_redirect_uri(request)
     long_token = ""
     async with httpx.AsyncClient(timeout=15.0) as client:
         # 1) Exchange code for short-lived token
@@ -10316,63 +10332,49 @@ async def meta_whatsapp_oauth_callback(
         except Exception:
             pass
 
-        # 3) Discover businesses -> WABAs -> phone numbers
-        me_resp = await client.get(
-            f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/me",
-            params={"fields": "businesses{id,name}", "access_token": long_token},
+        # 3) Discover WABAs -> phone numbers (avoid /me?fields=businesses which requires business_management)
+        waba_resp = await client.get(
+            f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/me/whatsapp_business_accounts",
+            params={"fields": "id,name", "access_token": long_token},
         )
-        if me_resp.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch businesses: {me_resp.text}")
-        me = me_resp.json() or {}
-        businesses = (me.get("businesses") or {}).get("data") or []
-        if not isinstance(businesses, list):
-            businesses = []
+        if waba_resp.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch WhatsApp business accounts: {waba_resp.text}")
+        wabas = (waba_resp.json() or {}).get("data") or []
+        if not isinstance(wabas, list):
+            wabas = []
 
         options: list[dict] = []
-        for b in businesses:
+        for waba in wabas:
             try:
-                bid = str((b or {}).get("id") or "").strip()
-                if not bid:
+                waba_id = str((waba or {}).get("id") or "").strip()
+                if not waba_id:
                     continue
-                waba_resp = await client.get(
-                    f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{bid}/owned_whatsapp_business_accounts",
-                    params={"access_token": long_token},
+                phones_resp = await client.get(
+                    f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/phone_numbers",
+                    params={
+                        "fields": "id,display_phone_number,verified_name,quality_rating,code_verification_status,status",
+                        "access_token": long_token,
+                    },
                 )
-                if waba_resp.status_code != 200:
+                if phones_resp.status_code != 200:
                     continue
-                wabas = (waba_resp.json() or {}).get("data") or []
-                if not isinstance(wabas, list):
+                phones = (phones_resp.json() or {}).get("data") or []
+                if not isinstance(phones, list):
                     continue
-                for waba in wabas:
-                    waba_id = str((waba or {}).get("id") or "").strip()
-                    if not waba_id:
+                for p in phones:
+                    pid = str((p or {}).get("id") or "").strip()
+                    if not pid:
                         continue
-                    phones_resp = await client.get(
-                        f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/phone_numbers",
-                        params={
-                            "fields": "id,display_phone_number,verified_name,quality_rating,code_verification_status,status",
-                            "access_token": long_token,
-                        },
+                    options.append(
+                        {
+                            "waba_id": waba_id,
+                            "phone_number_id": pid,
+                            "display_phone_number": str((p or {}).get("display_phone_number") or "").strip(),
+                            "verified_name": str((p or {}).get("verified_name") or "").strip(),
+                            "status": str((p or {}).get("status") or "").strip(),
+                            "quality_rating": str((p or {}).get("quality_rating") or "").strip(),
+                        }
                     )
-                    if phones_resp.status_code != 200:
-                        continue
-                    phones = (phones_resp.json() or {}).get("data") or []
-                    if not isinstance(phones, list):
-                        continue
-                    for p in phones:
-                        pid = str((p or {}).get("id") or "").strip()
-                        if not pid:
-                            continue
-                        options.append(
-                            {
-                                "waba_id": waba_id,
-                                "phone_number_id": pid,
-                                "display_phone_number": str((p or {}).get("display_phone_number") or "").strip(),
-                                "verified_name": str((p or {}).get("verified_name") or "").strip(),
-                                "status": str((p or {}).get("status") or "").strip(),
-                                "quality_rating": str((p or {}).get("quality_rating") or "").strip(),
-                            }
-                        )
             except Exception:
                 continue
 

@@ -10294,6 +10294,36 @@ async def meta_whatsapp_oauth_callback(
 
     redirect_uri = _meta_oauth_redirect_uri(request)
     long_token = ""
+
+    def _manual_connect_html(detail: str = "") -> HTMLResponse:
+        msg = (
+            "<p>We couldn't automatically discover your WhatsApp Business Account (WABA) from this Meta token.</p>"
+            "<p>This usually happens when the token does not include <code>business_management</code> permission, "
+            "or when the Meta account has no Business/WABA assigned.</p>"
+        )
+        extra = f"<pre style='white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:8px'>{detail}</pre>" if detail else ""
+        html = (
+            "<html><body style='font-family:system-ui;padding:18px;max-width:760px'>"
+            "<h2>Finish WhatsApp connect (manual)</h2>"
+            f"{msg}"
+            "<p>You can find these IDs in Meta <b>WhatsApp Manager</b>:</p>"
+            "<ul>"
+            "<li><b>WABA ID</b>: WhatsApp Manager → Account tools → WhatsApp Business Account ID</li>"
+            "<li><b>Phone Number ID</b>: WhatsApp Manager → Phone numbers → select number → Phone number ID</li>"
+            "</ul>"
+            f"{extra}"
+            "<form method='post' action='/admin/whatsapp/oauth/manual' style='display:flex;flex-direction:column;gap:10px'>"
+            f"<input type='hidden' name='state' value='{state or ''}'/>"
+            f"<input type='hidden' name='return_to' value='{safe_return}'/>"
+            "<label>WABA ID<br/><input name='waba_id' style='width:100%;padding:10px' required/></label>"
+            "<label>Phone Number ID<br/><input name='phone_number_id' style='width:100%;padding:10px' required/></label>"
+            "<button type='submit' style='padding:10px 14px'>Save &amp; finish</button>"
+            f"<p style='margin-top:8px'><a href='{safe_return}'>Back to settings</a></p>"
+            "</form>"
+            "</body></html>"
+        )
+        return HTMLResponse(content=html, status_code=200)
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         # 1) Exchange code for short-lived token
         token_resp = await client.get(
@@ -10332,62 +10362,82 @@ async def meta_whatsapp_oauth_callback(
         except Exception:
             pass
 
-        # 3) Discover WABAs -> phone numbers (avoid /me?fields=businesses which requires business_management)
-        waba_resp = await client.get(
-            f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/me/whatsapp_business_accounts",
-            params={"fields": "id,name", "access_token": long_token},
-        )
-        if waba_resp.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch WhatsApp business accounts: {waba_resp.text}")
-        wabas = (waba_resp.json() or {}).get("data") or []
-        if not isinstance(wabas, list):
-            wabas = []
+        # Persist token into the existing OAuth state for manual fallback completion.
+        try:
+            st2 = dict(st)
+            st2["access_token"] = long_token
+            await auth_db_manager.set_setting(_meta_oauth_state_key(state), st2)
+        except Exception:
+            pass
 
+        # 3) Discover WABAs -> phone numbers (avoid /me?fields=businesses which requires business_management)
+        # NOTE: There is no stable "/me/whatsapp_business_accounts" edge for User tokens.
+        # The standard discovery is: User -> Businesses -> owned_whatsapp_business_accounts -> phone_numbers.
         options: list[dict] = []
-        for waba in wabas:
-            try:
-                waba_id = str((waba or {}).get("id") or "").strip()
-                if not waba_id:
-                    continue
-                phones_resp = await client.get(
-                    f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/phone_numbers",
-                    params={
-                        "fields": "id,display_phone_number,verified_name,quality_rating,code_verification_status,status",
-                        "access_token": long_token,
-                    },
-                )
-                if phones_resp.status_code != 200:
-                    continue
-                phones = (phones_resp.json() or {}).get("data") or []
-                if not isinstance(phones, list):
-                    continue
-                for p in phones:
-                    pid = str((p or {}).get("id") or "").strip()
-                    if not pid:
+        try:
+            me_resp = await client.get(
+                f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/me",
+                params={"fields": "businesses{id,name}", "access_token": long_token},
+            )
+            if me_resp.status_code != 200:
+                # Missing permission (business_management) or no access → fall back to manual
+                return _manual_connect_html(f"Businesses discovery failed: {me_resp.text}")
+            me = me_resp.json() or {}
+            businesses = (me.get("businesses") or {}).get("data") or []
+            if not isinstance(businesses, list):
+                businesses = []
+            for b in businesses:
+                try:
+                    bid = str((b or {}).get("id") or "").strip()
+                    if not bid:
                         continue
-                    options.append(
-                        {
-                            "waba_id": waba_id,
-                            "phone_number_id": pid,
-                            "display_phone_number": str((p or {}).get("display_phone_number") or "").strip(),
-                            "verified_name": str((p or {}).get("verified_name") or "").strip(),
-                            "status": str((p or {}).get("status") or "").strip(),
-                            "quality_rating": str((p or {}).get("quality_rating") or "").strip(),
-                        }
+                    w_resp = await client.get(
+                        f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{bid}/owned_whatsapp_business_accounts",
+                        params={"access_token": long_token},
                     )
-            except Exception:
-                continue
+                    if w_resp.status_code != 200:
+                        continue
+                    wabas = (w_resp.json() or {}).get("data") or []
+                    if not isinstance(wabas, list):
+                        continue
+                    for waba in wabas:
+                        waba_id = str((waba or {}).get("id") or "").strip()
+                        if not waba_id:
+                            continue
+                        phones_resp = await client.get(
+                            f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/phone_numbers",
+                            params={
+                                "fields": "id,display_phone_number,verified_name,quality_rating,code_verification_status,status",
+                                "access_token": long_token,
+                            },
+                        )
+                        if phones_resp.status_code != 200:
+                            continue
+                        phones = (phones_resp.json() or {}).get("data") or []
+                        if not isinstance(phones, list):
+                            continue
+                        for p in phones:
+                            pid = str((p or {}).get("id") or "").strip()
+                            if not pid:
+                                continue
+                            options.append(
+                                {
+                                    "waba_id": waba_id,
+                                    "phone_number_id": pid,
+                                    "display_phone_number": str((p or {}).get("display_phone_number") or "").strip(),
+                                    "verified_name": str((p or {}).get("verified_name") or "").strip(),
+                                    "status": str((p or {}).get("status") or "").strip(),
+                                    "quality_rating": str((p or {}).get("quality_rating") or "").strip(),
+                                }
+                            )
+                except Exception:
+                    continue
+        except Exception as exc:
+            return _manual_connect_html(f"Discovery error: {exc}")
 
     if not options:
-        html = (
-            "<html><body style='font-family:system-ui;padding:18px'>"
-            "<h2>WhatsApp connect</h2>"
-            "<p>No WhatsApp phone numbers were found for this Meta account.</p>"
-            "<p>Make sure your Meta Business has a WhatsApp Business Account and at least one phone number added.</p>"
-            f"<p><a href='{safe_return}'>Back to settings</a></p>"
-            "</body></html>"
-        )
-        return HTMLResponse(content=html, status_code=200)
+        # If we couldn't discover options automatically, offer manual completion.
+        return _manual_connect_html("No phone numbers discovered from this token.")
 
     if len(options) == 1:
         o = options[0]
@@ -10440,6 +10490,48 @@ async def meta_whatsapp_oauth_callback(
         ]
     )
     return HTMLResponse(content=chooser_html, status_code=200)
+
+
+@app.post("/admin/whatsapp/oauth/manual")
+async def meta_whatsapp_oauth_manual_finish(
+    request: Request,
+    state: str = Form(...),
+    waba_id: str = Form(...),
+    phone_number_id: str = Form(...),
+    return_to: str | None = Form(None),
+    agent: dict = Depends(require_admin),
+):
+    """Manual completion path for OAuth when we can't auto-discover WABA/phone numbers."""
+    raw = await auth_db_manager.get_setting(_meta_oauth_state_key(state))
+    st = json.loads(raw) if raw else {}
+    if not isinstance(st, dict):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+    # 10-minute expiry
+    try:
+        if (time.time() - float(st.get("created_at") or 0)) > 600:
+            raise HTTPException(status_code=400, detail="OAuth state expired")
+    except Exception:
+        raise HTTPException(status_code=400, detail="OAuth state expired")
+    if str(st.get("agent") or "") and str(st.get("agent") or "") != str((agent or {}).get("username") or ""):
+        raise HTTPException(status_code=403, detail="OAuth state does not match current session")
+
+    ws = _coerce_workspace(str(st.get("workspace") or ""))
+    safe_return = _safe_return_to(return_to or st.get("return_to"))
+    token = str(st.get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing access token in OAuth state. Please restart connect flow.")
+
+    await _save_workspace_whatsapp_oauth(
+        workspace=ws,
+        access_token=token,
+        waba_id=str(waba_id or "").strip(),
+        phone_number_id=str(phone_number_id or "").strip(),
+    )
+    try:
+        await auth_db_manager.delete_setting(_meta_oauth_state_key(state))
+    except Exception:
+        pass
+    return RedirectResponse(url=_safe_return_to(safe_return + ("&" if "?" in safe_return else "?") + "wa=connected"), status_code=302)
 
 
 @app.post("/admin/whatsapp/oauth/choose")

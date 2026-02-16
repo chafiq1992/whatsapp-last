@@ -74,14 +74,32 @@ RETARGETING_JOBS: dict[str, dict] = {}
 
 # Absolute paths
 ROOT_DIR = Path(__file__).resolve().parent.parent
-MEDIA_DIR = ROOT_DIR / "media"
-MEDIA_DIR.mkdir(exist_ok=True)
 
-# (static mount will be added later, after route declarations)
-
-# Load environment variables early so defaults below can be overridden by a local `.env`.
+# Load environment variables as early as possible so paths below can be overridden by env.
 # In managed platforms (Cloud Run/Render), environment variables are injected directly and this is a no-op.
 load_dotenv()
+
+# Cloud Run commonly has a read-only image filesystem; `/tmp` is writable.
+_IS_CLOUD_RUN = bool(os.getenv("K_SERVICE") or os.getenv("K_REVISION"))
+
+def _ensure_dir_safe(p: Path) -> Path:
+    """Never crash import-time init if the filesystem is read-only."""
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    except Exception:
+        try:
+            fb = Path("/tmp/media")
+            fb.mkdir(parents=True, exist_ok=True)
+            return fb
+        except Exception:
+            return p
+
+# Media dir used for uploads + UI attachments. Allow override via env.
+MEDIA_DIR = Path((os.getenv("MEDIA_DIR") or "").strip() or ("/tmp/media" if _IS_CLOUD_RUN else str(ROOT_DIR / "media")))
+MEDIA_DIR = _ensure_dir_safe(MEDIA_DIR)
+
+# (static mount will be added later, after route declarations)
 
 # ── Cloud‑Run helpers ────────────────────────────────────────────
 PORT = int(os.getenv("PORT", "8080"))
@@ -8484,8 +8502,12 @@ async def debug_shopify(_: dict = Depends(require_admin)):
     return info
 
 
-# Mount the media directory to serve uploaded files
-app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
+# Mount the media directory to serve uploaded files.
+# Do not let a missing/unwritable directory crash the process at import time (Cloud Run).
+try:
+    app.mount("/media", StaticFiles(directory=str(MEDIA_DIR), check_dir=False), name="media")
+except Exception:
+    pass
 
 # Configure CORS via environment (comma-separated list). Default to '*'.
 _allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")

@@ -38,8 +38,14 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 from .google_cloud_storage import upload_file_to_gcs, download_file_from_gcs, maybe_signed_url_for, _parse_gcs_url, _get_client
 from prometheus_fastapi_instrumentator import Instrumentator
-from fastapi_limiter import FastAPILimiter
-from fastapi_limiter.depends import RateLimiter
+try:
+    # fastapi-limiter has had breaking API changes across versions.
+    # Do not crash the whole service if the symbol isn't available in the installed version.
+    from fastapi_limiter import FastAPILimiter  # type: ignore
+    from fastapi_limiter.depends import RateLimiter  # type: ignore
+except Exception:  # pragma: no cover
+    FastAPILimiter = None  # type: ignore[assignment]
+    RateLimiter = None  # type: ignore[assignment]
 from .observability.context import (
     get_request_id as _get_request_id,
     set_request_id as _set_request_id,
@@ -8756,7 +8762,8 @@ async def startup():
     # Initialize rate limiter
     if redis_manager.redis_client:
         try:
-            await FastAPILimiter.init(redis_manager.redis_client)
+            if FastAPILimiter is not None:
+                await FastAPILimiter.init(redis_manager.redis_client)  # type: ignore[union-attr]
         except Exception as exc:
             print(f"Rate limiter init failed: {exc}")
     # Ensure conversation_notes table exists for legacy deployments
@@ -8934,24 +8941,24 @@ async def run_survey_scheduler() -> None:
 # Optional rate limit dependencies that no-op when limiter is not initialized
 async def _optional_rate_limit_text(request: _LimiterRequest, response: _LimiterResponse):
     try:
-        if FastAPILimiter.redis:
-            limiter = RateLimiter(times=SEND_TEXT_PER_MIN, seconds=60)
+        if FastAPILimiter is not None and RateLimiter is not None and getattr(FastAPILimiter, "redis", None):
+            limiter = RateLimiter(times=SEND_TEXT_PER_MIN, seconds=60)  # type: ignore[misc]
             return await limiter(request, response)
     except Exception:
         return
 
 async def _optional_rate_limit_media(request: _LimiterRequest, response: _LimiterResponse):
     try:
-        if FastAPILimiter.redis:
-            limiter = RateLimiter(times=SEND_MEDIA_PER_MIN, seconds=60)
+        if FastAPILimiter is not None and RateLimiter is not None and getattr(FastAPILimiter, "redis", None):
+            limiter = RateLimiter(times=SEND_MEDIA_PER_MIN, seconds=60)  # type: ignore[misc]
             return await limiter(request, response)
     except Exception:
         return
 
 async def _optional_rate_limit_track(request: _LimiterRequest, response: _LimiterResponse):
     try:
-        if FastAPILimiter.redis:
-            limiter = RateLimiter(times=TRACK_CLICKS_PER_MIN, seconds=60)
+        if FastAPILimiter is not None and RateLimiter is not None and getattr(FastAPILimiter, "redis", None):
+            limiter = RateLimiter(times=TRACK_CLICKS_PER_MIN, seconds=60)  # type: ignore[misc]
             return await limiter(request, response)
     except Exception:
         return

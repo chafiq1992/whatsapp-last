@@ -99,6 +99,10 @@ def _ensure_dir_safe(p: Path) -> Path:
 MEDIA_DIR = Path((os.getenv("MEDIA_DIR") or "").strip() or ("/tmp/media" if _IS_CLOUD_RUN else str(ROOT_DIR / "media")))
 MEDIA_DIR = _ensure_dir_safe(MEDIA_DIR)
 
+# Data dir used for SQLite DBs and small runtime files. Allow override via env.
+DATA_DIR = Path((os.getenv("DATA_DIR") or "").strip() or ("/tmp/data" if _IS_CLOUD_RUN else str(ROOT_DIR / "data")))
+DATA_DIR = _ensure_dir_safe(DATA_DIR)
+
 # (static mount will be added later, after route declarations)
 
 # ── Cloud‑Run helpers ────────────────────────────────────────────
@@ -109,7 +113,7 @@ WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL = (os.getenv("WHATSAPP_TEMPLATE_HEAD
 # this env name is used there to provide a static header image for templates that require it.
 ORDER_CONFIRM_HEADER_IMAGE_URL = (os.getenv("ORDER_CONFIRM_HEADER_IMAGE_URL") or "").strip()
 REDIS_URL = os.getenv("REDIS_URL", "")
-DB_PATH = os.getenv("DB_PATH") or str(ROOT_DIR / "data" / "whatsapp_messages.db")
+DB_PATH = os.getenv("DB_PATH") or str(DATA_DIR / "whatsapp_messages.db")
 DATABASE_URL = os.getenv("DATABASE_URL")  # optional PostgreSQL URL
 DATABASE_URL_NOVA = os.getenv("DATABASE_URL_NOVA") or os.getenv("DATABASE_URL_IRRANOVA") or ""
 PG_POOL_MIN = int(os.getenv("PG_POOL_MIN", "1"))
@@ -454,7 +458,10 @@ def _derive_tenant_db_path(base_path: str, workspace: str) -> str:
     except Exception:
         pass
     # fallback to standard location
-    return str(ROOT_DIR / "data" / f"whatsapp_messages_{workspace}.db")
+    try:
+        return str(DATA_DIR / f"whatsapp_messages_{workspace}.db")
+    except Exception:
+        return str(ROOT_DIR / "data" / f"whatsapp_messages_{workspace}.db")
 
 TENANT_DB_PATHS: Dict[str, str] = {}
 try:
@@ -470,7 +477,7 @@ except Exception:
     TENANT_DB_PATHS = {}
 
 # Auth/settings DB (shared across workspaces). Defaults to the legacy DB_PATH unless multi-workspace is enabled.
-AUTH_DB_PATH = os.getenv("AUTH_DB_PATH") or (str(ROOT_DIR / "data" / "whatsapp_auth.db") if ENABLE_MULTI_WORKSPACE else DB_PATH)
+AUTH_DB_PATH = os.getenv("AUTH_DB_PATH") or (str(DATA_DIR / "whatsapp_auth.db") if ENABLE_MULTI_WORKSPACE else DB_PATH)
 
 # Tenant DB URLs (Postgres/Supabase): default DATABASE_URL is irrakids, DATABASE_URL_NOVA is irranova.
 # This matches the requested env setup: keep existing DATABASE_URL as-is, only add DATABASE_URL_NOVA.
@@ -1970,7 +1977,11 @@ class DatabaseManager:
         # When True, never route SQLite connections via workspace mapping (used for shared auth DB).
         self.force_single_sqlite = bool(force_single_sqlite)
         if not self.use_postgres:
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            # Never crash import/startup if filesystem is read-only (Cloud Run). SQLite will fail per-request if needed.
+            try:
+                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
         self._pool: Optional[asyncpg.pool.Pool] = None
         # Pool creation can be slow/fail on cold start. Protect with a lock and add backoff
         # so every request doesn't stampede the DB.

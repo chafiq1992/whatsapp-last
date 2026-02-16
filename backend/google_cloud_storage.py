@@ -22,11 +22,36 @@ def _get_client():
     creds_json = os.getenv("GCS_CREDENTIALS_JSON", GCS_CREDENTIALS_JSON)
     credentials = None
 
-    if creds_file and Path(creds_file).exists():
-        credentials = service_account.Credentials.from_service_account_file(creds_file)
-    elif creds_json:
-        creds_info = json.loads(creds_json)
-        credentials = service_account.Credentials.from_service_account_info(creds_info)
+    # Support multiple credential delivery methods:
+    # - GCS_CREDENTIALS_FILE: path to a JSON file
+    # - GCS_CREDENTIALS_FILE: inline JSON (common misconfiguration in Cloud Run UI)
+    # - GCS_CREDENTIALS_JSON: inline JSON
+    # If none are provided/valid, fall back to Application Default Credentials.
+    try:
+        if creds_file:
+            s = str(creds_file).strip()
+            if s.startswith("{"):
+                try:
+                    creds_info = json.loads(s)
+                    credentials = service_account.Credentials.from_service_account_info(creds_info)
+                except Exception:
+                    credentials = None
+            else:
+                try:
+                    if Path(s).exists():
+                        credentials = service_account.Credentials.from_service_account_file(s)
+                except Exception:
+                    credentials = None
+        if credentials is None and creds_json:
+            s2 = str(creds_json).strip()
+            if s2.startswith("{"):
+                try:
+                    creds_info2 = json.loads(s2)
+                    credentials = service_account.Credentials.from_service_account_info(creds_info2)
+                except Exception:
+                    credentials = None
+    except Exception:
+        credentials = None
 
     if storage is None:
         raise RuntimeError("google-cloud-storage library not installed")

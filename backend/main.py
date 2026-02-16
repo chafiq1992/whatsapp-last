@@ -10446,6 +10446,42 @@ async def meta_whatsapp_oauth_callback(
                 except Exception:
                     continue
 
+        # If token only gave us phone IDs (common in granular scopes), derive the WABA from the phone node.
+        # This should work with whatsapp_business_management/whatsapp_business_messaging without business_management.
+        if (not options) and phone_ids_from_token:
+            for pid in sorted(list(phone_ids_from_token)):
+                try:
+                    p_resp = await client.get(
+                        f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{pid}",
+                        params={
+                            "fields": "id,display_phone_number,verified_name,quality_rating,status,whatsapp_business_account",
+                            "access_token": long_token,
+                        },
+                    )
+                    if p_resp.status_code != 200:
+                        continue
+                    p = p_resp.json() or {}
+                    waba_obj = p.get("whatsapp_business_account") or {}
+                    waba_id = ""
+                    if isinstance(waba_obj, dict):
+                        waba_id = str(waba_obj.get("id") or "").strip()
+                    else:
+                        waba_id = str(waba_obj or "").strip()
+                    if not waba_id:
+                        continue
+                    options.append(
+                        {
+                            "waba_id": waba_id,
+                            "phone_number_id": str(p.get("id") or "").strip() or pid,
+                            "display_phone_number": str(p.get("display_phone_number") or "").strip(),
+                            "verified_name": str(p.get("verified_name") or "").strip(),
+                            "status": str(p.get("status") or "").strip(),
+                            "quality_rating": str(p.get("quality_rating") or "").strip(),
+                        }
+                    )
+                except Exception:
+                    continue
+
         # Fallback discovery requiring business_management.
         if not options:
             try:
@@ -10455,7 +10491,12 @@ async def meta_whatsapp_oauth_callback(
                 )
                 if me_resp.status_code != 200:
                     # Missing permission (business_management) or no access → fall back to manual
-                    return _manual_connect_html(f"Businesses discovery failed: {me_resp.text}")
+                    return _manual_connect_html(
+                        "Automatic discovery unavailable.\n"
+                        f"- debug_token waba_ids={sorted(list(waba_ids_from_token))}\n"
+                        f"- debug_token phone_ids={sorted(list(phone_ids_from_token))}\n"
+                        f"- businesses discovery failed: {me_resp.text}"
+                    )
                 me = me_resp.json() or {}
                 businesses = (me.get("businesses") or {}).get("data") or []
                 if not isinstance(businesses, list):

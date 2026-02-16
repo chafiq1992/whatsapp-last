@@ -10370,70 +10370,144 @@ async def meta_whatsapp_oauth_callback(
         except Exception:
             pass
 
-        # 3) Discover WABAs -> phone numbers (avoid /me?fields=businesses which requires business_management)
-        # NOTE: There is no stable "/me/whatsapp_business_accounts" edge for User tokens.
-        # The standard discovery is: User -> Businesses -> owned_whatsapp_business_accounts -> phone_numbers.
+        # 3) Discover WABAs -> phone numbers.
+        #
+        # Preferred path (works without business_management):
+        # - Call debug_token and read granular scopes target_ids, which represent the assets
+        #   the user selected on the "Choose WhatsApp accounts" screen.
+        #
+        # Fallback path (requires business_management):
+        # - /me?fields=businesses{id,name} -> /{business_id}/owned_whatsapp_business_accounts -> /{waba_id}/phone_numbers
         options: list[dict] = []
+        waba_ids_from_token: set[str] = set()
+        phone_ids_from_token: set[str] = set()
         try:
-            me_resp = await client.get(
-                f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/me",
-                params={"fields": "businesses{id,name}", "access_token": long_token},
+            dbg = await client.get(
+                "https://graph.facebook.com/debug_token",
+                params={
+                    "input_token": long_token,
+                    "access_token": f"{META_APP_ID}|{META_APP_SECRET}",
+                },
             )
-            if me_resp.status_code != 200:
-                # Missing permission (business_management) or no access → fall back to manual
-                return _manual_connect_html(f"Businesses discovery failed: {me_resp.text}")
-            me = me_resp.json() or {}
-            businesses = (me.get("businesses") or {}).get("data") or []
-            if not isinstance(businesses, list):
-                businesses = []
-            for b in businesses:
+            if dbg.status_code == 200:
+                d = (dbg.json() or {}).get("data") or {}
+                gs = d.get("granular_scopes") or []
+                if isinstance(gs, list):
+                    for item in gs:
+                        try:
+                            scope = str((item or {}).get("scope") or "").strip()
+                            tids = (item or {}).get("target_ids") or []
+                            if not isinstance(tids, list):
+                                tids = []
+                            tids = [str(x).strip() for x in tids if str(x).strip()]
+                            if scope == "whatsapp_business_management":
+                                for x in tids:
+                                    waba_ids_from_token.add(x)
+                            if scope == "whatsapp_business_messaging":
+                                for x in tids:
+                                    phone_ids_from_token.add(x)
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+
+        # If we can infer WABAs from the token, fetch phone numbers for those WABAs.
+        if waba_ids_from_token:
+            for waba_id in sorted(list(waba_ids_from_token)):
                 try:
-                    bid = str((b or {}).get("id") or "").strip()
-                    if not bid:
-                        continue
-                    w_resp = await client.get(
-                        f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{bid}/owned_whatsapp_business_accounts",
-                        params={"access_token": long_token},
+                    phones_resp = await client.get(
+                        f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/phone_numbers",
+                        params={
+                            "fields": "id,display_phone_number,verified_name,quality_rating,code_verification_status,status",
+                            "access_token": long_token,
+                        },
                     )
-                    if w_resp.status_code != 200:
+                    if phones_resp.status_code != 200:
                         continue
-                    wabas = (w_resp.json() or {}).get("data") or []
-                    if not isinstance(wabas, list):
+                    phones = (phones_resp.json() or {}).get("data") or []
+                    if not isinstance(phones, list):
                         continue
-                    for waba in wabas:
-                        waba_id = str((waba or {}).get("id") or "").strip()
-                        if not waba_id:
+                    for p in phones:
+                        pid = str((p or {}).get("id") or "").strip()
+                        if not pid:
                             continue
-                        phones_resp = await client.get(
-                            f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/phone_numbers",
-                            params={
-                                "fields": "id,display_phone_number,verified_name,quality_rating,code_verification_status,status",
-                                "access_token": long_token,
-                            },
+                        if phone_ids_from_token and pid not in phone_ids_from_token:
+                            continue
+                        options.append(
+                            {
+                                "waba_id": waba_id,
+                                "phone_number_id": pid,
+                                "display_phone_number": str((p or {}).get("display_phone_number") or "").strip(),
+                                "verified_name": str((p or {}).get("verified_name") or "").strip(),
+                                "status": str((p or {}).get("status") or "").strip(),
+                                "quality_rating": str((p or {}).get("quality_rating") or "").strip(),
+                            }
                         )
-                        if phones_resp.status_code != 200:
-                            continue
-                        phones = (phones_resp.json() or {}).get("data") or []
-                        if not isinstance(phones, list):
-                            continue
-                        for p in phones:
-                            pid = str((p or {}).get("id") or "").strip()
-                            if not pid:
-                                continue
-                            options.append(
-                                {
-                                    "waba_id": waba_id,
-                                    "phone_number_id": pid,
-                                    "display_phone_number": str((p or {}).get("display_phone_number") or "").strip(),
-                                    "verified_name": str((p or {}).get("verified_name") or "").strip(),
-                                    "status": str((p or {}).get("status") or "").strip(),
-                                    "quality_rating": str((p or {}).get("quality_rating") or "").strip(),
-                                }
-                            )
                 except Exception:
                     continue
-        except Exception as exc:
-            return _manual_connect_html(f"Discovery error: {exc}")
+
+        # Fallback discovery requiring business_management.
+        if not options:
+            try:
+                me_resp = await client.get(
+                    f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/me",
+                    params={"fields": "businesses{id,name}", "access_token": long_token},
+                )
+                if me_resp.status_code != 200:
+                    # Missing permission (business_management) or no access → fall back to manual
+                    return _manual_connect_html(f"Businesses discovery failed: {me_resp.text}")
+                me = me_resp.json() or {}
+                businesses = (me.get("businesses") or {}).get("data") or []
+                if not isinstance(businesses, list):
+                    businesses = []
+                for b in businesses:
+                    try:
+                        bid = str((b or {}).get("id") or "").strip()
+                        if not bid:
+                            continue
+                        w_resp = await client.get(
+                            f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{bid}/owned_whatsapp_business_accounts",
+                            params={"access_token": long_token},
+                        )
+                        if w_resp.status_code != 200:
+                            continue
+                        wabas = (w_resp.json() or {}).get("data") or []
+                        if not isinstance(wabas, list):
+                            continue
+                        for waba in wabas:
+                            waba_id = str((waba or {}).get("id") or "").strip()
+                            if not waba_id:
+                                continue
+                            phones_resp = await client.get(
+                                f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/phone_numbers",
+                                params={
+                                    "fields": "id,display_phone_number,verified_name,quality_rating,code_verification_status,status",
+                                    "access_token": long_token,
+                                },
+                            )
+                            if phones_resp.status_code != 200:
+                                continue
+                            phones = (phones_resp.json() or {}).get("data") or []
+                            if not isinstance(phones, list):
+                                continue
+                            for p in phones:
+                                pid = str((p or {}).get("id") or "").strip()
+                                if not pid:
+                                    continue
+                                options.append(
+                                    {
+                                        "waba_id": waba_id,
+                                        "phone_number_id": pid,
+                                        "display_phone_number": str((p or {}).get("display_phone_number") or "").strip(),
+                                        "verified_name": str((p or {}).get("verified_name") or "").strip(),
+                                        "status": str((p or {}).get("status") or "").strip(),
+                                        "quality_rating": str((p or {}).get("quality_rating") or "").strip(),
+                                    }
+                                )
+                    except Exception:
+                        continue
+            except Exception as exc:
+                return _manual_connect_html(f"Discovery error: {exc}")
 
     if not options:
         # If we couldn't discover options automatically, offer manual completion.

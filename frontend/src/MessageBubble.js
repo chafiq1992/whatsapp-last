@@ -60,6 +60,23 @@ function parsePriceNumber(raw) {
   }
 }
 
+function formatMad(n) {
+  try {
+    return `${Number(n).toFixed(2)} MAD`;
+  } catch {
+    return "";
+  }
+}
+
+function stripWhatsAppFormatting(s) {
+  // WhatsApp supports *bold* _italic_ ~strike~ `mono`
+  try {
+    return String(s || "").replace(/[*_~`]/g, "").trim();
+  } catch {
+    return String(s || "").trim();
+  }
+}
+
 export default function MessageBubble({ msg, self, catalogProducts = {}, highlightQuery = "", onForward, quotedMessage = null, onReply, onReact, rowKey = null, highlighted = false }) {
   const API_BASE = process.env.REACT_APP_API_BASE || "";
   const containerRef = useRef(null);
@@ -372,9 +389,10 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
     const info = catalogProducts[retailerId] || {};
     const rawImage = variantData?.image_src || info.image || null;
     const image = rawImage && /^https?:\/\//i.test(rawImage) ? `${API_BASE}/proxy-image?url=${encodeURIComponent(rawImage)}` : rawImage;
-    const title = variantData?.title || String(msg?.caption || "").trim() || "Product";
-    const priceNum = parsePriceNumber(variantData?.price ?? info.price);
-    const priceStr = Number.isFinite(priceNum) && priceNum > 0 ? `${priceNum.toFixed(2)} MAD` : null;
+    const title = variantData?.title || stripWhatsAppFormatting(String(msg?.caption || "").trim()) || "Product";
+    const saleNum = parsePriceNumber(variantData?.price ?? info.price);
+    const compareNum = parsePriceNumber(variantData?.compare_at_price);
+    const hasCompare = Number.isFinite(saleNum) && saleNum > 0 && Number.isFinite(compareNum) && compareNum > saleNum;
     return (
       <div className="mb-2 flex items-center rounded-xl bg-white/95 border border-blue-200 shadow-sm p-3 gap-3">
         <div className="flex-shrink-0">
@@ -395,7 +413,18 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
           <div className="font-semibold text-gray-800 leading-tight truncate">{title}</div>
           <div className="mt-0.5 text-xs text-gray-600 flex flex-wrap gap-2">
             {!!retailerId && <span className="truncate"><span className="font-medium text-blue-700">Variant:</span> <span className="font-semibold">{retailerId}</span></span>}
-            {priceStr && <><span className="text-gray-400">|</span><span><span className="font-medium text-blue-700">Price:</span> <span className="font-semibold">{priceStr}</span></span></>}
+            {(Number.isFinite(saleNum) && saleNum > 0) && (
+              <>
+                <span className="text-gray-400">|</span>
+                <span>
+                  <span className="font-medium text-blue-700">Price:</span>{" "}
+                  <span className="font-semibold">{formatMad(saleNum)}</span>
+                  {hasCompare && (
+                    <span className="ml-2 text-gray-400 line-through">{formatMad(compareNum)}</span>
+                  )}
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -923,9 +952,10 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
             const rawImage = variantData?.image_src || info.image || null;
              const image = rawImage && /^https?:\/\//i.test(rawImage) ? `${API_BASE}/proxy-image?url=${encodeURIComponent(rawImage)}` : rawImage;
             // Show only variant title (no product title)
-            const title = variantData?.title || msg?.caption || "";
-             const priceNum = parsePriceNumber(variantData?.price ?? info.price);
-             const priceStr = Number.isFinite(priceNum) && priceNum > 0 ? `${priceNum.toFixed(2)} MAD` : null;
+            const title = variantData?.title || stripWhatsAppFormatting(msg?.caption) || "";
+             const saleNum = parsePriceNumber(variantData?.price ?? info.price);
+             const compareNum = parsePriceNumber(variantData?.compare_at_price);
+             const hasCompare = Number.isFinite(saleNum) && saleNum > 0 && Number.isFinite(compareNum) && compareNum > saleNum;
              return (
                <div className="flex items-center rounded-xl bg-white/95 border border-blue-200 shadow-sm p-3 gap-3">
                  <div className="flex-shrink-0">
@@ -950,10 +980,16 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
                      {!!retailerId && (
                        <span className="flex items-center"><span className="font-medium text-blue-700">Variant ID:</span><span className="ml-1 font-semibold">{retailerId}</span></span>
                      )}
-                     {priceStr && (
+                     {(Number.isFinite(saleNum) && saleNum > 0) && (
                        <>
                          <span className="text-gray-400">|</span>
-                         <span className="flex items-center"><span className="font-medium text-blue-700">Price:</span><span className="ml-1 font-semibold">{priceStr}</span></span>
+                         <span className="flex items-center">
+                           <span className="font-medium text-blue-700">Price:</span>
+                           <span className="ml-1 font-semibold">{formatMad(saleNum)}</span>
+                           {hasCompare && (
+                             <span className="ml-2 text-gray-400 line-through">{formatMad(compareNum)}</span>
+                           )}
+                         </span>
                        </>
                      )}
                    </div>

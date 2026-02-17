@@ -372,6 +372,24 @@ export default function CatalogPanel({
     }
   };
 
+  const parsePriceNumber = (raw) => {
+    try {
+      if (raw == null) return NaN;
+      if (typeof raw === 'number') return raw;
+      const s = String(raw).trim();
+      if (!s) return NaN;
+      const m = s.replace(',', '.').match(/-?\d+(?:\.\d+)?/);
+      if (!m) return NaN;
+      const n = Number(m[0]);
+      return Number.isFinite(n) ? n : NaN;
+    } catch {
+      return NaN;
+    }
+  };
+  const formatMad = (n) => {
+    try { return `MAD ${Number(n).toFixed(2)}`; } catch { return ''; }
+  };
+
   // Send interactive catalog product instantly via WebSocket (caption uses current price when available)
   const sendInteractiveProduct = async (product) => {
     if (!activeUser?.user_id || !product?.retailer_id) return;
@@ -380,18 +398,31 @@ export default function CatalogPanel({
       const rid = String(product.retailer_id || product.product_retailer_id || product.id || "");
       const info = await fetchVariantInfo(rid);
       if (info && (info.price || info.id || info.title)) {
-        const num = Number(info.price);
-        const priceStr = Number.isFinite(num) ? num.toFixed(2) : (info.price ? String(info.price) : "");
-        // Only include price, variant title, and variant id (do not include product title)
+        const p = parsePriceNumber(info.price);
+        const c = parsePriceNumber(info.compare_at_price);
+        // Prefer showing sale price prominently (WhatsApp formatting: *bold*, ~strike~)
+        let sale = p;
+        let compare = c;
+        if (Number.isFinite(p) && Number.isFinite(c) && p > 0 && c > 0) {
+          sale = Math.min(p, c);
+          compare = Math.max(p, c);
+        }
         const parts = [];
-        if (priceStr) parts.push(priceStr);
+        if (Number.isFinite(sale) && sale > 0) {
+          parts.push(`*${formatMad(sale)}*`);
+          if (Number.isFinite(compare) && compare > sale) {
+            parts.push(`~${formatMad(compare)}~`);
+          }
+        } else if (info.price) {
+          parts.push(`*${String(info.price)}*`);
+        }
         if (info.title) parts.push(String(info.title));
         if (info.id) parts.push(String(info.id));
         caption = parts.join(' • ');
       } else if (product?.price) {
         // Fallback: price + retailer id
-        const num = Number(product.price);
-        const priceStr = Number.isFinite(num) ? num.toFixed(2) : String(product.price);
+        const num = parsePriceNumber(product.price);
+        const priceStr = Number.isFinite(num) ? `*${formatMad(num)}*` : (product.price ? `*${String(product.price)}*` : "");
         caption = [priceStr, String(rid)].filter(Boolean).join(' • ');
       }
     } catch {}

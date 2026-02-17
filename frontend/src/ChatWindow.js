@@ -193,6 +193,9 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     setIsInitialLoading(true);
     conversationIdRef.current = uid;
     setMessages([]);
+    // IMPORTANT: reset Virtuoso's prepend offset when switching conversations.
+    // If this accumulates across chats, the virtual list can render duplicate rows or blank space while scrolling.
+    setFirstItemIndex(0);
     setOffset(0);
     setHasMore(true);
     setUnreadSeparatorIndex(null);
@@ -719,8 +722,10 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     } finally {
       requestAnimationFrame(() => {
         const after = groupedLenRef.current || 0;
-        const delta = Math.max(0, after - before);
-        if (delta > 0) setFirstItemIndex((v) => v + delta);
+        // When prepending, Virtuoso expects firstItemIndex to shift by number of newly prepended rows.
+        // Guard against negative/NaN, and don't accumulate across conversations (reset above).
+        const delta = Math.max(0, Number(after) - Number(before));
+        if (Number.isFinite(delta) && delta > 0) setFirstItemIndex((v) => v + delta);
         setLoadingOlder(false);
       });
     }

@@ -416,14 +416,15 @@ export default function CatalogPanel({
         } else if (info.price) {
           parts.push(`*${String(info.price)}*`);
         }
+        // Customer-facing caption: show only pricing + variant title. Do NOT include variant id.
         if (info.title) parts.push(String(info.title));
-        if (info.id) parts.push(String(info.id));
         caption = parts.join(' • ');
       } else if (product?.price) {
         // Fallback: price + retailer id
         const num = parsePriceNumber(product.price);
         const priceStr = Number.isFinite(num) ? `*${formatMad(num)}*` : (product.price ? `*${String(product.price)}*` : "");
-        caption = [priceStr, String(rid)].filter(Boolean).join(' • ');
+        // Customer-facing caption: do NOT include variant id.
+        caption = [priceStr].filter(Boolean).join(' • ');
       }
     } catch {}
     sendOptimisticMessage({

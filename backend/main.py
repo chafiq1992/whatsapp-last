@@ -5323,7 +5323,8 @@ class MessageProcessor:
                         else:
                             # Final fallback to text
                             wa_response = await self.whatsapp_messenger.send_text_message(
-                                user_id, caption or str(retailer_id)
+                                # Never fall back to sending the variant id as customer-facing text.
+                                user_id, caption or "Product"
                             )
                             if message.get("needs_bilingual_prompt"):
                                 wa_msg_id = None

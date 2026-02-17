@@ -106,10 +106,43 @@ def _resolve_store_from_workspace(store: str | None, x_workspace: str | None) ->
         ws = str(x_workspace or "").strip()
         if not ws:
             return None
-        cand = ws.upper()
-        # Only accept if configured; otherwise keep default store behavior.
-        _load_store_config_for_prefix(cand)
-        return cand
+        ws_up = ws.upper()
+
+        # 1) Direct mapping: workspace id == env prefix (e.g. irrakids -> IRRAKIDS)
+        try:
+            _load_store_config_for_prefix(ws_up)
+            return ws_up
+        except Exception:
+            pass
+
+        # 2) Per-workspace override env: SHOPIFY_STORE_PREFIX_<WS>=IRRAKIDS
+        try:
+            override = (os.getenv(f"SHOPIFY_STORE_PREFIX_{ws_up}", "") or "").strip().upper()
+            if override:
+                _load_store_config_for_prefix(override)
+                return override
+        except Exception:
+            pass
+
+        # 3) Global map env: SHOPIFY_WORKSPACE_STORE_MAP="irrakids:IRRAKIDS,irranova:IRRANOVA"
+        try:
+            raw_map = (os.getenv("SHOPIFY_WORKSPACE_STORE_MAP", "") or "").strip()
+            if raw_map:
+                pairs = [p.strip() for p in raw_map.split(",") if p.strip()]
+                mapping = {}
+                for p in pairs:
+                    if ":" not in p:
+                        continue
+                    k, v = p.split(":", 1)
+                    mapping[str(k).strip().lower()] = str(v).strip().upper()
+                mapped = mapping.get(ws.lower())
+                if mapped:
+                    _load_store_config_for_prefix(mapped)
+                    return mapped
+        except Exception:
+            pass
+
+        return None
     except Exception:
         return None
 

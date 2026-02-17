@@ -390,8 +390,10 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
     const rawImage = variantData?.image_src || info.image || null;
     const image = rawImage && /^https?:\/\//i.test(rawImage) ? `${API_BASE}/proxy-image?url=${encodeURIComponent(rawImage)}` : rawImage;
     const title = variantData?.title || stripWhatsAppFormatting(String(msg?.caption || "").trim()) || "Product";
-    const saleNum = parsePriceNumber(variantData?.price ?? info.price);
-    const compareNum = parsePriceNumber(variantData?.compare_at_price);
+    const p0 = parsePriceNumber(variantData?.price ?? info.price);
+    const c0 = parsePriceNumber(variantData?.compare_at_price);
+    const saleNum = (Number.isFinite(p0) && Number.isFinite(c0) && p0 > 0 && c0 > 0) ? Math.min(p0, c0) : p0;
+    const compareNum = (Number.isFinite(p0) && Number.isFinite(c0) && p0 > 0 && c0 > 0) ? Math.max(p0, c0) : c0;
     const hasCompare = Number.isFinite(saleNum) && saleNum > 0 && Number.isFinite(compareNum) && compareNum > saleNum;
     return (
       <div className="mb-2 flex items-center rounded-xl bg-white/95 border border-blue-200 shadow-sm p-3 gap-3">
@@ -953,8 +955,10 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
              const image = rawImage && /^https?:\/\//i.test(rawImage) ? `${API_BASE}/proxy-image?url=${encodeURIComponent(rawImage)}` : rawImage;
             // Show only variant title (no product title)
             const title = variantData?.title || stripWhatsAppFormatting(msg?.caption) || "";
-             const saleNum = parsePriceNumber(variantData?.price ?? info.price);
-             const compareNum = parsePriceNumber(variantData?.compare_at_price);
+             const p0 = parsePriceNumber(variantData?.price ?? info.price);
+             const c0 = parsePriceNumber(variantData?.compare_at_price);
+             const saleNum = (Number.isFinite(p0) && Number.isFinite(c0) && p0 > 0 && c0 > 0) ? Math.min(p0, c0) : p0;
+             const compareNum = (Number.isFinite(p0) && Number.isFinite(c0) && p0 > 0 && c0 > 0) ? Math.max(p0, c0) : c0;
              const hasCompare = Number.isFinite(saleNum) && saleNum > 0 && Number.isFinite(compareNum) && compareNum > saleNum;
              return (
                <div className="flex items-center rounded-xl bg-white/95 border border-blue-200 shadow-sm p-3 gap-3">

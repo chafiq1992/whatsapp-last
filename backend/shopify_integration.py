@@ -1306,6 +1306,32 @@ async def create_shopify_order(
     # not `customer_id` at the root of draft_order. Optionally create the customer first.
     order_block = {}
     customer_id = data.get("customer_id")
+    # Customer IDs are store-specific. The UI can sometimes send a customer_id created in a different
+    # workspace/store; Shopify draft order creation may then fail with 422 "Record is invalid".
+    try:
+        cid_str = str(customer_id).strip() if customer_id is not None else ""
+    except Exception:
+        cid_str = ""
+    if cid_str:
+        if not cid_str.isdigit():
+            warnings.append("Ignoring non-numeric customer_id (Shopify ids are numeric).")
+            customer_id = None
+        else:
+            try:
+                async with httpx.AsyncClient() as client:
+                    chk = await client.get(f"{base}/customers/{cid_str}.json", timeout=10, **extra_args)
+                    if chk.status_code == 404:
+                        warnings.append("customer_id not found in this store; will resolve by phone/email instead.")
+                        customer_id = None
+                    elif chk.status_code == 403:
+                        warnings.append("Shopify token lacks read_customers scope; cannot validate customer_id, using inline customer fields.")
+                        customer_id = None
+                    elif chk.status_code >= 400:
+                        warnings.append("Could not validate customer_id in this store; using inline customer fields.")
+                        customer_id = None
+            except Exception:
+                # Best-effort: if validation fails due to network issues, keep existing behavior.
+                pass
     # If no explicit id provided, try to resolve by phone best-effort
     if not customer_id:
         try:
@@ -1463,19 +1489,41 @@ async def create_shopify_order(
     DRAFT_ORDERS_ENDPOINT = f"{base}/draft_orders.json"
     def _shopify_err_detail(resp: httpx.Response) -> str:
         # Shopify commonly returns: {"errors": "..."} (string or dict) or {error, errors, message}.
+        req_id = ""
+        try:
+            req_id = str(resp.headers.get("x-request-id") or resp.headers.get("X-Request-Id") or "").strip()
+        except Exception:
+            req_id = ""
         try:
             payload = resp.json()
             if isinstance(payload, dict):
                 if payload.get("errors") is not None:
-                    return f"{payload.get('errors')}"
+                    try:
+                        err_obj = payload.get("errors")
+                        if isinstance(err_obj, (dict, list)):
+                            msg = json.dumps(err_obj, ensure_ascii=False)
+                        else:
+                            msg = str(err_obj)
+                    except Exception:
+                        msg = f"{payload.get('errors')}"
+                    return f"(shopify_request_id={req_id}) {msg}".strip() if req_id else msg
                 if payload.get("error") is not None:
-                    return f"{payload.get('error')}"
+                    msg = f"{payload.get('error')}"
+                    return f"(shopify_request_id={req_id}) {msg}".strip() if req_id else msg
                 if payload.get("message") is not None:
-                    return f"{payload.get('message')}"
+                    msg = f"{payload.get('message')}"
+                    return f"(shopify_request_id={req_id}) {msg}".strip() if req_id else msg
+                # Fallback: stringify the full response payload
+                try:
+                    msg = json.dumps(payload, ensure_ascii=False)
+                except Exception:
+                    msg = str(payload)
+                return f"(shopify_request_id={req_id}) {msg}".strip() if req_id else msg
         except Exception:
             pass
         try:
-            return (resp.text or "").strip()
+            msg = (resp.text or "").strip()
+            return f"(shopify_request_id={req_id}) {msg}".strip() if req_id else msg
         except Exception:
             return ""
 

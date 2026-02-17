@@ -97,22 +97,79 @@ def _canonical_hmac_msg(qp: List[Tuple[str, str]]) -> str:
 
 
 def _verify_shopify_hmac(*, request: Request, client_secret: str) -> tuple[bool, dict]:
-    qp = [(k, str(v)) for (k, v) in request.query_params.multi_items()]
-    provided = (request.query_params.get("hmac") or "").strip().lower()
-    keys = sorted({k for (k, _) in qp})
+    """
+    Verify Shopify OAuth callback HMAC.
+
+    Shopify canonicalization can be sensitive to encoding differences across proxies/frameworks.
+    We therefore try a few equivalent canonicalization strategies:
+    - urlencode() of decoded params (common approach)
+    - raw join of decoded key=value pairs (matches Shopify examples in multiple languages)
+    Each with/without the `host` param.
+    """
+    # Prefer raw query string from ASGI scope to avoid framework re-encoding surprises.
+    raw_qs = ""
+    try:
+        raw_qs = (request.scope.get("query_string") or b"").decode("utf-8", errors="ignore")
+    except Exception:
+        raw_qs = ""
+
+    # Parse + decode; keep blank values.
+    try:
+        qp_list = urllib.parse.parse_qsl(raw_qs, keep_blank_values=True)
+    except Exception:
+        qp_list = []
+    if not qp_list:
+        # Fallback to Starlette's parsed params
+        qp_list = [(k, str(v)) for (k, v) in request.query_params.multi_items()]
+
+    provided = ""
+    try:
+        provided = (dict(qp_list).get("hmac") or "").strip().lower()
+    except Exception:
+        provided = (request.query_params.get("hmac") or "").strip().lower()
+
+    keys = sorted({k for (k, _) in qp_list})
     if not provided:
-        return False, {"error": "invalid_hmac", "reason": "missing_hmac", "keys": keys}
-    msg = _canonical_hmac_msg(qp)
-    expected = hmac.new(client_secret.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest().lower()
-    if hmac.compare_digest(expected, provided):
-        return True, {"ok": True}
-    # Fallback: exclude host (some proxies mutate host param)
-    qp_no_host = [(k, v) for (k, v) in qp if k != "host"]
-    msg2 = _canonical_hmac_msg(qp_no_host)
-    expected2 = hmac.new(client_secret.encode("utf-8"), msg2.encode("utf-8"), hashlib.sha256).hexdigest().lower()
-    if hmac.compare_digest(expected2, provided):
-        return True, {"ok": True, "used_fallback": "exclude_host"}
-    return False, {"error": "invalid_hmac", "keys": keys, "raw_len": len(msg)}
+        return False, {"error": "invalid_hmac", "reason": "missing_hmac", "keys": keys, "raw_len": len(raw_qs or "")}
+
+    def _hmac_hex(message: str) -> str:
+        return hmac.new(client_secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest().lower()
+
+    # Strategy A: urlencode of decoded params (current behavior)
+    msg_a = _canonical_hmac_msg(qp_list)
+    exp_a = _hmac_hex(msg_a)
+    if hmac.compare_digest(exp_a, provided):
+        return True, {"ok": True, "method": "urlencode"}
+
+    # Strategy A2: urlencode excluding host
+    qp_no_host = [(k, v) for (k, v) in qp_list if k != "host"]
+    msg_a2 = _canonical_hmac_msg(qp_no_host)
+    exp_a2 = _hmac_hex(msg_a2)
+    if hmac.compare_digest(exp_a2, provided):
+        return True, {"ok": True, "method": "urlencode", "used_fallback": "exclude_host"}
+
+    # Strategy B: raw join "k=v" with decoded values (Shopify docs examples)
+    def _join_pairs(pairs: List[Tuple[str, str]]) -> str:
+        keep = [(k, v) for (k, v) in pairs if k not in ("hmac", "signature")]
+        keep.sort(key=lambda kv: (kv[0], kv[1]))
+        return "&".join([f"{k}={v}" for (k, v) in keep])
+
+    msg_b = _join_pairs(qp_list)
+    exp_b = _hmac_hex(msg_b)
+    if hmac.compare_digest(exp_b, provided):
+        return True, {"ok": True, "method": "join"}
+
+    msg_b2 = _join_pairs(qp_no_host)
+    exp_b2 = _hmac_hex(msg_b2)
+    if hmac.compare_digest(exp_b2, provided):
+        return True, {"ok": True, "method": "join", "used_fallback": "exclude_host"}
+
+    return False, {
+        "error": "invalid_hmac",
+        "keys": keys,
+        "raw_len": len(msg_a or ""),
+        "raw_qs_len": len(raw_qs or ""),
+    }
 
 
 def _oauth_enabled_workspaces() -> set[str]:

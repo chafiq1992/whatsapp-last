@@ -636,9 +636,11 @@ async def shopify_variant(
     ws = _normalize_ws_id(x_workspace)
     oauth = await _get_shopify_oauth_record(ws)
     store = _resolve_store_from_workspace(store, x_workspace)
-    if oauth:
+    oauth_shop = str((oauth or {}).get("shop") or "").strip()
+    oauth_token = str((oauth or {}).get("access_token") or "").strip()
+    if oauth_shop and oauth_token:
         endpoint = f"{_oauth_admin_api_base(str(oauth.get('shop') or ''))}/variants/{variant_id}.json"
-        extra_args = {"headers": {"X-Shopify-Access-Token": str(oauth.get("access_token") or "").strip()}}
+        extra_args = {"headers": {"X-Shopify-Access-Token": oauth_token}}
     else:
         endpoint = f"{admin_api_base(store)}/variants/{variant_id}.json"
         extra_args = _client_args(store=store)
@@ -667,8 +669,12 @@ async def shopify_variant(
             try:
                 product_id = variant.get("product_id")
                 if product_id:
-                    prod_endpoint = f"{admin_api_base(store)}/products/{product_id}.json"
-                    p_resp = await client.get(prod_endpoint, **_client_args(store=store))
+                    if oauth_shop and oauth_token:
+                        prod_endpoint = f"{_oauth_admin_api_base(oauth_shop)}/products/{product_id}.json"
+                        p_resp = await client.get(prod_endpoint, headers={"X-Shopify-Access-Token": oauth_token})
+                    else:
+                        prod_endpoint = f"{admin_api_base(store)}/products/{product_id}.json"
+                        p_resp = await client.get(prod_endpoint, **_client_args(store=store))
                     if p_resp.status_code == 200:
                         prod = (p_resp.json() or {}).get("product") or {}
                         variant["product_title"] = prod.get("title", "")
@@ -732,7 +738,12 @@ async def fetch_customer_by_phone(phone_number: str, store: str | None = None):
                 "limit": 1,
                 "order": "created_at desc"
             }
-            orders_resp = await client.get(f"{admin_api_base()}/orders.json", params=order_params, timeout=10, **_client_args())
+            orders_resp = await client.get(
+                f"{admin_api_base(store)}/orders.json",
+                params=order_params,
+                timeout=10,
+                **_client_args(store=store),
+            )
             orders_data = orders_resp.json()
             orders_list = orders_data.get('orders', [])
 
@@ -1261,6 +1272,7 @@ async def create_shopify_order(
     x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
     store = _resolve_store_from_workspace(store, x_workspace)
+    store_used = store or "DEFAULT"
     base = admin_api_base(store)
     warnings: list[str] = []
     shipping_title = data.get("delivery", "Home Delivery")
@@ -1459,9 +1471,12 @@ async def create_shopify_order(
             r = exc.response
             detail = _shopify_err_detail(r) if r is not None else str(exc)
             # Preserve Shopify status codes (401/403/404/422) so the UI can show a real cause.
-            raise HTTPException(status_code=int(getattr(r, "status_code", 502) or 502), detail=detail[:2000])
+            raise HTTPException(
+                status_code=int(getattr(r, "status_code", 502) or 502),
+                detail=f"[store={store_used}] {detail}"[:2000],
+            )
         except httpx.RequestError as exc:
-            raise HTTPException(status_code=502, detail=f"Failed to reach Shopify: {str(exc)[:500]}")
+            raise HTTPException(status_code=502, detail=f"[store={store_used}] Failed to reach Shopify: {str(exc)[:500]}")
 
         # Draft admin URL
         domain = base.replace("https://", "").replace("http://", "").split("/admin/api", 1)[0]
@@ -1474,6 +1489,7 @@ async def create_shopify_order(
                 "draft_order_id": draft_id,
                 "shopify_admin_link": draft_admin_url,
                 "completed": False,
+                "store": store_used,
                 "message": (
                     "Draft order created. Open the link in Shopify admin, and click 'Create order' with 'Payment due later' when customer pays."
                 ),
@@ -1494,9 +1510,12 @@ async def create_shopify_order(
         except httpx.HTTPStatusError as exc:
             r = exc.response
             detail = _shopify_err_detail(r) if r is not None else str(exc)
-            raise HTTPException(status_code=int(getattr(r, "status_code", 502) or 502), detail=detail[:2000])
+            raise HTTPException(
+                status_code=int(getattr(r, "status_code", 502) or 502),
+                detail=f"[store={store_used}] {detail}"[:2000],
+            )
         except httpx.RequestError as exc:
-            raise HTTPException(status_code=502, detail=f"Failed to reach Shopify: {str(exc)[:500]}")
+            raise HTTPException(status_code=502, detail=f"[store={store_used}] Failed to reach Shopify: {str(exc)[:500]}")
         order_id = (
             (comp_json.get("draft_order") or {}).get("order_id")
             or (comp_json.get("order") or {}).get("id")
@@ -1543,6 +1562,7 @@ async def create_shopify_order(
             **({"order_id": order_id} if order_id else {}),
             "shopify_admin_link": draft_admin_url,
             **({"order_admin_link": order_admin_link} if order_admin_link else {}),
+            "store": store_used,
             "message": "Draft order completed with payment pending." if order_id else "Draft order created, but completion response did not include order id.",
             **({"warnings": warnings} if warnings else {})
         }

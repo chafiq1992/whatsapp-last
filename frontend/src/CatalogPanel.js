@@ -358,7 +358,11 @@ export default function CatalogPanel({
   const fetchVariantInfo = async (retailerId) => {
     try {
       if (!retailerId) return null;
-      const res = await api.get(`${API_BASE}/shopify-variant/${retailerId}`);
+      let ws = 'irranova';
+      try { ws = (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch {}
+      const res = await api.get(`${API_BASE}/shopify-variant/${retailerId}`, {
+        headers: { 'X-Workspace': ws },
+      });
       const v = res?.data || null;
       if (!v) return null;
       return {

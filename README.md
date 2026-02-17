@@ -65,6 +65,31 @@ Set **one** of the following (per-workspace recommended):
 
 If no secret is set, the backend will still accept the webhook, but **anyone could POST** to that URL (not recommended for production).
 
+## Shopify Website WhatsApp icon tracking (click → chat attribution)
+
+This repo supports **solid attribution** for the Shopify website WhatsApp icon funnel:
+
+- **Click recorded**: `/track/wa` creates a `click_id` and stores it in `whatsapp_clicks`.
+- **Customer redirected to WhatsApp** with a prefilled hidden marker line:
+
+  `WA_CLICK_ID: <hex>`
+
+- **On first inbound message**, the backend extracts that marker, attributes the conversation, and strips the marker line so agents never see it.
+
+### Shopify theme install (recommended)
+
+Add this script tag to your Shopify theme (or via an App Embed / custom code block):
+
+```html
+<script async src="https://<your-inbox-domain>/track/shopify-whatsapp.js?workspace=irrakids"></script>
+```
+
+This snippet rewrites any WhatsApp links (`wa.me` / `api.whatsapp.com/send` / `web.whatsapp.com/send`) to go through:
+
+`/track/wa?u=<original-url>&workspace=<ws>`
+
+so clicks are recorded and the WhatsApp prefilled text includes the `WA_CLICK_ID` marker line.
+
 ## SQLite database
 
 Messages are stored in a local SQLite file. By default the backend writes to

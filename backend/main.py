@@ -12648,6 +12648,248 @@ async def track_whatsapp_click(
         logging.getLogger(__name__).warning("track_whatsapp_click failed: %s", exc)
         return {"ok": False}
 
+
+@app.get("/track/wa")
+async def track_and_redirect_whatsapp(
+    request: Request,
+    u: str = Query("", description="Original WhatsApp URL (wa.me or api.whatsapp.com/send)"),
+    text: str | None = Query(None, description="Optional override message text (will be combined with WA_CLICK_ID marker)"),
+    page_url: str | None = Query(None, description="Page URL where click happened (optional)"),
+    product_id: str | None = Query(None, description="Optional product id"),
+    shop_domain: str | None = Query(None, description="Optional shop domain"),
+    _: Any = Depends(_optional_rate_limit_track),
+):
+    """Track a website WhatsApp click and redirect to WhatsApp with a prefilled WA_CLICK_ID marker.
+
+    This is designed for Shopify themes:
+    - Theme links point to /track/wa?u=<encoded-whatsapp-url>&workspace=<ws>
+    - Backend records click_id and redirects to WhatsApp with `text` containing:
+        WA_CLICK_ID: <hex>
+      which we later strip from the visible inbox message while attributing the conversation.
+    """
+    # Safety: keep this endpoint public, but prevent open redirects to arbitrary destinations.
+    try:
+        raw = (u or "").strip()
+        if not raw:
+            raise HTTPException(status_code=400, detail="missing u")
+        parsed = urlparse(raw)
+        if (parsed.scheme or "").lower() not in ("https", "http"):
+            raise HTTPException(status_code=400, detail="invalid u")
+        host = (parsed.hostname or "").lower().strip()
+        allowed_hosts = {"wa.me", "api.whatsapp.com", "web.whatsapp.com"}
+        if host not in allowed_hosts:
+            raise HTTPException(status_code=400, detail="u host not allowed")
+
+        # Normalize a whatsapp "send" URL into a URL we can mutate.
+        # We preserve the original host/path/phone/query except for `text` param.
+        qs = parse_qs(parsed.query or "", keep_blank_values=True)
+        existing_text = ""
+        try:
+            existing_text = (qs.get("text") or [""])[0] or ""
+        except Exception:
+            existing_text = ""
+        base_text = (text if isinstance(text, str) else "") or existing_text or "Hi"
+
+        # Generate + persist click_id (best-effort DB logging).
+        click_id = uuid.uuid4().hex
+        ts = datetime.utcnow().isoformat()
+        # Prefer explicit page_url param, fallback to Referer.
+        pu = (page_url or "").strip() or (request.headers.get("referer") or "").strip() or None
+        sd = (shop_domain or "").strip() or None
+        pid = (product_id or "").strip() or None
+        ua = (request.headers.get("user-agent") or "").strip() or None
+        if ua and len(ua) > 300:
+            ua = ua[:300]
+        # NOTE: request.client is our proxy -> not customer (Cloudflare/Shopify), so ip_hash is weak here.
+        # We still log best-effort for debugging, but attribution uses the click_id marker.
+        ip_hash = None
+        try:
+            ip = request.client.host  # type: ignore[union-attr]
+            if ip:
+                ip_hash = hashlib.sha256(f"{TRACK_IP_SALT}|{ip}".encode("utf-8")).hexdigest()[:32]
+        except Exception:
+            ip_hash = None
+        try:
+            await asyncio.wait_for(
+                db_manager.log_whatsapp_click(
+                    click_id=click_id,
+                    ts=ts,
+                    page_url=pu,
+                    product_id=pid,
+                    shop_domain=sd,
+                    ua=ua,
+                    ip_hash=ip_hash,
+                ),
+                timeout=max(0.2, float(TRACK_DB_TIMEOUT_SECONDS)),
+            )
+        except Exception:
+            # Best-effort only; never block redirect.
+            pass
+
+        # Append marker line if not present already.
+        try:
+            if re.search(r"(?:^|\n)\s*WA_CLICK_ID\s*[:=]\s*[a-f0-9]{16,64}\s*(?:\n|$)", base_text or "", re.IGNORECASE):
+                new_text = base_text
+            else:
+                new_text = (base_text or "").rstrip() + f"\nWA_CLICK_ID: {click_id}"
+        except Exception:
+            new_text = (base_text or "").rstrip() + f"\nWA_CLICK_ID: {click_id}"
+
+        # Build redirect URL with updated `text`
+        qs["text"] = [new_text]
+        # Keep ordering stable-ish
+        new_query = urlencode(qs, doseq=True)
+        out = parsed._replace(query=new_query)
+        target = out.geturl()
+
+        # Optional: drop a cookie for debugging / later scripts (Lax so it survives redirect back).
+        resp = RedirectResponse(url=target, status_code=302)
+        try:
+            resp.set_cookie(
+                key="wa_click_id",
+                value=click_id,
+                max_age=7 * 24 * 3600,
+                httponly=False,
+                samesite="lax",
+                secure=(request.url.scheme == "https"),
+                path="/",
+            )
+        except Exception:
+            pass
+        return resp
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning("track_and_redirect_whatsapp failed: %s", exc)
+        raise HTTPException(status_code=500, detail="failed")
+
+
+@app.get("/track/shopify-whatsapp.js")
+async def shopify_whatsapp_snippet(request: Request):
+    """Drop-in Shopify theme snippet to rewrite WhatsApp links to /track/wa for solid attribution.
+
+    Install (example):
+      <script async src="https://YOUR_DOMAIN/track/shopify-whatsapp.js?workspace=irrakids"></script>
+    """
+    ws = _workspace_from_request(request)
+    # Workspace can also be passed directly on the script tag as ?workspace=...
+    try:
+        qp_ws = (request.query_params.get("workspace") or "").strip().lower()
+        if qp_ws:
+            ws = _coerce_workspace(qp_ws)
+    except Exception:
+        pass
+    base = ""
+    try:
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
+        base = f"{proto}://{host}".rstrip("/")
+    except Exception:
+        base = (os.getenv("BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        base = ""
+
+    js = f"""
+(function() {{
+  'use strict';
+  var BASE = {repr(base)};
+  var WS = {repr(ws)};
+  try {{
+    var cs = document.currentScript;
+    if (cs && cs.src) {{
+      var u = new URL(cs.src);
+      var wq = (u.searchParams.get('workspace') || '').trim().toLowerCase();
+      if (wq) WS = wq;
+      if (!BASE) BASE = u.origin;
+    }}
+  }} catch (e) {{}}
+
+  function isWhatsappUrl(href) {{
+    try {{
+      if (!href) return false;
+      var s = String(href);
+      return s.indexOf('wa.me/') !== -1 || s.indexOf('api.whatsapp.com/send') !== -1 || s.indexOf('web.whatsapp.com/send') !== -1;
+    }} catch (e) {{ return false; }}
+  }}
+
+  function buildTrackUrl(original) {{
+    try {{
+      if (!BASE) return original;
+      var t = new URL(BASE + '/track/wa');
+      t.searchParams.set('u', String(original));
+      if (WS) t.searchParams.set('workspace', WS);
+      try {{ t.searchParams.set('page_url', String(location.href)); }} catch (e) {{}}
+      try {{ t.searchParams.set('shop_domain', String(location.hostname)); }} catch (e) {{}}
+      return t.toString();
+    }} catch (e) {{
+      return original;
+    }}
+  }}
+
+  function rewriteAnchor(a) {{
+    try {{
+      if (!a || !a.getAttribute) return;
+      var href = a.getAttribute('href') || '';
+      if (!isWhatsappUrl(href)) return;
+      if (href.indexOf('/track/wa?') !== -1) return;
+      a.setAttribute('data-wa-orig', href);
+      a.setAttribute('href', buildTrackUrl(href));
+    }} catch (e) {{}}
+  }}
+
+  function scan(root) {{
+    try {{
+      var scope = root || document;
+      var nodes = scope.querySelectorAll('a[href*="wa.me"],a[href*="api.whatsapp.com/send"],a[href*="web.whatsapp.com/send"]');
+      for (var i=0;i<nodes.length;i++) rewriteAnchor(nodes[i]);
+    }} catch (e) {{}}
+  }}
+
+  // Initial scan
+  scan(document);
+
+  // Rewrite dynamically inserted buttons/links
+  try {{
+    var mo = new MutationObserver(function(muts) {{
+      for (var i=0;i<muts.length;i++) {{
+        var m = muts[i];
+        if (!m || !m.addedNodes) continue;
+        for (var j=0;j<m.addedNodes.length;j++) {{
+          var n = m.addedNodes[j];
+          if (!n) continue;
+          if (n.nodeType === 1) {{
+            if (n.tagName === 'A') rewriteAnchor(n);
+            scan(n);
+          }}
+        }}
+      }}
+    }});
+    mo.observe(document.documentElement || document.body, {{ childList: true, subtree: true }});
+  }} catch (e) {{}}
+
+  // Catch programmatic window.open('https://wa.me/...') patterns
+  try {{
+    var _open = window.open;
+    if (typeof _open === 'function') {{
+      window.open = function(url) {{
+        try {{
+          if (isWhatsappUrl(url)) url = buildTrackUrl(url);
+        }} catch (e) {{}}
+        return _open.apply(window, arguments.length ? [url].concat([].slice.call(arguments,1)) : arguments);
+      }};
+    }}
+  }} catch (e) {{}}
+}})();
+"""
+    return Response(
+        content=js,
+        media_type="application/javascript; charset=utf-8",
+        headers={
+            # Cache short; changes should roll out quickly. Shopify will still cache aggressively.
+            "Cache-Control": "public, max-age=300",
+        },
+    )
+
 @app.get("/messages/{user_id}")
 async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, since: str | None = None, before: str | None = None, actor: dict = Depends(get_current_agent)):
     """Cursor-friendly fetch: use since/before OR legacy offset.

@@ -1490,7 +1490,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                           )}
                           <div className="flex-1 min-w-0">
                             <div className="text-sm text-white truncate" title={s.product_title || s.title}>{s.product_title || s.title}</div>
-                            <div className="text-xs text-gray-300 truncate">{s.title} • ID {String(s.id).slice(-8)} • {Number(s.price||0).toFixed(2)} MAD</div>
+                            <div className="text-xs text-gray-300 truncate" title={`ID: ${s.id}`}>{s.title} • ID {String(s.id)} • {Number(s.price||0).toFixed(2)} MAD</div>
                           </div>
                           <button
                             type="button"
@@ -1564,7 +1564,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                         )}
                         <div className="min-w-0">
                           {/* Hide product title to avoid overflow; show compact details instead */}
-                          <div className="text-[11px] text-gray-300 truncate max-w-[120px]">ID: {String(item.variant.id).slice(-8)}</div>
+                          <div className="text-[11px] text-gray-300 truncate max-w-[140px]" title={`ID: ${item.variant.id}`}>ID: {String(item.variant.id)}</div>
                           {item.variant.sku && (
                             <div className="text-[11px] text-gray-400 truncate max-w-[120px]">SKU: {item.variant.sku}</div>
                           )}

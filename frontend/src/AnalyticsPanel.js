@@ -98,9 +98,12 @@ export default function AnalyticsPanel() {
         else if (status === 500) {
           // Backend returns a structured payload with more detail.
           const detail = (payload && (payload.detail || payload.error)) ? String(payload.detail || payload.error) : '';
+          const rawErr = (payload && payload.error) ? String(payload.error) : '';
+          // Keep UI tidy; still show enough to diagnose (admin-only endpoint).
+          const errShort = rawErr ? (rawErr.length > 220 ? `${rawErr.slice(0, 220)}…` : rawErr) : '';
           const hint = (payload && payload.hint) ? String(payload.hint) : '';
           const ws = (payload && payload.workspace) ? String(payload.workspace) : '';
-          const extra = [detail, ws ? `workspace=${ws}` : '', hint].filter(Boolean).join(' • ');
+          const extra = [detail, errShort, ws ? `workspace=${ws}` : '', hint].filter(Boolean).join(' • ');
           setShopifyError(extra ? `Failed to load website WhatsApp analytics • ${extra}` : 'Failed to load website WhatsApp analytics');
         } else setShopifyError('Failed to load website WhatsApp analytics');
       }
@@ -130,8 +133,51 @@ export default function AnalyticsPanel() {
     return a?.name || username;
   };
 
-  const maxReplied = Math.max(1, ...stats.map((x) => Number(x.messages_replied_to || 0)));
-  const maxOrders = Math.max(1, ...stats.map((x) => Number(x.orders_created || 0)));
+  const statsWithRatio = useMemo(() => {
+    const list = Array.isArray(stats) ? stats : [];
+    return list.map((s) => {
+      const replied = Number(s?.messages_replied_to || 0) || 0;
+      const orders = Number(s?.orders_created || 0) || 0;
+      const ratio = replied > 0 ? (orders / replied) * 100 : 0;
+      return { ...s, _replied: replied, _orders: orders, _confirm_ratio_pct: ratio };
+    });
+  }, [stats]);
+
+  // Sort agents by confirmation ratio (best first), then by orders, then by replied-to volume.
+  const statsSorted = useMemo(() => {
+    const list = [...statsWithRatio];
+    list.sort((a, b) => {
+      const ra = Number(a?._confirm_ratio_pct || 0) || 0;
+      const rb = Number(b?._confirm_ratio_pct || 0) || 0;
+      if (rb !== ra) return rb - ra;
+      const oa = Number(a?._orders || 0) || 0;
+      const ob = Number(b?._orders || 0) || 0;
+      if (ob !== oa) return ob - oa;
+      const pa = Number(a?._replied || 0) || 0;
+      const pb = Number(b?._replied || 0) || 0;
+      if (pb !== pa) return pb - pa;
+      return String(a?.agent || '').localeCompare(String(b?.agent || ''));
+    });
+    return list;
+  }, [statsWithRatio]);
+
+  const maxReplied = Math.max(1, ...statsSorted.map((x) => Number(x._replied || 0)));
+  const maxOrders = Math.max(1, ...statsSorted.map((x) => Number(x._orders || 0)));
+
+  const ratioBand = (pct) => {
+    const p = Number(pct || 0) || 0;
+    // Per requirement: >9 best, 7..9 medium, <7 low
+    if (p > 9) return 'best';
+    if (p >= 7 && p <= 9) return 'medium';
+    return 'low';
+  };
+
+  const ratioBadgeClass = (pct) => {
+    const band = ratioBand(pct);
+    if (band === 'best') return 'bg-emerald-50 text-emerald-800 border-emerald-200';
+    if (band === 'medium') return 'bg-amber-50 text-amber-900 border-amber-200';
+    return 'bg-rose-50 text-rose-800 border-rose-200';
+  };
 
   const shopSeries = Array.isArray(shopify?.series) ? shopify.series : [];
   const shopTotals = shopify?.totals || {};
@@ -290,31 +336,41 @@ export default function AnalyticsPanel() {
         <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
           <div className="font-medium text-slate-900 mb-2">Inbound messages replied-to (by agent)</div>
           <div className="space-y-2">
-            {stats.map((s) => (
+            {statsSorted.map((s) => (
               <div key={s.agent} className="flex items-center gap-2">
-                <div className="w-32 text-sm text-slate-700 truncate" title={nameOf(s.agent)}>{nameOf(s.agent)}</div>
-                <div className="flex-1 h-3.5 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-3.5 bg-indigo-600" style={{ width: `${Math.round((Number(s.messages_replied_to||0)/maxReplied)*100)}%` }}></div>
+                <div className="w-32 text-sm text-slate-700 truncate flex items-center gap-2" title={nameOf(s.agent)}>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold ${ratioBadgeClass(s._confirm_ratio_pct)}`} title="Orders / replied-to">
+                    {(Number(s._confirm_ratio_pct || 0) || 0).toFixed(1)}%
+                  </span>
+                  <span className="truncate">{nameOf(s.agent)}</span>
                 </div>
-                <div className="w-12 text-right text-sm text-slate-700">{s.messages_replied_to || 0}</div>
+                <div className="flex-1 h-3.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-3.5 bg-indigo-600" style={{ width: `${Math.round((Number(s._replied||0)/maxReplied)*100)}%` }}></div>
+                </div>
+                <div className="w-12 text-right text-sm text-slate-700">{s._replied || 0}</div>
               </div>
             ))}
-            {stats.length === 0 && <div className="text-sm text-slate-500">No data</div>}
+            {statsSorted.length === 0 && <div className="text-sm text-slate-500">No data</div>}
           </div>
         </div>
         <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
           <div className="font-medium text-slate-900 mb-2">Orders by agent</div>
           <div className="space-y-2">
-            {stats.map((s) => (
+            {statsSorted.map((s) => (
               <div key={s.agent} className="flex items-center gap-2">
-                <div className="w-32 text-sm text-slate-700 truncate" title={nameOf(s.agent)}>{nameOf(s.agent)}</div>
-                <div className="flex-1 h-3.5 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-3.5 bg-emerald-600" style={{ width: `${Math.round((Number(s.orders_created||0)/maxOrders)*100)}%` }}></div>
+                <div className="w-32 text-sm text-slate-700 truncate flex items-center gap-2" title={nameOf(s.agent)}>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold ${ratioBadgeClass(s._confirm_ratio_pct)}`} title="Orders / replied-to">
+                    {(Number(s._confirm_ratio_pct || 0) || 0).toFixed(1)}%
+                  </span>
+                  <span className="truncate">{nameOf(s.agent)}</span>
                 </div>
-                <div className="w-12 text-right text-sm text-slate-700">{s.orders_created || 0}</div>
+                <div className="flex-1 h-3.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-3.5 bg-emerald-600" style={{ width: `${Math.round((Number(s._orders||0)/maxOrders)*100)}%` }}></div>
+                </div>
+                <div className="w-12 text-right text-sm text-slate-700">{s._orders || 0}</div>
               </div>
             ))}
-            {stats.length === 0 && <div className="text-sm text-slate-500">No data</div>}
+            {statsSorted.length === 0 && <div className="text-sm text-slate-500">No data</div>}
           </div>
         </div>
       </div>
@@ -330,22 +386,28 @@ export default function AnalyticsPanel() {
                 <th className="py-1 pr-2">Replied-to</th>
                 <th className="py-1 pr-2">Sent</th>
                 <th className="py-1 pr-2">Orders</th>
+                <th className="py-1 pr-2">Confirm %</th>
                 <th className="py-1 pr-2">Avg reply time</th>
               </tr>
             </thead>
             <tbody>
-              {stats.map((s) => (
+              {statsSorted.map((s) => (
                 <tr key={s.agent} className="border-t border-slate-200 text-slate-800">
                   <td className="py-1 pr-2">{nameOf(s.agent)}</td>
                   <td className="py-1 pr-2">{s.messages_received || 0}</td>
-                  <td className="py-1 pr-2">{s.messages_replied_to || 0}</td>
+                  <td className="py-1 pr-2">{s._replied || 0}</td>
                   <td className="py-1 pr-2">{s.messages_sent || 0}</td>
-                  <td className="py-1 pr-2">{s.orders_created || 0}</td>
+                  <td className="py-1 pr-2">{s._orders || 0}</td>
+                  <td className="py-1 pr-2">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-semibold ${ratioBadgeClass(s._confirm_ratio_pct)}`} title="Orders / replied-to">
+                      {(Number(s._confirm_ratio_pct || 0) || 0).toFixed(1)}%
+                    </span>
+                  </td>
                   <td className="py-1 pr-2">{formatDuration(s.avg_response_seconds)}</td>
                 </tr>
               ))}
-              {stats.length === 0 && (
-                <tr><td colSpan={6} className="py-2 text-slate-500">No data</td></tr>
+              {statsSorted.length === 0 && (
+                <tr><td colSpan={7} className="py-2 text-slate-500">No data</td></tr>
               )}
             </tbody>
           </table>

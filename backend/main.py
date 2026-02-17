@@ -19,7 +19,7 @@ import aiofiles
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode
 from contextvars import ContextVar
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Response, UploadFile, File, Form, HTTPException, Body, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Response, UploadFile, File, Form, HTTPException, Body, Depends, Query
 from starlette.requests import Request as _LimiterRequest
 from starlette.responses import Response as _LimiterResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -6483,6 +6483,48 @@ class MessageProcessor:
                 return True
         return False
 
+    async def _has_shopify_order_in_last_hours(self, *, user_id: str, hours: float, workspace: str | None = None) -> bool:
+        """Best-effort check: does this phone/customer have any Shopify order in the last N hours?"""
+        try:
+            h = float(hours or 0)
+        except Exception:
+            h = 0.0
+        if h <= 0:
+            return False
+        try:
+            from .shopify_integration import fetch_customer_by_phone, admin_api_base, _client_args, _resolve_store_from_workspace  # type: ignore
+        except Exception:
+            return False
+        try:
+            ws = _coerce_workspace(workspace or get_current_workspace())
+            store = _resolve_store_from_workspace(None, ws)
+        except Exception:
+            store = None
+        try:
+            customer = await fetch_customer_by_phone(user_id, store=store)
+            if not isinstance(customer, dict) or customer.get("error"):
+                return False
+            customer_id = customer.get("customer_id")
+            cid = str(customer_id).strip() if customer_id is not None else ""
+            if not cid:
+                return False
+            since_iso = (datetime.utcnow() - timedelta(hours=max(0.01, h))).replace(microsecond=0).isoformat() + "Z"
+            params = {
+                "customer_id": cid,
+                "status": "any",
+                "limit": 1,
+                "created_at_min": since_iso,
+                "order": "created_at desc",
+            }
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                resp = await client.get(f"{admin_api_base(store)}/orders.json", params=params, **_client_args(store=store))
+            if resp.status_code >= 400:
+                return False
+            orders = ((resp.json() or {}).get("orders") or []) if resp is not None else []
+            return bool(orders)
+        except Exception:
+            return False
+
     def _oc_pending_key(self, ws: str, user_id: str) -> str:
         return f"automation:order_confirm:pending:{_coerce_workspace(ws)}:{str(user_id or '').strip()}"
 
@@ -6686,16 +6728,33 @@ class MessageProcessor:
                         seconds = 30 * 60
                     keywords = cond.get("keywords")
                     kws = [str(x or "").strip() for x in keywords if str(x or "").strip()] if isinstance(keywords, list) else []
+                    try:
+                        no_order_hours = float(
+                            cond.get("no_order_in_last_hours")
+                            or cond.get("no_shopify_order_in_last_hours")
+                            or cond.get("without_order_hours")
+                            or 0
+                        )
+                    except Exception:
+                        no_order_hours = 0.0
                     if kws and not any((k.lower() in text_lc) for k in kws):
                         continue
 
                     rid = str(rule.get("id") or "")
-                    async def _job(_rule: dict, _rid: str, _sec: int):
+                    async def _job(_rule: dict, _rid: str, _sec: int, _no_order_hours: float):
                         try:
                             await asyncio.sleep(max(1, int(_sec)))
                             # If replied, skip
                             if await self.db_manager.has_inbound_reply(user_id=user_id, inbound_wa_message_id=inbound_wa_message_id):
                                 return
+                            if _no_order_hours > 0:
+                                has_recent = await self._has_shopify_order_in_last_hours(
+                                    user_id=user_id,
+                                    hours=_no_order_hours,
+                                    workspace=ws,
+                                )
+                                if has_recent:
+                                    return
                             ctx = {
                                 "phone": user_id,
                                 "user_id": user_id,
@@ -6743,6 +6802,32 @@ class MessageProcessor:
                                         "template_language": lang,
                                         "template_components": comps,
                                     })
+                                elif at in ("send_catalog_item", "catalog_item", "send_interactive_product"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    retailer_id = self._render_template(
+                                        str(act.get("retailer_id") or act.get("product_retailer_id") or act.get("product_id") or ""),
+                                        ctx,
+                                    ).strip()
+                                    caption = self._render_template(str(act.get("caption") or act.get("text") or ""), ctx).strip()
+                                    if not retailer_id:
+                                        continue
+                                    await self.process_outgoing_message({
+                                        "user_id": to_id,
+                                        "type": "catalog_item",
+                                        "from_me": True,
+                                        "product_retailer_id": retailer_id,
+                                        "caption": caption,
+                                        "message": caption,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                    })
+                                elif at in ("send_catalog_set", "catalog_set"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    set_id = self._render_template(str(act.get("set_id") or act.get("catalog_set_id") or ""), ctx).strip()
+                                    caption = self._render_template(str(act.get("caption") or act.get("text") or ""), ctx).strip()
+                                    if not set_id:
+                                        continue
+                                    await self.whatsapp_messenger.send_full_set(to_id, set_id, caption)
                                 elif at in ("add_tag", "tag"):
                                     tag = str(act.get("tag") or "").strip()
                                     if not tag:
@@ -6765,7 +6850,7 @@ class MessageProcessor:
                         except Exception:
                             return
 
-                    asyncio.create_task(_job(rule, rid, seconds))
+                    asyncio.create_task(_job(rule, rid, seconds, no_order_hours))
                 except Exception:
                     continue
         except Exception:
@@ -6947,6 +7032,15 @@ class MessageProcessor:
                         kws = [str(x or "").strip() for x in keywords if str(x or "").strip()]
                     else:
                         kws = []
+                    try:
+                        no_order_hours = float(
+                            cond.get("no_order_in_last_hours")
+                            or cond.get("no_shopify_order_in_last_hours")
+                            or cond.get("without_order_hours")
+                            or 0
+                        )
+                    except Exception:
+                        no_order_hours = 0.0
 
                     matched = False
                     if mode == "any":
@@ -7000,6 +7094,19 @@ class MessageProcessor:
                             matched = False
                     else:
                         matched = False
+
+                    # Optional extra guard: require no Shopify orders in the last N hours.
+                    if matched and no_order_hours > 0:
+                        try:
+                            has_recent_order = await self._has_shopify_order_in_last_hours(
+                                user_id=user_id,
+                                hours=no_order_hours,
+                                workspace=ws,
+                            )
+                            if has_recent_order:
+                                matched = False
+                        except Exception:
+                            matched = False
 
                     if not matched:
                         continue
@@ -7204,6 +7311,47 @@ class MessageProcessor:
                                 "timestamp": datetime.utcnow().isoformat(),
                                 "agent_username": "automation",
                             })
+                        elif at in ("send_catalog_item", "catalog_item", "send_interactive_product"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            retailer_id = self._render_template(
+                                str(act.get("retailer_id") or act.get("product_retailer_id") or act.get("product_id") or ""),
+                                ctx,
+                            ).strip()
+                            caption = self._render_template(str(act.get("caption") or act.get("text") or ""), ctx).strip()
+                            if not retailer_id:
+                                continue
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "catalog_item",
+                                "from_me": True,
+                                "product_retailer_id": retailer_id,
+                                "caption": caption,
+                                "message": caption,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                            })
+                        elif at in ("send_catalog_set", "catalog_set"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            set_id = self._render_template(str(act.get("set_id") or act.get("catalog_set_id") or ""), ctx).strip()
+                            caption = self._render_template(str(act.get("caption") or act.get("text") or ""), ctx).strip()
+                            if not set_id:
+                                continue
+                            try:
+                                await self.whatsapp_messenger.send_full_set(to_id, set_id, caption)
+                                try:
+                                    preview = caption or f"[catalog_set] {set_id}"
+                                    await self.process_outgoing_message({
+                                        "user_id": to_id,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "message": preview,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                    })
+                                except Exception:
+                                    pass
+                            except Exception:
+                                continue
                         elif at in ("shopify_order_status", "order_status"):
                             try:
                                 await self._handle_order_status_request(user_id)

@@ -43,6 +43,23 @@ function formatTime(ts) {
   }
 }
 
+// Parse a price that may be a number or a string like "MAD300.00" / "300.00 MAD"
+function parsePriceNumber(raw) {
+  try {
+    if (raw == null) return NaN;
+    if (typeof raw === "number") return raw;
+    const s = String(raw).trim();
+    if (!s) return NaN;
+    // Extract first plausible number (supports commas)
+    const m = s.replace(",", ".").match(/-?\d+(?:\.\d+)?/);
+    if (!m) return NaN;
+    const n = Number(m[0]);
+    return Number.isFinite(n) ? n : NaN;
+  } catch {
+    return NaN;
+  }
+}
+
 export default function MessageBubble({ msg, self, catalogProducts = {}, highlightQuery = "", onForward, quotedMessage = null, onReply, onReact, rowKey = null, highlighted = false }) {
   const API_BASE = process.env.REACT_APP_API_BASE || "";
   const containerRef = useRef(null);
@@ -356,7 +373,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
     const rawImage = variantData?.image_src || info.image || null;
     const image = rawImage && /^https?:\/\//i.test(rawImage) ? `${API_BASE}/proxy-image?url=${encodeURIComponent(rawImage)}` : rawImage;
     const title = variantData?.title || String(msg?.caption || "").trim() || "Product";
-    const priceNum = Number(variantData?.price || info.price || 0);
+    const priceNum = parsePriceNumber(variantData?.price ?? info.price);
     const priceStr = Number.isFinite(priceNum) && priceNum > 0 ? `${priceNum.toFixed(2)} MAD` : null;
     return (
       <div className="mb-2 flex items-center rounded-xl bg-white/95 border border-blue-200 shadow-sm p-3 gap-3">
@@ -907,7 +924,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
              const image = rawImage && /^https?:\/\//i.test(rawImage) ? `${API_BASE}/proxy-image?url=${encodeURIComponent(rawImage)}` : rawImage;
             // Show only variant title (no product title)
             const title = variantData?.title || msg?.caption || "";
-             const priceNum = Number(variantData?.price || info.price || 0);
+             const priceNum = parsePriceNumber(variantData?.price ?? info.price);
              const priceStr = Number.isFinite(priceNum) && priceNum > 0 ? `${priceNum.toFixed(2)} MAD` : null;
              return (
                <div className="flex items-center rounded-xl bg-white/95 border border-blue-200 shadow-sm p-3 gap-3">

@@ -8841,7 +8841,7 @@ async def startup():
         # In tests, refresh synchronously so assertions can observe the file
         if os.getenv("PYTEST_CURRENT_TEST"):
             try:
-                count = await catalog_manager.refresh_catalog_cache(cid0, cache_file0)
+                count = await catalog_manager.refresh_catalog_cache(cid0, cache_file0, ws0)
                 print(f"Catalog cache created with {count} items (sync in tests)")
             except Exception as exc:
                 print(f"Catalog cache refresh failed (tests): {exc}")
@@ -8849,7 +8849,7 @@ async def startup():
             # In prod, refresh in background to avoid startup timeouts
             async def _refresh_cache_bg():
                 try:
-                    count = await catalog_manager.refresh_catalog_cache(cid0, cache_file0)
+                    count = await catalog_manager.refresh_catalog_cache(cid0, cache_file0, ws0)
                     print(f"Catalog cache created with {count} items")
                 except Exception as exc:
                     print(f"Catalog cache refresh failed: {exc}")
@@ -13516,7 +13516,7 @@ async def get_catalog_sets():
     try:
         ws = get_current_workspace()
         cid = await _get_effective_catalog_id(ws)
-        sets = await CatalogManager.get_catalog_sets(catalog_id=cid)
+        sets = await CatalogManager.get_catalog_sets(catalog_id=cid, workspace=ws)
         return sets
     except Exception as exc:
         print(f"Error fetching catalog sets: {exc}")
@@ -13557,9 +13557,9 @@ async def get_catalog_products_endpoint(force_refresh: bool = False, background_
         try:
             # Fire-and-forget refresh to avoid request timeouts.
             if background_tasks is not None:
-                background_tasks.add_task(catalog_manager.refresh_catalog_cache, cid, cache_file)
+                background_tasks.add_task(catalog_manager.refresh_catalog_cache, cid, cache_file, ws)
             else:
-                asyncio.create_task(catalog_manager.refresh_catalog_cache(cid, cache_file))
+                asyncio.create_task(catalog_manager.refresh_catalog_cache(cid, cache_file, ws))
         except Exception as exc:
             logging.getLogger(__name__).warning("Catalog cache refresh scheduling failed: %s", exc)
 
@@ -13574,7 +13574,13 @@ async def get_catalog_set_products(set_id: str, limit: int = 60):
         ws = get_current_workspace()
         cid = await _get_effective_catalog_id(ws)
         cache_file = _catalog_cache_file_for(ws, cid)
-        products = await CatalogManager.get_products_for_set(set_id, limit=limit, catalog_id=cid, cache_file=cache_file)
+        products = await CatalogManager.get_products_for_set(
+            set_id,
+            limit=limit,
+            catalog_id=cid,
+            cache_file=cache_file,
+            workspace=ws,
+        )
         print(f"Catalog: returning {len(products)} products for set_id={set_id}")
         return products
     except Exception as exc:
@@ -13587,7 +13593,7 @@ async def refresh_catalog_cache_endpoint(background_tasks: BackgroundTasks):
     ws = get_current_workspace()
     cid = await _get_effective_catalog_id(ws)
     cache_file = _catalog_cache_file_for(ws, cid)
-    background_tasks.add_task(catalog_manager.refresh_catalog_cache, cid, cache_file)
+    background_tasks.add_task(catalog_manager.refresh_catalog_cache, cid, cache_file, ws)
     return {"status": "started", "workspace": ws, "catalog_id": cid}
 
 
@@ -13596,7 +13602,7 @@ async def get_all_catalog_products():
     try:
         ws = get_current_workspace()
         cid = await _get_effective_catalog_id(ws)
-        products = await CatalogManager.get_catalog_products(catalog_id=cid)
+        products = await CatalogManager.get_catalog_products(catalog_id=cid, workspace=ws)
         return products
     except Exception as e:
         print(f"Error fetching catalog: {e}")
@@ -14017,9 +14023,26 @@ async def fetch_meta_catalog():
         return response.json().get("data", [])
 
 
-async def get_whatsapp_headers() -> Dict[str, str]:
-    """Return auth headers for WhatsApp API"""
-    return {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+async def get_whatsapp_headers(workspace: str | None = None) -> Dict[str, str]:
+    """Return auth headers for WhatsApp Graph API.
+
+    Important: in multi-workspace mode, each workspace can have its own access_token
+    stored in inbox_env (DB override) and/or env vars. We must use the workspace-scoped
+    token, otherwise catalog/product fetches will silently fail for other workspaces.
+    """
+    try:
+        ws = _coerce_workspace(workspace or get_current_workspace())
+    except Exception:
+        ws = DEFAULT_WORKSPACE
+    token = ""
+    try:
+        cfg = await message_processor._get_inbox_env(ws)  # type: ignore[attr-defined]
+        token = str((cfg or {}).get("access_token") or "").strip()
+    except Exception:
+        token = ""
+    if not token:
+        token = str(ACCESS_TOKEN or "").strip()
+    return {"Authorization": f"Bearer {token}"}
 
 
 class CatalogManager:
@@ -14069,7 +14092,7 @@ class CatalogManager:
             pass
 
     @staticmethod
-    async def get_catalog_sets(catalog_id: str | None = None) -> List[Dict[str, Any]]:
+    async def get_catalog_sets(catalog_id: str | None = None, workspace: str | None = None) -> List[Dict[str, Any]]:
         """Return available product sets (collections) for the configured catalog.
 
         Graph API: /{catalog_id}/product_sets?fields=id,name
@@ -14077,7 +14100,7 @@ class CatalogManager:
         cid = str(catalog_id or CATALOG_ID or "").strip()
         url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{cid}/product_sets"
         params = {"fields": "id,name", "limit": 200}
-        headers = await get_whatsapp_headers()
+        headers = await get_whatsapp_headers(workspace)
 
         # Always include the whole catalog as a fallback option
         result: List[Dict[str, Any]] = [{"id": cid, "name": "All Products"}]
@@ -14103,7 +14126,7 @@ class CatalogManager:
         return result
 
     @staticmethod
-    async def get_catalog_products(catalog_id: str | None = None) -> List[Dict[str, Any]]:
+    async def get_catalog_products(catalog_id: str | None = None, workspace: str | None = None) -> List[Dict[str, Any]]:
         products: List[Dict[str, Any]] = []
         cid = str(catalog_id or CATALOG_ID or "").strip()
         url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{cid}/products"
@@ -14112,7 +14135,7 @@ class CatalogManager:
             "fields": "retailer_id,name,price,images{url},availability,quantity",
             "limit": 25,
         }
-        headers = await get_whatsapp_headers()
+        headers = await get_whatsapp_headers(workspace)
 
         async with httpx.AsyncClient(timeout=40.0) as client:
             while url:
@@ -14126,7 +14149,13 @@ class CatalogManager:
         return products
 
     @staticmethod
-    async def get_products_for_set(set_id: str, limit: int = 60, catalog_id: str | None = None, cache_file: str | None = None) -> List[Dict[str, Any]]:
+    async def get_products_for_set(
+        set_id: str,
+        limit: int = 60,
+        catalog_id: str | None = None,
+        cache_file: str | None = None,
+        workspace: str | None = None,
+    ) -> List[Dict[str, Any]]:
         """Return products for a specific product set.
 
         Graph API: /{product_set_id}/products
@@ -14141,7 +14170,7 @@ class CatalogManager:
             if cached:
                 return cached[: max(1, int(limit))]
             # Fallback to live fetch if cache empty; also persist to cache for next requests
-            products_live = await CatalogManager.get_catalog_products(catalog_id=cid)
+            products_live = await CatalogManager.get_catalog_products(catalog_id=cid, workspace=workspace)
             try:
                 with open(cache_file, "w", encoding="utf8") as f:
                     json.dump(products_live, f, ensure_ascii=False)
@@ -14183,7 +14212,7 @@ class CatalogManager:
             "fields": "retailer_id,name,price,images{url},availability,quantity",
             "limit": 25,
         }
-        headers = await get_whatsapp_headers()
+        headers = await get_whatsapp_headers(workspace)
 
         async with httpx.AsyncClient(timeout=40.0) as client:
             while url:
@@ -14260,10 +14289,14 @@ class CatalogManager:
         }
 
     @staticmethod
-    async def refresh_catalog_cache(catalog_id: str | None = None, cache_file: str | None = None) -> int:
+    async def refresh_catalog_cache(
+        catalog_id: str | None = None,
+        cache_file: str | None = None,
+        workspace: str | None = None,
+    ) -> int:
         cid = str(catalog_id or CATALOG_ID or "").strip()
         cache_file = cache_file or CATALOG_CACHE_FILE
-        products = await CatalogManager.get_catalog_products(catalog_id=cid)
+        products = await CatalogManager.get_catalog_products(catalog_id=cid, workspace=workspace)
         with open(cache_file, "w", encoding="utf8") as f:
             json.dump(products, f, ensure_ascii=False)
         try:

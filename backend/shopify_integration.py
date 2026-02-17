@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from fastapi import APIRouter, Body, Query, HTTPException
+from fastapi import APIRouter, Body, Query, HTTPException, Header
 
 # ================= CONFIG ==================
 
@@ -86,6 +86,32 @@ def _get_store_config(store: str | None = None) -> tuple[str, str | None, str, s
         except Exception:
             raise HTTPException(status_code=503, detail="Shopify not configured")
     return API_KEY, PASSWORD, STORE_URL, ACCESS_TOKEN  # type: ignore[return-value]
+
+
+def _resolve_store_from_workspace(store: str | None, x_workspace: str | None) -> str | None:
+    """Resolve the Shopify store prefix from either an explicit `store` query param
+    or the `X-Workspace` header (multi-workspace frontend).
+
+    - `store` is expected to be an env prefix like IRRAKIDS / IRRANOVA
+    - `x_workspace` is expected to be a workspace id like irrakids / irranova
+
+    If the derived prefix is not configured, we fall back to None (default store).
+    """
+    try:
+        if store and str(store).strip():
+            return str(store).strip().upper()
+    except Exception:
+        pass
+    try:
+        ws = str(x_workspace or "").strip()
+        if not ws:
+            return None
+        cand = ws.upper()
+        # Only accept if configured; otherwise keep default store behavior.
+        _load_store_config_for_prefix(cand)
+        return cand
+    except Exception:
+        return None
 
 
 def admin_api_base(store: str | None = None) -> str:
@@ -445,7 +471,9 @@ async def shopify_stores():
 async def shopify_products(
     q: str = Query("", description="Search product titles (optional)"),
     store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
+    store = _resolve_store_from_workspace(store, x_workspace)
     params = {"title": q} if q else {}
     endpoint = f"{admin_api_base(store)}/products.json"
     async with httpx.AsyncClient() as client:
@@ -463,7 +491,9 @@ async def shopify_products(
 async def shopify_variant(
     variant_id: str,
     store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
+    store = _resolve_store_from_workspace(store, x_workspace)
     endpoint = f"{admin_api_base(store)}/variants/{variant_id}.json"
     async with httpx.AsyncClient() as client:
         try:
@@ -598,10 +628,15 @@ async def fetch_customer_by_phone(phone_number: str, store: str | None = None):
 
 # =========== FASTAPI ENDPOINT: SEARCH CUSTOMER ============
 @router.get("/search-customer")
-async def search_customer(phone_number: str, store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)")):
+async def search_customer(
+    phone_number: str,
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """
     Fetch customer and order info by phone.
     """
+    store = _resolve_store_from_workspace(store, x_workspace)
     data = await fetch_customer_by_phone(phone_number, store=store)
     if not data:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -643,11 +678,16 @@ def _candidate_phones(raw: str) -> list[str]:
 
 
 @router.get("/search-customers-all")
-async def search_customers_all(phone_number: str, store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)")):
+async def search_customers_all(
+    phone_number: str,
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """
     Return all Shopify customers matching multiple phone normalizations.
     Each customer includes minimal profile and primary address if available.
     """
+    store = _resolve_store_from_workspace(store, x_workspace)
     cand = _candidate_phones(phone_number)
     if not cand:
         return []
@@ -755,8 +795,10 @@ async def shopify_customers(
     limit: int = Query(50, ge=1, le=250),
     page_info: str | None = Query(None, description="Cursor for pagination (Shopify page_info)"),
     q: str = Query("", description="Search query (Shopify customers/search query syntax)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
     """List Shopify customers (paginated), with optional search."""
+    store = _resolve_store_from_workspace(store, x_workspace)
     async with httpx.AsyncClient() as client:
         # IMPORTANT (Shopify cursor pagination): when page_info is present, do not pass other params
         # like "order" or "query". Only "limit" + "page_info".
@@ -854,8 +896,10 @@ async def shopify_orders(
     customer_id: str,
     limit: int = 50,
     store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
     """Return recent orders for a Shopify customer (admin-simplified list)."""
+    store = _resolve_store_from_workspace(store, x_workspace)
     params = {
         "customer_id": customer_id,
         "status": "any",

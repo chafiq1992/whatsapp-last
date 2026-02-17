@@ -262,14 +262,27 @@ async def shopify_oauth_callback(
         return JSONResponse(out, status_code=400)
 
     token_url = f"https://{shop_norm}/admin/oauth/access_token"
+    # Some Shopify setups are stricter about token exchange parameters.
+    # Include redirect_uri and use form-encoding (works across more proxies/shops).
+    redirect_uri = f"{_public_base_url(request)}/admin/shopify/oauth/callback"
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(token_url, json={"client_id": cid, "client_secret": client_secret, "code": code})
+        resp = await client.post(
+            token_url,
+            data={
+                "client_id": cid,
+                "client_secret": client_secret,
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
     if resp.status_code >= 400:
         return JSONResponse(
             {
                 "error": "token_exchange_failed",
                 "status": resp.status_code,
                 "shop": shop_norm,
+                "content_type": (resp.headers.get("content-type") or resp.headers.get("Content-Type") or ""),
                 "body": (resp.text or "")[:2000],
             },
             status_code=502,

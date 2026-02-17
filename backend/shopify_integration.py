@@ -279,6 +279,35 @@ def _oauth_admin_api_base(shop_domain: str) -> str:
         raise HTTPException(status_code=500, detail="Missing OAuth shop domain")
     return f"https://{shop}/admin/api/{API_VERSION}"
 
+
+async def _shopify_http_context(store: str | None, x_workspace: str | None) -> tuple[str, dict, str, str | None]:
+    """Resolve the correct Shopify Admin API base + auth args for this request.
+
+    Priority:
+    - Workspace OAuth connection (shop domain + token stored in DB settings) if present
+    - Else env-based store mapping resolved from store/x-workspace
+
+    Returns: (base, extra_args, store_used, store_prefix)
+    """
+    ws = _normalize_ws_id(x_workspace)
+    if not ws:
+        try:
+            from .main import get_current_workspace  # type: ignore
+            ws = _normalize_ws_id(get_current_workspace())
+        except Exception:
+            ws = ""
+    oauth = await _get_shopify_oauth_record(ws)
+    oauth_shop = str((oauth or {}).get("shop") or "").strip().lower()
+    oauth_token = str((oauth or {}).get("access_token") or "").strip()
+    store = _resolve_store_from_workspace(store, ws or x_workspace)
+    if oauth_shop and oauth_token:
+        base = _oauth_admin_api_base(oauth_shop)
+        extra_args = {"headers": {"X-Shopify-Access-Token": oauth_token}}
+        return base, extra_args, f"OAUTH:{oauth_shop}", store
+    base = admin_api_base(store)
+    extra_args = _client_args(store=store)
+    return base, extra_args, (store or "DEFAULT"), store
+
 def normalize_phone(phone):
     if not phone:
         return ""
@@ -612,11 +641,11 @@ async def shopify_products(
     store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
     x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
-    store = _resolve_store_from_workspace(store, x_workspace)
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     params = {"title": q} if q else {}
-    endpoint = f"{admin_api_base(store)}/products.json"
+    endpoint = f"{base}/products.json"
     async with httpx.AsyncClient() as client:
-        resp = await client.get(endpoint, params=params, **_client_args(store=store))
+        resp = await client.get(endpoint, params=params, **extra_args)
         resp.raise_for_status()
         products = resp.json().get("products", [])
         # Optionally include product_title for variant for UI display
@@ -699,14 +728,15 @@ async def shopify_variant(
         return variant or {}
 
 # =============== CUSTOMER BY PHONE ===============
-async def fetch_customer_by_phone(phone_number: str, store: str | None = None):
+async def fetch_customer_by_phone(phone_number: str, store: str | None = None, x_workspace: str | None = None):
     try:
         phone_number = normalize_phone(phone_number)
         params = {'query': f'phone:{phone_number}'}
+        base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
         async with httpx.AsyncClient() as client:
             # Search customer
-            search_endpoint = f"{admin_api_base(store)}/customers/search.json"
-            resp = await client.get(search_endpoint, params=params, timeout=10, **_client_args(store=store))
+            search_endpoint = f"{base}/customers/search.json"
+            resp = await client.get(search_endpoint, params=params, timeout=10, **extra_args)
             if resp.status_code == 403:
                 logger.error("Shopify API 403 on customers/search. Missing read_customers scope for token or app not installed.")
                 return {"error": "Forbidden", "detail": "Shopify token lacks read_customers scope or app not installed.", "status": 403}
@@ -717,7 +747,7 @@ async def fetch_customer_by_phone(phone_number: str, store: str | None = None):
             if not customers and phone_number.startswith("+212"):
                 alt_phone = "0" + phone_number[4:]
                 params = {'query': f'phone:{alt_phone}'}
-                resp = await client.get(search_endpoint, params=params, timeout=10, **_client_args(store=store))
+                resp = await client.get(search_endpoint, params=params, timeout=10, **extra_args)
                 if resp.status_code == 403:
                     logger.error("Shopify API 403 on customers/search (fallback). Missing read_customers scope.")
                     return {"error": "Forbidden", "detail": "Shopify token lacks read_customers scope or app not installed.", "status": 403}
@@ -739,10 +769,10 @@ async def fetch_customer_by_phone(phone_number: str, store: str | None = None):
                 "order": "created_at desc"
             }
             orders_resp = await client.get(
-                f"{admin_api_base(store)}/orders.json",
+                f"{base}/orders.json",
                 params=order_params,
                 timeout=10,
-                **_client_args(store=store),
+                **extra_args,
             )
             orders_data = orders_resp.json()
             orders_list = orders_data.get('orders', [])
@@ -795,7 +825,7 @@ async def search_customer(
     Fetch customer and order info by phone.
     """
     store = _resolve_store_from_workspace(store, x_workspace)
-    data = await fetch_customer_by_phone(phone_number, store=store)
+    data = await fetch_customer_by_phone(phone_number, store=store, x_workspace=x_workspace)
     if not data:
         raise HTTPException(status_code=404, detail="Customer not found")
     if isinstance(data, dict) and data.get("status") == 403:
@@ -845,7 +875,7 @@ async def search_customers_all(
     Return all Shopify customers matching multiple phone normalizations.
     Each customer includes minimal profile and primary address if available.
     """
-    store = _resolve_store_from_workspace(store, x_workspace)
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     cand = _candidate_phones(phone_number)
     if not cand:
         return []
@@ -853,7 +883,7 @@ async def search_customers_all(
     async with httpx.AsyncClient() as client:
         for pn in cand:
             params = {'query': f'phone:{pn}'}
-            resp = await client.get(f"{admin_api_base(store)}/customers/search.json", params=params, timeout=10, **_client_args(store=store))
+            resp = await client.get(f"{base}/customers/search.json", params=params, timeout=10, **extra_args)
             if resp.status_code == 403:
                 raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
             customers = resp.json().get('customers', [])
@@ -897,7 +927,7 @@ async def search_customers_all(
                 "order": "created_at desc",
             }
             try:
-                orders_resp = await client.get(f"{admin_api_base(store)}/orders.json", params=order_params, timeout=10, **_client_args(store=store))
+                orders_resp = await client.get(f"{base}/orders.json", params=order_params, timeout=10, **extra_args)
                 orders_list = orders_resp.json().get('orders', [])
                 if orders_list:
                     o = orders_list[0]
@@ -1057,7 +1087,7 @@ async def shopify_orders(
     x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
     """Return recent orders for a Shopify customer (admin-simplified list)."""
-    store = _resolve_store_from_workspace(store, x_workspace)
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     params = {
         "customer_id": customer_id,
         "status": "any",
@@ -1066,7 +1096,7 @@ async def shopify_orders(
     }
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(f"{admin_api_base(store)}/orders.json", params=params, timeout=15, **_client_args(store=store))
+            resp = await client.get(f"{base}/orders.json", params=params, timeout=15, **extra_args)
             if resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")
                 detail = {"error": "rate_limited", "message": "Shopify rate limit reached", "retry_after": retry_after}
@@ -1082,7 +1112,7 @@ async def shopify_orders(
             raise
 
         orders = resp.json().get("orders", [])
-        domain = admin_api_base(store).replace("https://", "").replace("http://", "").split("/admin/api", 1)[0]
+        domain = base.replace("https://", "").replace("http://", "").split("/admin/api", 1)[0]
         simplified = []
         for o in orders:
             # Shopify REST Admin API returns order.tags as a comma-separated string; expose as an array
@@ -1103,7 +1133,12 @@ async def shopify_orders(
         return simplified
 
 @router.post("/shopify-orders/{order_id}/tags")
-async def add_order_tag(order_id: str, body: dict = Body(...)):
+async def add_order_tag(
+    order_id: str,
+    body: dict = Body(...),
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """Add a tag to a Shopify order. Requires write_orders scope.
 
     Body: { "tag": "..." }
@@ -1114,10 +1149,10 @@ async def add_order_tag(order_id: str, body: dict = Body(...)):
     if not tag:
         raise HTTPException(status_code=400, detail="Missing tag")
 
-    base = admin_api_base()
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     async with httpx.AsyncClient() as client:
         # Fetch current tags first to avoid overwriting
-        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **_client_args())
+        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **extra_args)
         if get_resp.status_code == 404:
             raise HTTPException(status_code=404, detail="Order not found")
         if get_resp.status_code == 403:
@@ -1130,7 +1165,7 @@ async def add_order_tag(order_id: str, body: dict = Body(...)):
             current_tags.append(tag)
 
         update_payload = {"order": {"id": int(str(order_id)), "tags": ", ".join(current_tags)}}
-        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **extra_args)
         if put_resp.status_code == 403:
             raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
         put_resp.raise_for_status()
@@ -1140,7 +1175,12 @@ async def add_order_tag(order_id: str, body: dict = Body(...)):
         return {"ok": True, "order_id": updated_order.get("id") or order_id, "tags": tags_arr}
 
 @router.delete("/shopify-orders/{order_id}/tags")
-async def remove_order_tag(order_id: str, body: dict = Body(...)):
+async def remove_order_tag(
+    order_id: str,
+    body: dict = Body(...),
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """Remove a tag from a Shopify order. Requires write_orders scope.
 
     Body: { "tag": "..." }
@@ -1151,9 +1191,9 @@ async def remove_order_tag(order_id: str, body: dict = Body(...)):
     if not tag:
         raise HTTPException(status_code=400, detail="Missing tag")
 
-    base = admin_api_base()
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     async with httpx.AsyncClient() as client:
-        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **_client_args())
+        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **extra_args)
         if get_resp.status_code == 404:
             raise HTTPException(status_code=404, detail="Order not found")
         if get_resp.status_code == 403:
@@ -1165,7 +1205,7 @@ async def remove_order_tag(order_id: str, body: dict = Body(...)):
         next_tags = [t for t in current_tags if t.lower() != tag.lower()]
 
         update_payload = {"order": {"id": int(str(order_id)), "tags": ", ".join(next_tags)}}
-        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **extra_args)
         if put_resp.status_code == 403:
             raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
         put_resp.raise_for_status()
@@ -1175,7 +1215,12 @@ async def remove_order_tag(order_id: str, body: dict = Body(...)):
         return {"ok": True, "order_id": updated_order.get("id") or order_id, "tags": tags_arr}
 
 @router.post("/shopify-orders/{order_id}/note")
-async def add_order_note(order_id: str, body: dict = Body(...)):
+async def add_order_note(
+    order_id: str,
+    body: dict = Body(...),
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """Append a note to a Shopify order. Requires write_orders scope.
 
     Body: { "note": "..." }
@@ -1187,10 +1232,10 @@ async def add_order_note(order_id: str, body: dict = Body(...)):
     if not new_note_fragment:
         raise HTTPException(status_code=400, detail="Missing note")
 
-    base = admin_api_base()
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     async with httpx.AsyncClient() as client:
         # Fetch current order to read existing note
-        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **_client_args())
+        get_resp = await client.get(f"{base}/orders/{order_id}.json", timeout=15, **extra_args)
         if get_resp.status_code == 404:
             raise HTTPException(status_code=404, detail="Order not found")
         if get_resp.status_code == 403:
@@ -1201,7 +1246,7 @@ async def add_order_note(order_id: str, body: dict = Body(...)):
         combined_note = new_note_fragment if not current_note else f"{current_note}\n{new_note_fragment}"
 
         update_payload = {"order": {"id": int(str(order_id)), "note": combined_note}}
-        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **extra_args)
         if put_resp.status_code == 403:
             raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
         put_resp.raise_for_status()
@@ -1210,15 +1255,19 @@ async def add_order_note(order_id: str, body: dict = Body(...)):
         return {"ok": True, "order_id": updated_order.get("id") or order_id, "note": final_note}
 
 @router.delete("/shopify-orders/{order_id}/note")
-async def delete_order_note(order_id: str):
+async def delete_order_note(
+    order_id: str,
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """Clear the note on a Shopify order (set to empty). Requires write_orders scope.
 
     Returns: { ok: true, order_id, note: "" }
     """
-    base = admin_api_base()
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     async with httpx.AsyncClient() as client:
         update_payload = {"order": {"id": int(str(order_id)), "note": ""}}
-        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **_client_args())
+        put_resp = await client.put(f"{base}/orders/{order_id}.json", json=update_payload, timeout=15, **extra_args)
         if put_resp.status_code == 403:
             raise HTTPException(status_code=403, detail="Shopify token lacks write_orders scope or app not installed.")
         if put_resp.status_code == 404:
@@ -1228,10 +1277,14 @@ async def delete_order_note(order_id: str):
         return {"ok": True, "order_id": updated_order.get("id") or order_id, "note": ""}
 
 @router.get("/shopify-shipping-options")
-async def get_shipping_options():
-    endpoint = f"{admin_api_base()}/shipping_zones.json"
+async def get_shipping_options(
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
+    endpoint = f"{base}/shipping_zones.json"
     async with httpx.AsyncClient() as client:
-        resp = await client.get(endpoint, **_client_args())
+        resp = await client.get(endpoint, **extra_args)
         resp.raise_for_status()
         data = resp.json()
         shipping_methods = []

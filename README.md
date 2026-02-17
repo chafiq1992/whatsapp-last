@@ -193,6 +193,7 @@ This project uses Redis for:
 - Caching recent messages per user
 - WebSocket pub/sub fanout across instances
 - Optional HTTP rate limiting
+- (Optional) Survey scheduler that can send a "help us improve / 15% discount" invite message
 
 You can run Redis locally alongside the backend using Docker Compose:
 
@@ -210,6 +211,7 @@ Environment variables you can override (see `env.example`):
 - `REDIS_URL` (default: `redis://redis:6379` in Compose, `redis://localhost:6379` otherwise)
 - `ENABLE_WS_PUBSUB` (default: `1`)
 - `SEND_TEXT_PER_MIN` and `SEND_MEDIA_PER_MIN` for rate limits
+- `ENABLE_SURVEY_SCHEDULER` (default: `0`) to enable the background survey invite loop (requires Redis)
 
 If running the backend without Docker Compose but with a local Redis:
 

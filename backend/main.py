@@ -368,6 +368,10 @@ SEND_MEDIA_PER_MIN = int(os.getenv("SEND_MEDIA_PER_MIN", "5"))
 BURST_WINDOW_SEC = int(os.getenv("BURST_WINDOW_SEC", "10"))
 ENABLE_WS_PUBSUB = os.getenv("ENABLE_WS_PUBSUB", "1") == "1"
 TRACK_CLICKS_PER_MIN = int(os.getenv("TRACK_CLICKS_PER_MIN", "240"))
+# Survey scheduler: if enabled and Redis is connected, the backend will periodically sweep
+# conversations and send the "help us improve / 15% discount" survey invite.
+# Default is OFF to avoid accidental bulk sends when Redis is newly enabled.
+ENABLE_SURVEY_SCHEDULER = (os.getenv("ENABLE_SURVEY_SCHEDULER", "0") or "0").strip() == "1"
 # NOTE: TRACK_IP_SALT is finalized after AGENT_AUTH_SECRET is loaded (defined later).
 TRACK_IP_SALT = (os.getenv("TRACK_IP_SALT", "") or "").strip()
 TRACK_ALLOWED_ORIGINS_ENV = (os.getenv("TRACK_ALLOWED_ORIGINS", "") or "").strip()
@@ -8860,7 +8864,7 @@ async def startup():
 
     # Start survey scheduler background loop (requires Redis)
     try:
-        if redis_manager.redis_client:
+        if redis_manager.redis_client and ENABLE_SURVEY_SCHEDULER:
             asyncio.create_task(run_survey_scheduler())
     except Exception as exc:
         print(f"Failed to start survey scheduler: {exc}")

@@ -5,6 +5,7 @@ import AutomationStudio from './AutomationStudio';
 import CustomersSegmentsPage from './CustomersSegmentsPage';
 import WhatsAppTemplatesPanel from './WhatsAppTemplatesPanel';
 import UsersTagsAdminPanel from './UsersTagsAdminPanel';
+import ShopifyConnectPanel from './ShopifyConnectPanel';
 import { BarChart3, Bot, MessageSquareText, Users, Settings as SettingsIcon, BookOpen, Home, UserCog, Tag } from 'lucide-react';
 
 function normalizeWorkspaceId(v) {
@@ -62,7 +63,7 @@ export default function AutomationSettingsPage() {
   const [allowed, setAllowed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('workspaces'); // analytics | automation | templates | customers | users_tags | workspaces | docs
+  const [activeTab, setActiveTab] = useState('workspaces'); // analytics | automation | templates | customers | users_tags | stores | workspaces | docs
 
   const [workspaces, setWorkspaces] = useState([]);
   const [defaultWorkspace, setDefaultWorkspace] = useState('irranova');
@@ -479,6 +480,7 @@ export default function AutomationSettingsPage() {
       if (key.includes('/settings/templates') || key.includes('/#/settings/templates') || key.includes('/whatsapp-templates')) return 'templates';
       if (key.includes('/settings/customers') || key.includes('/#/settings/customers') || key.includes('/customers')) return 'customers';
       if (key.includes('/settings/users') || key.includes('/#/settings/users') || key.includes('/settings/tags') || key.includes('/#/settings/tags') || key.includes('/settings/users-tags') || key.includes('/#/settings/users-tags')) return 'users_tags';
+      if (key.includes('/settings/stores') || key.includes('/#/settings/stores') || key.includes('/shopify-connect')) return 'stores';
       if (key.includes('/settings/docs') || key.includes('/#/settings/docs')) return 'docs';
       if (key.includes('/settings')) return 'workspaces';
       // Back-compat
@@ -574,6 +576,14 @@ export default function AutomationSettingsPage() {
               title="Workspaces"
             >
               <span className="inline-flex items-center gap-2"><SettingsIcon className="w-4 h-4" />Workspaces</span>
+            </button>
+            <button
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'stores' ? 'bg-fuchsia-400/20 border border-fuchsia-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('stores')}
+              title="Your stores"
+              type="button"
+            >
+              <span className="inline-flex items-center gap-2">🛍️ Your stores</span>
             </button>
             <button
               type="button"
@@ -680,6 +690,14 @@ export default function AutomationSettingsPage() {
 
         {!loading && activeTab === 'users_tags' && (
           <UsersTagsAdminPanel />
+        )}
+
+        {!loading && activeTab === 'stores' && (
+          <ShopifyConnectPanel
+            workspace={workspace}
+            setWorkspace={(ws) => setWorkspace(normalizeWorkspaceId(ws))}
+            workspaces={workspaces}
+          />
         )}
 
         {!loading && activeTab === 'workspaces' && (

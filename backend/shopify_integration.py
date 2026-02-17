@@ -205,6 +205,80 @@ logger = logging.getLogger(__name__)
 _auth_mode = "token" if (ACCESS_TOKEN or (PASSWORD and str(PASSWORD).startswith("shpat_"))) else "basic"
 logger.info("Shopify auth mode: %s", _auth_mode)
 
+def _normalize_ws_id(raw: str | None) -> str:
+    try:
+        return str(raw or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _oauth_enabled_workspaces() -> set[str]:
+    raw = (os.environ.get("SHOPIFY_OAUTH_WORKSPACES") or "").strip()
+    if not raw:
+        return {"irranova"}  # safe default
+    out: set[str] = set()
+    for part in raw.split(","):
+        p = (part or "").strip().lower()
+        if p:
+            out.add(p)
+    return out
+
+
+def _oauth_disabled_workspaces() -> set[str]:
+    raw = (os.environ.get("SHOPIFY_OAUTH_DISABLED_WORKSPACES") or "irrakids").strip()
+    out: set[str] = set()
+    for part in raw.split(","):
+        p = (part or "").strip().lower()
+        if p:
+            out.add(p)
+    return out
+
+
+def _oauth_enabled_for_ws(ws: str) -> bool:
+    w = _normalize_ws_id(ws)
+    if not w:
+        return False
+    if w in _oauth_disabled_workspaces():
+        return False
+    enabled = _oauth_enabled_workspaces()
+    return any((w == base) or w.startswith(base) or (base in w) for base in enabled)
+
+
+async def _get_shopify_oauth_record(ws: str) -> dict | None:
+    """Load per-workspace Shopify OAuth record from the app settings DB.
+
+    Stored under settings key: shopify_oauth::<workspace>
+    """
+    w = _normalize_ws_id(ws)
+    if not w:
+        return None
+    if not _oauth_enabled_for_ws(w):
+        return None
+    try:
+        # Local import to avoid circular dependency at import-time (main imports this router).
+        from .main import db_manager, _ws_setting_key  # type: ignore
+        key = _ws_setting_key("shopify_oauth", w)
+        raw = await db_manager.get_setting(key)
+        if not raw:
+            return None
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            return None
+        shop = str(obj.get("shop") or "").strip().lower()
+        tok = str(obj.get("access_token") or "").strip()
+        if not shop or not tok:
+            return None
+        return {"shop": shop, "access_token": tok, "scopes": obj.get("scopes")}
+    except Exception:
+        return None
+
+
+def _oauth_admin_api_base(shop_domain: str) -> str:
+    shop = str(shop_domain or "").strip()
+    if not shop:
+        raise HTTPException(status_code=500, detail="Missing OAuth shop domain")
+    return f"https://{shop}/admin/api/{API_VERSION}"
+
 def normalize_phone(phone):
     if not phone:
         return ""
@@ -558,11 +632,19 @@ async def shopify_variant(
     store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
     x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
+    # Prefer OAuth token+shop for this workspace if present (DB-stored via Settings -> Your stores).
+    ws = _normalize_ws_id(x_workspace)
+    oauth = await _get_shopify_oauth_record(ws)
     store = _resolve_store_from_workspace(store, x_workspace)
-    endpoint = f"{admin_api_base(store)}/variants/{variant_id}.json"
+    if oauth:
+        endpoint = f"{_oauth_admin_api_base(str(oauth.get('shop') or ''))}/variants/{variant_id}.json"
+        extra_args = {"headers": {"X-Shopify-Access-Token": str(oauth.get("access_token") or "").strip()}}
+    else:
+        endpoint = f"{admin_api_base(store)}/variants/{variant_id}.json"
+        extra_args = _client_args(store=store)
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(endpoint, **_client_args(store=store))
+            resp = await client.get(endpoint, **extra_args)
         except httpx.RequestError as e:
             logger.warning("Shopify variant request failed: %s", e)
             raise HTTPException(status_code=502, detail="Shopify unreachable")

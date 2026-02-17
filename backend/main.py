@@ -779,6 +779,9 @@ def _is_public_path(path: str) -> bool:
     # Shopify webhooks must remain public (Shopify calls server-to-server).
     if path.startswith("/shopify/webhook"):
         return True
+    # Shopify OAuth callback must be public (Shopify redirects the browser back to us).
+    if path.startswith("/admin/shopify/oauth/callback"):
+        return True
     # Delivery app outbound status webhooks must be public (called server-to-server).
     if path.startswith("/delivery/webhook"):
         return True
@@ -8500,6 +8503,20 @@ except Exception as exc:
     print(f"⚠️ Shopify integration disabled: {exc}")
     SHOPIFY_ROUTES_ENABLED = False
     SHOPIFY_ROUTES_ERROR = str(exc)
+
+# Shopify OAuth connect routes (admin UI). These are safe to mount even if Shopify env token config is missing,
+# because OAuth uses DB-stored tokens per workspace when enabled.
+SHOPIFY_OAUTH_ROUTES_ENABLED: bool = False
+SHOPIFY_OAUTH_ROUTES_ERROR: str | None = None
+try:
+    from .shopify_oauth_routes import router as shopify_oauth_router  # type: ignore
+    app.include_router(shopify_oauth_router)
+    print("✅ Shopify OAuth connect routes enabled")
+    SHOPIFY_OAUTH_ROUTES_ENABLED = True
+except Exception as exc:
+    print(f"⚠️ Shopify OAuth routes disabled: {exc}")
+    SHOPIFY_OAUTH_ROUTES_ENABLED = False
+    SHOPIFY_OAUTH_ROUTES_ERROR = str(exc)
 
 def _has_route(path: str, method: str) -> bool:
     try:

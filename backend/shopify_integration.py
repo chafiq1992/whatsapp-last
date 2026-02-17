@@ -1255,8 +1255,13 @@ async def get_shipping_options():
         return shipping_methods
 
 @router.post("/create-shopify-order")
-async def create_shopify_order(data: dict = Body(...)):
-    base = admin_api_base()
+async def create_shopify_order(
+    data: dict = Body(...),
+    store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
+    store = _resolve_store_from_workspace(store, x_workspace)
+    base = admin_api_base(store)
     warnings: list[str] = []
     shipping_title = data.get("delivery", "Home Delivery")
     shipping_lines = [{
@@ -1279,7 +1284,7 @@ async def create_shopify_order(data: dict = Body(...)):
     # If no explicit id provided, try to resolve by phone best-effort
     if not customer_id:
         try:
-            resolved = await fetch_customer_by_phone(data.get("phone", ""))
+            resolved = await fetch_customer_by_phone(data.get("phone", ""), store=store)
             if isinstance(resolved, dict) and resolved.get("customer_id"):
                 customer_id = resolved["customer_id"]
         except Exception:
@@ -1290,7 +1295,12 @@ async def create_shopify_order(data: dict = Body(...)):
         try:
             email_q = (data.get("email") or "").strip()
             async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{base}/customers/search.json", params={"query": f"email:{email_q}"}, timeout=10, **_client_args())
+                resp = await client.get(
+                    f"{base}/customers/search.json",
+                    params={"query": f"email:{email_q}"},
+                    timeout=10,
+                    **_client_args(store=store),
+                )
                 if resp.status_code == 200:
                     items = (resp.json() or {}).get("customers") or []
                     if items:
@@ -1327,7 +1337,7 @@ async def create_shopify_order(data: dict = Body(...)):
             }
             CUSTOMERS_ENDPOINT = f"{base}/customers.json"
             async with httpx.AsyncClient() as client:
-                c_resp = await client.post(CUSTOMERS_ENDPOINT, json=customer_payload, **_client_args())
+                c_resp = await client.post(CUSTOMERS_ENDPOINT, json=customer_payload, **_client_args(store=store))
                 if c_resp.status_code in (201, 200):
                     c_json = c_resp.json() or {}
                     created = (c_json.get("customer") or {})
@@ -1416,11 +1426,42 @@ async def create_shopify_order(data: dict = Body(...)):
         }
     }
     DRAFT_ORDERS_ENDPOINT = f"{base}/draft_orders.json"
+    def _shopify_err_detail(resp: httpx.Response) -> str:
+        # Shopify commonly returns: {"errors": "..."} (string or dict) or {error, errors, message}.
+        try:
+            payload = resp.json()
+            if isinstance(payload, dict):
+                if payload.get("errors") is not None:
+                    return f"{payload.get('errors')}"
+                if payload.get("error") is not None:
+                    return f"{payload.get('error')}"
+                if payload.get("message") is not None:
+                    return f"{payload.get('message')}"
+        except Exception:
+            pass
+        try:
+            return (resp.text or "").strip()
+        except Exception:
+            return ""
+
     async with httpx.AsyncClient() as client:
-        resp = await client.post(DRAFT_ORDERS_ENDPOINT, json=draft_order_payload, **_client_args())
-        resp.raise_for_status()
-        draft_data = resp.json()
-        draft_id = draft_data["draft_order"]["id"]
+        try:
+            resp = await client.post(
+                DRAFT_ORDERS_ENDPOINT,
+                json=draft_order_payload,
+                timeout=20,
+                **_client_args(store=store),
+            )
+            resp.raise_for_status()
+            draft_data = resp.json()
+            draft_id = draft_data["draft_order"]["id"]
+        except httpx.HTTPStatusError as exc:
+            r = exc.response
+            detail = _shopify_err_detail(r) if r is not None else str(exc)
+            # Preserve Shopify status codes (401/403/404/422) so the UI can show a real cause.
+            raise HTTPException(status_code=int(getattr(r, "status_code", 502) or 502), detail=detail[:2000])
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to reach Shopify: {str(exc)[:500]}")
 
         # Draft admin URL
         domain = base.replace("https://", "").replace("http://", "").split("/admin/api", 1)[0]
@@ -1441,9 +1482,21 @@ async def create_shopify_order(data: dict = Body(...)):
 
         # Complete the draft order (payment pending)
         COMPLETE_ENDPOINT = f"{base}/draft_orders/{draft_id}/complete.json"
-        comp_resp = await client.post(COMPLETE_ENDPOINT, params={"payment_pending": "true"}, **_client_args())
-        comp_resp.raise_for_status()
-        comp_json = comp_resp.json() or {}
+        try:
+            comp_resp = await client.post(
+                COMPLETE_ENDPOINT,
+                params={"payment_pending": "true"},
+                timeout=20,
+                **_client_args(store=store),
+            )
+            comp_resp.raise_for_status()
+            comp_json = comp_resp.json() or {}
+        except httpx.HTTPStatusError as exc:
+            r = exc.response
+            detail = _shopify_err_detail(r) if r is not None else str(exc)
+            raise HTTPException(status_code=int(getattr(r, "status_code", 502) or 502), detail=detail[:2000])
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to reach Shopify: {str(exc)[:500]}")
         order_id = (
             (comp_json.get("draft_order") or {}).get("order_id")
             or (comp_json.get("order") or {}).get("id")
@@ -1476,7 +1529,7 @@ async def create_shopify_order(data: dict = Body(...)):
                 })
             for payload in metafields_payloads:
                 try:
-                    mf_resp = await client.post(metafields_endpoint, json=payload, **_client_args())
+                    mf_resp = await client.post(metafields_endpoint, json=payload, timeout=15, **_client_args(store=store))
                     # Do not raise if forbidden; continue best-effort
                     if mf_resp.status_code >= 400:
                         logger.warning("Metafield write failed: %s", mf_resp.text)

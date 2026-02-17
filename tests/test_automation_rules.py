@@ -189,6 +189,65 @@ def test_automation_runner_binds_workspace_context(db_manager, monkeypatch):
     assert seen_ws["value"] == "irranova"
 
 
+def test_automation_condition_no_order_in_last_hours(db_manager, monkeypatch):
+    from backend import main
+
+    try:
+        main.message_processor._automation_rules_cache = {}
+    except Exception:
+        pass
+
+    asyncio.run(
+        db_manager.set_setting(
+            "automation_rules",
+            [
+                {
+                    "id": "r_no_order_guard",
+                    "name": "No recent order",
+                    "enabled": True,
+                    "cooldown_seconds": 0,
+                    "trigger": {"source": "whatsapp", "event": "incoming_message"},
+                    "condition": {"match": "contains", "keywords": ["status"], "no_order_in_last_hours": 48},
+                    "actions": [{"type": "send_text", "text": "We can help with your order."}],
+                }
+            ],
+        )
+    )
+
+    sent = []
+
+    async def fake_process_outgoing_message(message_data: dict):
+        sent.append(message_data)
+        return message_data
+
+    async def fake_has_recent_order(*, user_id: str, hours: float, workspace: str | None = None):
+        return True
+
+    monkeypatch.setattr(main.message_processor, "process_outgoing_message", fake_process_outgoing_message)
+    monkeypatch.setattr(main.message_processor, "_has_shopify_order_in_last_hours", fake_has_recent_order)
+
+    # Recent order exists -> must not fire.
+    asyncio.run(
+        main.message_processor._run_simple_automations(
+            "212600000000", incoming_text="order status?", message_obj={"from_me": False}
+        )
+    )
+    assert len(sent) == 0
+
+    async def fake_has_no_recent_order(*, user_id: str, hours: float, workspace: str | None = None):
+        return False
+
+    monkeypatch.setattr(main.message_processor, "_has_shopify_order_in_last_hours", fake_has_no_recent_order)
+
+    # No recent order -> should fire.
+    asyncio.run(
+        main.message_processor._run_simple_automations(
+            "212600000000", incoming_text="order status?", message_obj={"from_me": False}
+        )
+    )
+    assert any("We can help with your order." in str(m.get("message") or "") for m in sent)
+
+
 def test_inbox_env_endpoints_roundtrip(client):
     payload = {
         "allowed_phone_number_ids": ["pid1", "pid2"],

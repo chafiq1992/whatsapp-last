@@ -142,6 +142,23 @@ def _resolve_store_from_workspace(store: str | None, x_workspace: str | None) ->
         except Exception:
             pass
 
+        # 4) Default fallback store (helps new workspaces behave like the primary one).
+        # You can set SHOPIFY_DEFAULT_STORE_PREFIX=IRRAKIDS (or IRRANOVA, etc).
+        try:
+            default_prefix = (os.getenv("SHOPIFY_DEFAULT_STORE_PREFIX", "") or "").strip().upper()
+            if default_prefix:
+                _load_store_config_for_prefix(default_prefix)
+                return default_prefix
+        except Exception:
+            pass
+
+        # 5) Last resort: if IRRAKIDS is configured, use it (common single-store deployments).
+        try:
+            _load_store_config_for_prefix("IRRAKIDS")
+            return "IRRAKIDS"
+        except Exception:
+            pass
+
         return None
     except Exception:
         return None

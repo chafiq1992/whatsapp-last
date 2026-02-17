@@ -106,7 +106,7 @@ function groupConsecutiveImages(messages) {
   return grouped;
 }
 
-function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversationTags }) {
+function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversationTags, workspace, catalogProducts }) {
   const [messages, setMessages] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHitIndexes, setSearchHitIndexes] = useState([]);
@@ -115,7 +115,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
   const [sendingQueues, setSendingQueues] = useState({});
   const [unreadSeparatorIndex, setUnreadSeparatorIndex] = useState(null);
   const [replyTarget, setReplyTarget] = useState(null);
-  const [catalogProducts, setCatalogProducts] = useState({});
+  // catalogProducts is provided by App (workspace-scoped) so it updates immediately on workspace switch
   const [isTypingOther, setIsTypingOther] = useState(false);
   const MESSAGE_LIMIT = 50;
   const [offset, setOffset] = useState(0);
@@ -623,27 +623,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
 
   // (Consolidated into the conversation-change effect above)
 
-  // Load catalog products
-  useEffect(() => {
-    async function fetchAllProducts() {
-      try {
-        // Use cached endpoint for instant load
-        const res = await api.get(`${API_BASE}/catalog-all-products`);
-        const lookup = {};
-        (res.data || []).forEach(prod => {
-          lookup[String(prod.retailer_id)] = {
-            name: prod.name,
-            image: prod.images?.[0]?.url,
-            price: prod.price,
-          };
-        });
-        setCatalogProducts(lookup);
-      } catch (error) {
-        console.error('Failed to fetch catalog products:', error);
-      }
-    }
-    fetchAllProducts();
-  }, []);
+  // (Catalog products fetch moved to App so it re-runs on workspace changes)
 
   // Fallback: fetch messages via HTTP if WebSocket fails (stabilised reference)
   const fetchMessages = useCallback(async ({ offset: off = 0, append = false } = {}, signal, uidParam) => {
@@ -652,8 +632,9 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     try {
       const current = messagesRef.current || [];
       // Prefer cursor-based fetch
-      const oldest = (append && current.length > 0) ? current[0]?.timestamp : null;
-      const newest = (!append && current.length > 0) ? current[current.length - 1]?.timestamp : null;
+      // Use the same pivot field the backend uses for ordering: COALESCE(server_ts, timestamp)
+      const oldest = (append && current.length > 0) ? (current[0]?.server_ts || current[0]?.timestamp) : null;
+      const newest = (!append && current.length > 0) ? (current[current.length - 1]?.server_ts || current[current.length - 1]?.timestamp) : null;
       const params = new URLSearchParams();
       const initialLoad = !append && current.length === 0;
       // Fast path on first open: use offset=0 so the backend can serve Redis-cached recent messages.
@@ -1601,8 +1582,10 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
       
       <Suspense fallback={<div className="p-2 text-sm text-gray-400">Loading catalog…</div>}>
         <CatalogPanel
+          key={`catalog:${String(workspace || 'default')}`}
           activeUser={activeUser}
           websocket={ws}
+          workspace={workspace}
           onMessageSent={(optimistic) => {
             const enriched = { ...optimistic, client_ts: optimistic.client_ts || Date.now() };
             setMessages(prev => sortByTime([...prev, enriched]));
@@ -1685,7 +1668,9 @@ const areEqual = (prevProps, nextProps) => {
     prevProps.ws === nextProps.ws &&
     prevProps.adminWs === nextProps.adminWs &&
     prevProps.currentAgent === nextProps.currentAgent &&
-    prevProps.onUpdateConversationTags === nextProps.onUpdateConversationTags
+    prevProps.onUpdateConversationTags === nextProps.onUpdateConversationTags &&
+    prevProps.workspace === nextProps.workspace &&
+    prevProps.catalogProducts === nextProps.catalogProducts
   );
 };
 

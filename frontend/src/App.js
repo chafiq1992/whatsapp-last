@@ -43,6 +43,10 @@ export default function App() {
   const [products, setProducts] = useState([]);
   const [catalogProducts, setCatalogProducts] = useState({});
   const [conversations, setConversations] = useState([]);
+  const CONV_PAGE_LIMIT = 200;
+  const [convOffset, setConvOffset] = useState(0);
+  const [convHasMore, setConvHasMore] = useState(true);
+  const [convLoadingMore, setConvLoadingMore] = useState(false);
   const [activeUser, setActiveUser] = useState(null);
   const [currentAgent, setCurrentAgent] = useState("");
   const [agentInboxMode, setAgentInboxMode] = useState(false);
@@ -55,6 +59,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const activeUserRef = useRef(activeUser);
   const convFetchInFlightRef = useRef(null);
+  const convMoreInFlightRef = useRef(null);
 
   const isLoginPath = typeof window !== 'undefined' && window.location && window.location.pathname === '/login';
 
@@ -179,16 +184,22 @@ export default function App() {
       try {
         if (showSpinner) setLoadingConversations(true);
         // Keep the initial inbox fetch light; server defaults are also capped.
-        const res = await api.get(`${API_BASE}/conversations?limit=200&offset=0`);
+        const res = await api.get(`${API_BASE}/conversations?limit=${CONV_PAGE_LIMIT}&offset=0`);
         const data = res?.data;
         if (Array.isArray(data)) {
           setConversations(data);
+          setConvOffset(data.length);
+          setConvHasMore(data.length >= CONV_PAGE_LIMIT);
           // Best-effort cache; don't block UI on IndexedDB
           try { saveConversations(data); } catch {}
         } else {
           // Unexpected payload shape: fall back to cached list
           const cached = await loadConversations();
-          if (cached.length > 0) setConversations(cached);
+          if (cached.length > 0) {
+            setConversations(cached);
+            setConvOffset(cached.length);
+            setConvHasMore(cached.length >= CONV_PAGE_LIMIT);
+          }
         }
         // Reset backoff on success
         try { fetchConversations._backoff = { until: 0, ms: 0 }; } catch {}
@@ -206,6 +217,8 @@ export default function App() {
         const cached = await loadConversations();
         if (cached.length > 0) {
           setConversations(cached);
+          setConvOffset(cached.length);
+          setConvHasMore(cached.length >= CONV_PAGE_LIMIT);
         }
       } finally {
         convFetchInFlightRef.current = null;
@@ -214,6 +227,45 @@ export default function App() {
       }
     })();
     convFetchInFlightRef.current = p;
+    return p;
+  };
+
+  // Load additional/older conversations for the left chat list (infinite scroll)
+  const loadMoreConversations = async () => {
+    if (convLoadingMore || !convHasMore) return;
+    if (convMoreInFlightRef.current) return convMoreInFlightRef.current;
+    const p = (async () => {
+      setConvLoadingMore(true);
+      try {
+        const nextOffset = convOffset;
+        const res = await api.get(`${API_BASE}/conversations?limit=${CONV_PAGE_LIMIT}&offset=${nextOffset}`);
+        const page = Array.isArray(res?.data) ? res.data : [];
+        if (page.length === 0) {
+          setConvHasMore(false);
+          return;
+        }
+        setConversations((prev) => {
+          const seen = new Set((prev || []).map((c) => c?.user_id));
+          const merged = [...(prev || [])];
+          for (const c of page) {
+            if (!c?.user_id) continue;
+            if (seen.has(c.user_id)) continue;
+            merged.push(c);
+            seen.add(c.user_id);
+          }
+          return merged;
+        });
+        setConvOffset((o) => o + page.length);
+        setConvHasMore(page.length >= CONV_PAGE_LIMIT);
+      } catch (e) {
+        // Keep hasMore as-is; user can retry by scrolling again
+      } finally {
+        setConvLoadingMore(false);
+      }
+    })().finally(() => {
+      convMoreInFlightRef.current = null;
+    });
+    convMoreInFlightRef.current = p;
     return p;
   };
 
@@ -252,6 +304,9 @@ export default function App() {
     // Prevent any cross-workspace UI leakage while the new workspace loads.
     setActiveUser(null);
     setConversations([]);
+    setConvOffset(0);
+    setConvHasMore(true);
+    setConvLoadingMore(false);
     setCatalogProducts({});
     setProducts([]);
     loadConversations().then(cached => {
@@ -679,6 +734,9 @@ export default function App() {
               currentAgent={currentAgent}
               loading={loadingConversations}
               onUpdateConversationTags={handleUpdateConversationTags}
+            onLoadMore={loadMoreConversations}
+            hasMore={convHasMore}
+            loadingMore={convLoadingMore}
             />
           ) : (
             <div className="p-3 text-sm text-gray-300">Checking session…</div>
@@ -696,6 +754,7 @@ export default function App() {
             currentAgent={currentAgent}
             adminWs={adminWsRef.current}
             onUpdateConversationTags={handleUpdateConversationTags}
+            workspace={workspace}
           />
         ) : null}
         {/* Persistent audio bar above composer area */}

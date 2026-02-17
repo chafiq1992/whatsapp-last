@@ -22,6 +22,7 @@ export default function CatalogPanel({
   activeUser,
   websocket,
   onMessageSent,
+  workspace,
 }) {
   // Sets and selection
   const [sets, setSets] = useState([]);
@@ -82,7 +83,8 @@ export default function CatalogPanel({
       const cached = await loadCatalogSets();
       if (cached?.length) {
         setSets(cached);
-        if (!selectedSet) setSelectedSet(cached[0].id);
+        // Use functional update to avoid stale closure when workspace switches
+        if (cached[0]?.id) setSelectedSet((prev) => prev ?? cached[0].id);
       }
     } catch {}
     try {
@@ -90,9 +92,7 @@ export default function CatalogPanel({
       const list = Array.isArray(res.data) ? res.data : [];
       setSets(list);
       await saveCatalogSets(list);
-      if (!selectedSet && list.length > 0) {
-        setSelectedSet(list[0].id);
-      }
+      if (list.length > 0 && list[0]?.id) setSelectedSet((prev) => prev ?? list[0].id);
       // Prefetch top sets into IndexedDB to speed up modal open
       try {
         const top = list.slice(0, 4);
@@ -519,8 +519,33 @@ export default function CatalogPanel({
     };
   }, [websocket, pendingOperations]);
 
-  // Initial load of sets
-  useEffect(() => { fetchSets(); }, []);
+  // Workspace-aware load/reset (switching workspace should refresh labels + sets immediately)
+  useEffect(() => {
+    try {
+      // Reset volatile UI state that shouldn't leak across workspaces
+      setSets([]);
+      setSelectedSet(null);
+      setProducts([]);
+      setHasMore(true);
+      setFetchLimit(INITIAL_FETCH_LIMIT);
+      setSelectedImages([]);
+      setModalOpen(false);
+      setModalTitle("");
+      setModalMode("products");
+      setFolderSets([]);
+      setActiveFilter(null);
+      setSendingSet(false);
+      setPendingOperations(new Set());
+      setSendQueue([]);
+      // Reset prefetch trackers
+      prefetchedThumbsRef.current = new Set();
+      prefetchedSetIdsRef.current = new Set();
+      failedThumbsRef.current = new Map();
+      autoLoadAttemptsRef.current = 0;
+    } catch {}
+    fetchSets();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace]);
 
   // Load runtime config for catalog filters (from backend env via /app-config)
   useEffect(() => {
@@ -543,7 +568,7 @@ export default function CatalogPanel({
         }
       } catch {}
     })();
-  }, []);
+  }, [workspace]);
 
   // Minimal refresh catalog control (icon button)
   function RefreshCatalogButton({ onRefresh }) {

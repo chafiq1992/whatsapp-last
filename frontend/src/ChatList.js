@@ -84,6 +84,9 @@ function ChatList({
   currentAgent = '',
   loading = false,
   onUpdateConversationTags,
+  onLoadMore,
+  hasMore = true,
+  loadingMore = false,
 }) {
   /* ─── Local state ─── */
   const [search, setSearch] = useState("");
@@ -246,6 +249,17 @@ function ChatList({
     searchDebounceRef.current = setTimeout(run, 350);
     return () => { clearTimeout(searchDebounceRef.current); controller.abort(); };
   }, [search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showArchive]);
+
+  const isUsingServerFilters = useMemo(() => {
+    return (
+      !!search ||
+      !!showUnreadOnly ||
+      !!needsReplyOnly ||
+      !!showArchive ||
+      (assignedFilter && assignedFilter !== 'all') ||
+      (Array.isArray(tagFilters) && tagFilters.length > 0)
+    );
+  }, [search, showUnreadOnly, needsReplyOnly, showArchive, assignedFilter, tagFilters]);
 
   // Admin WebSocket handled in App; avoid duplicate WS here to prevent double updates
 
@@ -549,6 +563,20 @@ function ChatList({
             overscanCount={12}
             useIsScrolling
             itemKey={(index) => filteredConversations[index]?.user_id || `row_${index}`}
+            onScroll={({ scrollOffset, scrollUpdateWasRequested }) => {
+              try {
+                if (scrollUpdateWasRequested) return;
+                if (isUsingServerFilters) return; // avoid mixing pagination with server-side filtered lists for now
+                if (!hasMore || loadingMore) return;
+                if (typeof onLoadMore !== 'function') return;
+                const h = Math.max(200, listHeight);
+                const total = filteredConversations.length * 80;
+                const remaining = total - (scrollOffset + h);
+                if (remaining < 240) {
+                  onLoadMore();
+                }
+              } catch {}
+            }}
           >
             {({ index, style }) => (
               <ConversationRow
@@ -564,6 +592,11 @@ function ChatList({
               />
             )}
           </List>
+          {loadingMore && (
+            <div className="p-2 text-center text-xs text-gray-400 border-t border-gray-800">
+              Loading more…
+            </div>
+          )}
         </div>
       )}
       {/* Settings/Automation controls moved to header */}

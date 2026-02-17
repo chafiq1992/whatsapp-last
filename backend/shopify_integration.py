@@ -115,6 +115,21 @@ def _resolve_store_from_workspace(store: str | None, x_workspace: str | None) ->
         except Exception:
             pass
 
+        # 1b) Heuristic mapping for derived workspace ids (e.g. "irranovachat" -> "IRRANOVA").
+        # This prevents store mismatches when you create new workspaces that are variants of a base store id.
+        try:
+            ws_low = ws.lower()
+            for base in ("irranova", "irrakids"):
+                if ws_low.startswith(base) or (base in ws_low):
+                    cand = base.upper()
+                    try:
+                        _load_store_config_for_prefix(cand)
+                        return cand
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
         # 2) Per-workspace override env: SHOPIFY_STORE_PREFIX_<WS>=IRRAKIDS
         try:
             override = (os.getenv(f"SHOPIFY_STORE_PREFIX_{ws_up}", "") or "").strip().upper()

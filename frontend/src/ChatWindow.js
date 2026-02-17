@@ -725,7 +725,8 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
         // When prepending, Virtuoso expects firstItemIndex to shift by number of newly prepended rows.
         // Guard against negative/NaN, and don't accumulate across conversations (reset above).
         const delta = Math.max(0, Number(after) - Number(before));
-        if (Number.isFinite(delta) && delta > 0) setFirstItemIndex((v) => v + delta);
+        // IMPORTANT: for prepend, firstItemIndex should DECREASE by the amount of items added at the start.
+        if (Number.isFinite(delta) && delta > 0) setFirstItemIndex((v) => v - delta);
         setLoadingOlder(false);
       });
     }

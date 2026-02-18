@@ -10377,6 +10377,11 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         pid_check = str(phone_number_id or "").strip()
         ws_norm_check = _coerce_workspace(ws_now)
         if pid_check and ws_norm_check:
+            # Ensure this instance has the latest DB-backed workspaces loaded before deciding a mapping is "stale".
+            try:
+                await _refresh_dynamic_workspaces_from_registry(force=False)
+            except Exception:
+                pass
             try:
                 raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
                 m0 = json.loads(raw_map) if raw_map else {}
@@ -10384,6 +10389,13 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
                 m0 = {}
             if isinstance(m0, dict):
                 existing_ws = str(m0.get(pid_check) or "").strip().lower()
+                if existing_ws and existing_ws != ws_norm_check:
+                    # If mapping points to a workspace that no longer exists (deleted), allow reassignment.
+                    try:
+                        if existing_ws not in _all_workspaces_set():
+                            existing_ws = ""
+                    except Exception:
+                        pass
                 if existing_ws and existing_ws != ws_norm_check:
                     raise HTTPException(
                         status_code=409,
@@ -10486,10 +10498,23 @@ async def _save_workspace_whatsapp_oauth(
         try:
             pid = str(phone_number_id or "").strip()
             if pid:
+                # Ensure this instance has the latest DB-backed workspaces loaded before deciding a mapping is "stale".
+                try:
+                    await _refresh_dynamic_workspaces_from_registry(force=False)
+                except Exception:
+                    pass
                 raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
                 m = json.loads(raw_map) if raw_map else {}
                 if isinstance(m, dict):
                     existing_ws = str(m.get(pid) or "").strip().lower()
+                    if existing_ws and existing_ws != ws:
+                        # If the mapping points to a workspace that no longer exists (deleted),
+                        # treat it as stale and allow reassignment.
+                        try:
+                            if existing_ws not in _all_workspaces_set():
+                                existing_ws = ""
+                        except Exception:
+                            pass
                     if existing_ws and existing_ws != ws:
                         raise HTTPException(
                             status_code=409,
@@ -10545,6 +10570,17 @@ async def _save_workspace_whatsapp_oauth(
                         m = {}
                     # Refuse to reassign if another workspace already owns this pid (solid isolation).
                     existing_ws = str(m.get(pid) or "").strip().lower()
+                    if existing_ws and existing_ws != ws_norm:
+                        try:
+                            await _refresh_dynamic_workspaces_from_registry(force=False)
+                        except Exception:
+                            pass
+                        # Allow overwrite if the current mapping points to a deleted/non-existent workspace.
+                        try:
+                            if existing_ws not in _all_workspaces_set():
+                                existing_ws = ""
+                        except Exception:
+                            pass
                     if existing_ws and existing_ws != ws_norm:
                         raise HTTPException(
                             status_code=409,
@@ -11477,6 +11513,53 @@ async def admin_delete_workspace(workspace_id: str, _: dict = Depends(require_ad
     except Exception:
         pass
 
+    # Remove phone_number_id -> workspace mappings pointing to this workspace (durable + ingress cache).
+    # Otherwise re-creating a workspace and connecting the same phone_number_id will trip the 409 guard.
+    cleared_phone_ids: list[str] = []
+    try:
+        raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
+        m = json.loads(raw_map) if raw_map else {}
+        if not isinstance(m, dict):
+            m = {}
+        # Find all phone ids assigned to this workspace id
+        for pid, wid in list(m.items()):
+            try:
+                if str(wid or "").strip().lower() == ws_id:
+                    p = str(pid or "").strip()
+                    if p:
+                        cleared_phone_ids.append(p)
+                    m.pop(pid, None)
+            except Exception:
+                continue
+        try:
+            await auth_db_manager.set_setting("phone_id_to_workspace", m)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # Best-effort clear Redis ingress mapping as well
+    try:
+        if cleared_phone_ids:
+            r = getattr(redis_manager, "redis_client", None)
+            if r:
+                for pid in cleared_phone_ids:
+                    try:
+                        await r.hdel("wa:phone_id_to_workspace", pid)
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    # Clear in-memory runtime map entries
+    try:
+        for pid in list(RUNTIME_PHONE_ID_TO_WORKSPACE.keys()):
+            try:
+                if str(RUNTIME_PHONE_ID_TO_WORKSPACE.get(pid) or "").strip().lower() == ws_id:
+                    RUNTIME_PHONE_ID_TO_WORKSPACE.pop(pid, None)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     # Best-effort delete tenant SQLite DB file if present
     deleted_files: list[str] = []
     try:
@@ -11490,7 +11573,13 @@ async def admin_delete_workspace(workspace_id: str, _: dict = Depends(require_ad
     except Exception:
         pass
 
-    return {"ok": True, "deleted": ws_id, "deleted_keys": deleted_keys, "deleted_files": deleted_files}
+    return {
+        "ok": True,
+        "deleted": ws_id,
+        "deleted_keys": deleted_keys,
+        "deleted_files": deleted_files,
+        "cleared_phone_number_ids": cleared_phone_ids,
+    }
 
 
 @app.get("/admin/catalog-filters")

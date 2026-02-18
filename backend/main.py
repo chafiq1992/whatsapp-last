@@ -414,6 +414,50 @@ DYNAMIC_WORKSPACES: set[str] = set()
 _AUTOMATION_RULES_V2_INIT_DONE: bool = False
 _AUTOMATION_RULES_V2_INIT_LOCK: asyncio.Lock = asyncio.Lock()
 
+# In multi-instance deployments (e.g., Cloud Run), a new workspace may be created on instance A
+# while instance B has not yet loaded the DB-backed registry into memory. If instance B receives
+# requests with `X-Workspace: <new>`, `_coerce_workspace()` would silently fall back to
+# DEFAULT_WORKSPACE and could overwrite the default workspace settings (e.g., inbox_env / WhatsApp creds).
+# To prevent cross-workspace leakage and "new workspace breaks old one" incidents, we refresh
+# the registry opportunistically in middleware (cached) and enforce strictness for admin/config endpoints.
+_WORKSPACE_REGISTRY_CACHE: tuple[float, set[str]] = (0.0, set())
+try:
+    _WORKSPACE_REGISTRY_CACHE_TTL_SEC = float(os.getenv("WORKSPACE_REGISTRY_CACHE_TTL_SEC", "5") or "5")
+except Exception:
+    _WORKSPACE_REGISTRY_CACHE_TTL_SEC = 5.0
+
+async def _refresh_dynamic_workspaces_from_registry(force: bool = False) -> set[str]:
+    """Best-effort: refresh `DYNAMIC_WORKSPACES` from the shared auth/settings DB registry (cached)."""
+    global _WORKSPACE_REGISTRY_CACHE
+    try:
+        now = time.time()
+        last_ts, cached = _WORKSPACE_REGISTRY_CACHE
+        if (not force) and cached and (now - float(last_ts or 0.0) < float(_WORKSPACE_REGISTRY_CACHE_TTL_SEC or 5.0)):
+            return set(cached)
+        # `_load_workspace_registry()` is defined later in this module.
+        reg = await _load_workspace_registry()  # type: ignore[name-defined]
+        out: set[str] = set()
+        if isinstance(reg, list):
+            for item in reg:
+                try:
+                    ws = _normalize_workspace_id((item or {}).get("id") or "")
+                    if ws:
+                        out.add(ws)
+                except Exception:
+                    continue
+        # Update cache + in-memory dynamic set (used by `_all_workspaces_set()` and `_coerce_workspace()`).
+        _WORKSPACE_REGISTRY_CACHE = (now, set(out))
+        try:
+            for w in out:
+                if w and (w not in WORKSPACES):
+                    DYNAMIC_WORKSPACES.add(w)
+        except Exception:
+            pass
+        return set(out)
+    except Exception:
+        # Never break requests if registry is unavailable.
+        return set()
+
 def _all_workspaces_set() -> set[str]:
     try:
         base = set((WORKSPACES or []) + [DEFAULT_WORKSPACE])
@@ -8768,7 +8812,34 @@ if allowed_hosts and allowed_hosts != ["*"]:
 # Frontend sends `X-Workspace: irranova|irrakids` on every request.
 @app.middleware("http")
 async def workspace_context_middleware(request: StarletteRequest, call_next):
-    ws = _workspace_from_request(request)  # type: ignore[arg-type]
+    # Derive requested workspace from header/query param.
+    # IMPORTANT: if an instance hasn't loaded the DB-backed registry yet, we attempt a cached refresh
+    # so valid newly-created workspaces don't get coerced to DEFAULT_WORKSPACE (which would cause leakage).
+    try:
+        raw_hdr = (request.headers.get("x-workspace") or request.headers.get("X-Workspace") or "").strip()
+    except Exception:
+        raw_hdr = ""
+    try:
+        raw_qp = (request.query_params.get("workspace") or "").strip()  # type: ignore[attr-defined]
+    except Exception:
+        raw_qp = ""
+    raw_req_ws = raw_hdr or raw_qp
+    norm_req_ws = _normalize_workspace_id(raw_req_ws) if raw_req_ws else ""
+
+    if norm_req_ws and (norm_req_ws not in _all_workspaces_set()):
+        # Best-effort: refresh from DB registry and re-check.
+        try:
+            await _refresh_dynamic_workspaces_from_registry(force=False)
+        except Exception:
+            pass
+        if norm_req_ws not in _all_workspaces_set():
+            # For admin/config endpoints, fail fast instead of silently coercing to DEFAULT_WORKSPACE.
+            # This prevents overwriting the default workspace settings when a workspace is unknown on this instance.
+            path = (request.url.path or "/") if hasattr(request, "url") else "/"
+            if path.startswith("/admin/") or path.startswith("/meta/"):
+                return PlainTextResponse(f"Unknown workspace: {norm_req_ws}", status_code=400)
+
+    ws = _coerce_workspace(norm_req_ws or None) if norm_req_ws else _workspace_from_request(request)  # type: ignore[arg-type]
     token = _CURRENT_WORKSPACE.set(ws)
     try:
         resp: StarletteResponse = await call_next(request)

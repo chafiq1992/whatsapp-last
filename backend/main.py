@@ -10370,6 +10370,30 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
         ),
     }
     ws_now = get_current_workspace()
+
+    # Solid isolation: prevent assigning the same phone_number_id to multiple workspaces.
+    # This is the #1 cause of "workspace A receives workspace B messages" after adding a new workspace.
+    try:
+        pid_check = str(phone_number_id or "").strip()
+        ws_norm_check = _coerce_workspace(ws_now)
+        if pid_check and ws_norm_check:
+            try:
+                raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
+                m0 = json.loads(raw_map) if raw_map else {}
+            except Exception:
+                m0 = {}
+            if isinstance(m0, dict):
+                existing_ws = str(m0.get(pid_check) or "").strip().lower()
+                if existing_ws and existing_ws != ws_norm_check:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"phone_number_id already assigned: {pid_check} -> {existing_ws} (cannot assign to {ws_norm_check})",
+                    )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
     await db_manager.set_setting(_ws_setting_key("inbox_env", ws_now), stored)
     # Bust cache for immediate effect
     try:
@@ -10457,6 +10481,26 @@ async def _save_workspace_whatsapp_oauth(
 
     tok = None
     try:
+        # Enforce global uniqueness of phone_number_id across workspaces.
+        # Without this, connecting a new workspace can silently hijack routing for an existing number.
+        try:
+            pid = str(phone_number_id or "").strip()
+            if pid:
+                raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
+                m = json.loads(raw_map) if raw_map else {}
+                if isinstance(m, dict):
+                    existing_ws = str(m.get(pid) or "").strip().lower()
+                    if existing_ws and existing_ws != ws:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"phone_number_id already assigned: {pid} -> {existing_ws} (cannot assign to {ws})",
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            # Best-effort only; do not block if auth DB is unavailable.
+            pass
+
         tok = _CURRENT_WORKSPACE.set(ws)
         # Merge into existing inbox_env (preserve other keys).
         prev: dict = {}
@@ -10479,6 +10523,41 @@ async def _save_workspace_whatsapp_oauth(
         # Bust cache for immediate effect
         try:
             message_processor._inbox_env_cache.pop(ws, None)
+        except Exception:
+            pass
+        # Persist phone_number_id -> workspace mapping in shared storage for webhook ingress stability.
+        try:
+            pid = str(phone_number_id or "").strip()
+            ws_norm = _coerce_workspace(ws)
+            if pid and ws_norm:
+                # 1) Redis (preferred for fast lookups by /webhook ingress)
+                try:
+                    r = getattr(redis_manager, "redis_client", None)
+                    if r:
+                        await r.hset("wa:phone_id_to_workspace", pid, ws_norm)
+                except Exception:
+                    pass
+                # 2) Auth DB (durable fallback)
+                try:
+                    raw_map = await auth_db_manager.get_setting("phone_id_to_workspace")
+                    m = json.loads(raw_map) if raw_map else {}
+                    if not isinstance(m, dict):
+                        m = {}
+                    # Refuse to reassign if another workspace already owns this pid (solid isolation).
+                    existing_ws = str(m.get(pid) or "").strip().lower()
+                    if existing_ws and existing_ws != ws_norm:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"phone_number_id already assigned: {pid} -> {existing_ws} (cannot assign to {ws_norm})",
+                        )
+                    m[pid] = ws_norm
+                    await auth_db_manager.set_setting("phone_id_to_workspace", m)
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+        except HTTPException:
+            raise
         except Exception:
             pass
         # Keep runtime routing in sync (phone_number_id -> workspace)

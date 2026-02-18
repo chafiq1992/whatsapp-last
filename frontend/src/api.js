@@ -51,9 +51,17 @@ function getWorkspace() {
 api.interceptors.request.use((config) => {
   try {
     // Workspace routing header (tenant selection)
+    // IMPORTANT: do NOT override an explicitly provided workspace header.
+    // Many admin/settings calls specify a workspace different from the currently selected one.
+    // If we always overwrite, workspaces appear to "mix" (settings + WhatsApp connect saved into the wrong tenant),
+    // especially when the workspace list order changes.
+    const hdrs = (config.headers || {});
+    const explicitWs =
+      (hdrs && (hdrs['X-Workspace'] || hdrs['x-workspace'])) ||
+      (hdrs && (hdrs.get && (hdrs.get('X-Workspace') || hdrs.get('x-workspace'))));
     config.headers = {
-      ...(config.headers || {}),
-      'X-Workspace': getWorkspace(),
+      ...(hdrs || {}),
+      ...(!explicitWs ? { 'X-Workspace': getWorkspace() } : {}),
     };
 
     // Fallback: attach Authorization header from sessionStorage if present

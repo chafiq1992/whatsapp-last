@@ -136,8 +136,19 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
   // Helper to merge and deduplicate messages by stable identifiers
   const mergeAndDedupe = useCallback((prevList, incomingList) => {
     const byKey = new Map();
+    const stableKey = (m) => {
+      if (!m) return '';
+      const primary = m.wa_message_id ?? m.id ?? m.temp_id;
+      if (primary !== undefined && primary !== null && String(primary).trim() !== '') {
+        return String(primary);
+      }
+      // Fallback signature (best-effort): include type + direction to avoid collisions on identical text
+      const ts = m.server_ts || m.timestamp || '';
+      const msg = (typeof m.message === 'string' ? m.message : (m.caption || ''));
+      return `sig:${String(ts)}:${m.from_me ? 'me' : 'them'}:${String(m.type || '')}:${String(msg)}`;
+    };
     const add = (m) => {
-      const key = m.wa_message_id || m.id || m.temp_id || `${m.timestamp}-${m.message}`;
+      const key = stableKey(m);
       // last write wins so newer incoming updates replace older
       byKey.set(key, m);
     };
@@ -319,7 +330,8 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
 
   const groupedMessages = useMemo(() => withDateSeparators(groupConsecutiveImages(messages)), [messages]);
   const groupedLenRef = useRef(0);
-  useEffect(() => { groupedLenRef.current = groupedMessages.length; }, [groupedMessages.length]);
+  // IMPORTANT: update before paint so prepend bookkeeping (rAF) sees the new length and doesn't drift.
+  useLayoutEffect(() => { groupedLenRef.current = groupedMessages.length; }, [groupedMessages.length]);
   const groupedMessagesRef = useRef([]);
   useEffect(() => { groupedMessagesRef.current = groupedMessages; }, [groupedMessages]);
 
@@ -358,12 +370,12 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     return () => window.removeEventListener('scroll-to-message', handler);
   }, []);
 
-  const getItemKeyAtIndex = useCallback((index) => {
-    const msg = groupedMessages[index];
-    if (!msg) return `row_${index}`;
-    // Prefer temp_id for outgoing (stable); then id (stable for incoming); then wa_message_id
-    return msg.__separator ? msg.key : (msg.temp_id || msg.id || msg.wa_message_id || `${msg.timestamp}_${index}`);
-  }, [groupedMessages]);
+  const getRowKey = useCallback((row, indexFallback = 0) => {
+    if (!row) return `row_${indexFallback}`;
+    if (row.__separator) return row.key;
+    // Never depend on Virtuoso's index (which can be shifted by firstItemIndex) for identity.
+    return String(row.wa_message_id || row.id || row.temp_id || row.client_ts || row.timestamp || `row_${indexFallback}`);
+  }, []);
 
   // Helpers for current user's pendingImages queue state
   const getUserId = () => activeUser?.user_id || "";
@@ -1414,8 +1426,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
             startReached={() => { if (hasMore && !loadingOlder) loadOlderMessages(); }}
             rangeChanged={({ startIndex }) => { lastVisibleStartIndexRef.current = startIndex; }}
             computeItemKey={(index, row) => {
-              if (!row) return `row_${index}`;
-              return row.__separator ? row.key : (row.temp_id || row.id || row.wa_message_id || `${row.timestamp}_${index}`);
+              return getRowKey(row, index);
             }}
             itemContent={(index, msg) => {
               const isTextMsg = !!(msg && !msg.__separator && (msg.type === 'text' || msg.type === 'catalog_item' || msg.type === 'catalog_set'));
@@ -1455,7 +1466,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
                     onReply={handleReply}
                     onReact={handleReact}
                     onForward={handleForward}
-                    rowKey={getItemKeyAtIndex(index)}
+                    rowKey={getRowKey(msg, index)}
                     highlighted={(() => { try { const id = msg.wa_message_id || msg.id || msg.temp_id; return id ? highlightedIds.has(String(id)) : false; } catch { return false; } })()}
                   />
                 </div>

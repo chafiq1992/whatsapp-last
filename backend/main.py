@@ -3880,8 +3880,10 @@ class DatabaseManager:
                     }
                     # Apply light in-memory filters
                     if q:
-                        t = (conv.get("name") or conv.get("user_id") or "").lower()
-                        if q.lower() not in t:
+                        # IMPORTANT: match against both name and user_id/phone so searching by number works
+                        # even when a contact has a name saved.
+                        t = f"{conv.get('user_id') or ''} {conv.get('phone') or ''} {conv.get('name') or ''}".lower()
+                        if (q or "").lower() not in t:
                             continue
                     if unread_only and not (conv.get("unread_count") or 0) > 0:
                         continue
@@ -3966,8 +3968,10 @@ class DatabaseManager:
                 }
                 # Apply filters in-memory
                 if q:
-                    t = (conv.get("name") or conv.get("user_id") or "").lower()
-                    if q.lower() not in t:
+                    # IMPORTANT: match against both name and user_id/phone so searching by number works
+                    # even when a contact has a name saved.
+                    t = f"{conv.get('user_id') or ''} {conv.get('phone') or ''} {conv.get('name') or ''}".lower()
+                    if (q or "").lower() not in t:
                         continue
                 if unread_only and not (conv.get("unread_count") or 0) > 0:
                     continue

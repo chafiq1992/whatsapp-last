@@ -270,8 +270,10 @@ function ChatList({
       // Hide internal team and DM conversations from the chat list
       const uid = String(c.user_id || '');
       if (uid.startsWith('dm:') || uid.startsWith('team:')) return false;
-      const txt = (c.name || c.user_id || "").toLowerCase();
-      const matches = txt.includes(search.toLowerCase());
+      // Search should match BOTH name and number/user_id (so searching by number works even if a contact name exists)
+      const haystack = `${c.user_id || ''} ${c.phone || ''} ${c.name || ''}`.toLowerCase();
+      const needle = String(search || '').toLowerCase();
+      const matches = haystack.includes(needle);
       const unreadOK = !showUnreadOnly || c.unread_count > 0;
       const assignedOK =
         assignedFilter === 'all' ||

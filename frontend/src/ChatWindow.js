@@ -206,7 +206,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     setMessages([]);
     // IMPORTANT: reset Virtuoso's prepend offset when switching conversations.
     // If this accumulates across chats, the virtual list can render duplicate rows or blank space while scrolling.
-    setFirstItemIndex(0);
+    setFirstItemIndex(FIRST_ITEM_INDEX_BASE);
     setOffset(0);
     setHasMore(true);
     setUnreadSeparatorIndex(null);
@@ -263,7 +263,10 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
   const hasInitialisedScrollRef = useRef(false);
   const justOpenedRef = useRef(false);
   const lastVisibleStartIndexRef = useRef(0);
-  const [firstItemIndex, setFirstItemIndex] = useState(0);
+  // Virtuoso requirement: firstItemIndex should be a positive number (use a large base).
+  // See react-virtuoso warning: "firstItemIndex prop should not be set to less than zero".
+  const FIRST_ITEM_INDEX_BASE = 100000;
+  const [firstItemIndex, setFirstItemIndex] = useState(FIRST_ITEM_INDEX_BASE);
   // Throttle list height updates to avoid frequent re-mounts (prevents audio flicker while typing)
   const layoutLastHeightRef = useRef(0);
   const layoutLastUpdateTsRef = useRef(0);
@@ -692,10 +695,36 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
         setIsInitialLoading(false);
         return cached;
       }
-      setMessages(prev => (conversationIdRef.current !== uid)
-        ? prev
-        : (append ? mergeAndDedupe(prev, data) : sortByTime(data))
-      );
+      setMessages(prev => {
+        if (conversationIdRef.current !== uid) return prev;
+        if (!append) return sortByTime(data);
+        // IMPORTANT: older-history fetch must be a true prepend, otherwise Virtuoso prepend math drifts.
+        // Cursor `before` guarantees strictly older than the current oldest, so order should be stable.
+        const incoming = sortByTime(Array.isArray(data) ? data : []);
+        if (incoming.length === 0) return prev;
+        const byKey = new Set();
+        const stableKey = (m) => {
+          if (!m) return '';
+          const primary = m.wa_message_id ?? m.id ?? m.temp_id;
+          if (primary !== undefined && primary !== null && String(primary).trim() !== '') return String(primary);
+          const ts = m.server_ts || m.timestamp || '';
+          const msg = (typeof m.message === 'string' ? m.message : (m.caption || ''));
+          return `sig:${String(ts)}:${m.from_me ? 'me' : 'them'}:${String(m.type || '')}:${String(msg)}`;
+        };
+        (prev || []).forEach((m) => { try { byKey.add(stableKey(m)); } catch {} });
+        const dedupedIncoming = incoming.filter((m) => {
+          try {
+            const k = stableKey(m);
+            if (!k) return true;
+            if (byKey.has(k)) return false;
+            byKey.add(k);
+            return true;
+          } catch {
+            return true;
+          }
+        });
+        return [...dedupedIncoming, ...(prev || [])];
+      });
       try { saveMessages(uid, (append ? mergeAndDedupe(messagesRef.current, data) : data)); } catch {}
       const firstUnreadIndex = data.findIndex(msg => !msg.from_me && !msg.read);
       setUnreadSeparatorIndex(firstUnreadIndex !== -1 ? firstUnreadIndex : null);
@@ -738,7 +767,9 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
         // Guard against negative/NaN, and don't accumulate across conversations (reset above).
         const delta = Math.max(0, Number(after) - Number(before));
         // IMPORTANT: for prepend, firstItemIndex should DECREASE by the amount of items added at the start.
-        if (Number.isFinite(delta) && delta > 0) setFirstItemIndex((v) => v - delta);
+        if (Number.isFinite(delta) && delta > 0) {
+          setFirstItemIndex((v) => Math.max(1, Number(v || FIRST_ITEM_INDEX_BASE) - delta));
+        }
         setLoadingOlder(false);
       });
     }

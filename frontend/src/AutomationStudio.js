@@ -349,6 +349,44 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     try { return (localStorage.getItem('workspace') || 'irranova').trim().toLowerCase() || 'irranova'; } catch { return 'irranova'; }
   })();
 
+  // Global retargeting jobs panel (visible even if the retargeting rule was deleted)
+  const [rtJobs, setRtJobs] = useState([]);
+  const [rtJobsError, setRtJobsError] = useState("");
+  const [rtJobsLoading, setRtJobsLoading] = useState(false);
+  const refreshRtJobs = async () => {
+    try {
+      setRtJobsError("");
+      setRtJobsLoading(true);
+      const res = await api.get("/retargeting/jobs", { params: { active_only: true, limit: 200 } });
+      setRtJobs(Array.isArray(res?.data) ? res.data : []);
+    } catch (e) {
+      setRtJobs([]);
+      setRtJobsError(e?.response?.data?.detail || "Failed to load retargeting jobs.");
+    } finally {
+      setRtJobsLoading(false);
+    }
+  };
+  const stopRtJob = async (jid) => {
+    const id = String(jid || "").trim();
+    if (!id) return;
+    const ok = window.confirm(`Stop retargeting job ${id}?`);
+    if (!ok) return;
+    try {
+      await api.post(`/retargeting/jobs/${encodeURIComponent(id)}/stop`);
+      await refreshRtJobs();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to stop job.");
+    }
+  };
+
+  useEffect(() => {
+    // Poll lightly so admins can stop jobs quickly.
+    refreshRtJobs();
+    const t = setInterval(() => refreshRtJobs(), 3000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [draft, setDraft] = useState({
     id: "",
     name: "",
@@ -978,6 +1016,68 @@ export default function AutomationStudio({ onClose, embedded = false }) {
             await loadRuleStats();
           }}
         >
+          <div className="mt-4 border rounded-xl bg-white p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Retargeting jobs</div>
+                <div className="text-[11px] text-slate-500">Active jobs on this server instance (in-memory).</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="px-2 py-1 text-xs border rounded hover:bg-slate-50 disabled:opacity-60"
+                  onClick={refreshRtJobs}
+                  disabled={rtJobsLoading}
+                >
+                  {rtJobsLoading ? "Loading…" : "Refresh"}
+                </button>
+              </div>
+            </div>
+            {rtJobsError && <div className="mt-2 text-[11px] text-rose-700">{rtJobsError}</div>}
+            <div className="mt-2 max-h-[220px] overflow-auto border rounded">
+              {(Array.isArray(rtJobs) ? rtJobs : []).length === 0 ? (
+                <div className="px-3 py-3 text-sm text-slate-500">No active retargeting jobs.</div>
+              ) : (
+                <div className="divide-y">
+                  {(rtJobs || []).map((j) => {
+                    const jid = String(j?.id || "").trim();
+                    if (!jid) return null;
+                    const st = String(j?.status || "");
+                    const seg = String(j?.segment_name || "");
+                    const sent = Number(j?.sent || 0);
+                    const skipped = Number(j?.skipped_ignored_tag || 0);
+                    const failed = Number(j?.failed || 0);
+                    return (
+                      <div key={jid} className="px-3 py-2 flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-xs truncate">{jid}</div>
+                          <div className="text-[11px] text-slate-600 truncate">
+                            <span className="font-semibold">{st}</span>
+                            {seg ? <><span className="text-slate-300"> • </span>{seg}</> : null}
+                            <span className="text-slate-300"> • </span>Sent {sent}
+                            <span className="text-slate-300"> • </span>Skipped {skipped}
+                            <span className="text-slate-300"> • </span>Failed {failed}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="px-2 py-1 text-xs border rounded bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100 disabled:opacity-60"
+                          onClick={() => stopRtJob(jid)}
+                          disabled={["completed", "error", "stopped"].includes(st)}
+                        >
+                          Stop
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="mt-2 text-[11px] text-amber-700">
+              If you run multiple instances, jobs may be on another instance and won’t appear here. In that case, stop via Job ID (inside a retargeting rule editor) or persist jobs to DB.
+            </div>
+          </div>
+
           {editorOpen && (
             <RuleEditor
               draft={draft}

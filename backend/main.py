@@ -12743,6 +12743,37 @@ async def get_retargeting_job(job_id: str, agent: dict = Depends(require_admin))
     return j
 
 
+@app.get("/retargeting/jobs")
+async def list_retargeting_jobs(
+    active_only: bool = True,
+    limit: int = 200,
+    agent: dict = Depends(require_admin),
+):
+    """List retargeting jobs (in-memory).
+
+    NOTE: Jobs are stored in-process (RETARGETING_JOBS). In multi-instance deployments,
+    this endpoint only returns jobs running on the current instance.
+    """
+    lim = max(1, min(int(limit or 200), 1000))
+    active_statuses = {"queued", "waiting", "running", "sleeping", "stopping"}
+    out = []
+    for jid, j in (RETARGETING_JOBS or {}).items():
+        if not isinstance(j, dict):
+            continue
+        st = str(j.get("status") or "")
+        if active_only and st not in active_statuses:
+            continue
+        row = dict(j)
+        row["id"] = str(row.get("id") or jid)
+        out.append(row)
+    # sort newest first (created_at is iso)
+    try:
+        out.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+    except Exception:
+        pass
+    return out[:lim]
+
+
 @app.post("/retargeting/jobs/{job_id}/stop")
 async def stop_retargeting_job(job_id: str, agent: dict = Depends(require_admin)):
     jid = str(job_id or "").strip()

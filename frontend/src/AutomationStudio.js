@@ -2220,6 +2220,8 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
   });
   const [retargetingJob, setRetargetingJob] = useState(null);
   const [retargetingJobError, setRetargetingJobError] = useState("");
+  const [retargetingJobs, setRetargetingJobs] = useState([]);
+  const [retargetingJobsError, setRetargetingJobsError] = useState("");
 
   useEffect(() => {
     if (String(draft.triggerSource || "") !== "retargeting") return;
@@ -2279,6 +2281,17 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     }
   };
 
+  const refreshRetargetingJobs = async () => {
+    try {
+      setRetargetingJobsError("");
+      const res = await api.get("/retargeting/jobs", { params: { active_only: true, limit: 200 } });
+      setRetargetingJobs(Array.isArray(res?.data) ? res.data : []);
+    } catch (e) {
+      setRetargetingJobs([]);
+      setRetargetingJobsError(e?.response?.data?.detail || "Failed to load retargeting jobs.");
+    }
+  };
+
   useEffect(() => {
     if (String(draft.triggerSource || "") !== "retargeting") return;
     const id = String(retargetingJobId || "").trim();
@@ -2288,6 +2301,14 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.triggerSource, retargetingJobId]);
+
+  useEffect(() => {
+    if (String(draft.triggerSource || "") !== "retargeting") return;
+    refreshRetargetingJobs();
+    const t = setInterval(() => refreshRetargetingJobs(), 2500);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.triggerSource]);
 
   const runRetargetingPreview = async () => {
     const segId = String(draft.retargetingSegmentId || "").trim();
@@ -2316,6 +2337,20 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     try {
       await api.post(`/retargeting/jobs/${encodeURIComponent(id)}/stop`);
       await refreshRetargetingJob(id);
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to stop job.");
+    }
+  };
+
+  const stopRetargetingJobById = async (idRaw) => {
+    const id = String(idRaw || "").trim();
+    if (!id) return;
+    const ok = window.confirm(`Stop retargeting job ${id}?`);
+    if (!ok) return;
+    try {
+      await api.post(`/retargeting/jobs/${encodeURIComponent(id)}/stop`);
+      await refreshRetargetingJobs();
+      if (String(retargetingJobId || "").trim() === id) await refreshRetargetingJob(id);
     } catch (e) {
       alert(e?.response?.data?.detail || "Failed to stop job.");
     }
@@ -3086,6 +3121,67 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                             >
                               Clear
                             </button>
+                          </div>
+                          <div className="mt-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[11px] text-slate-500">Running jobs on this server instance</div>
+                              <button
+                                type="button"
+                                className="px-2 py-1 text-[11px] border rounded hover:bg-slate-50"
+                                onClick={refreshRetargetingJobs}
+                              >
+                                Refresh list
+                              </button>
+                            </div>
+                            {retargetingJobsError && <div className="mt-1 text-[11px] text-rose-700">{retargetingJobsError}</div>}
+                            <div className="mt-2 max-h-[180px] overflow-auto border rounded">
+                              {(Array.isArray(retargetingJobs) ? retargetingJobs : []).length === 0 ? (
+                                <div className="px-2 py-2 text-[11px] text-slate-500">No active jobs found.</div>
+                              ) : (
+                                <div className="divide-y">
+                                  {(retargetingJobs || []).map((j) => {
+                                    const jid = String(j?.id || "").trim();
+                                    if (!jid) return null;
+                                    const st = String(j?.status || "");
+                                    const seg = String(j?.segment_name || "");
+                                    const sent = Number(j?.sent || 0);
+                                    const skipped = Number(j?.skipped_ignored_tag || 0);
+                                    const failed = Number(j?.failed || 0);
+                                    const isSel = String(retargetingJobId || "").trim() === jid;
+                                    return (
+                                      <div key={jid} className={`px-2 py-2 flex items-center justify-between gap-2 ${isSel ? "bg-indigo-50" : "bg-white"}`}>
+                                        <button
+                                          type="button"
+                                          className="min-w-0 flex-1 text-left"
+                                          onClick={() => setRetargetingJobId(jid)}
+                                          title={jid}
+                                        >
+                                          <div className="text-xs font-mono truncate">{jid}</div>
+                                          <div className="text-[11px] text-slate-600 truncate">
+                                            <span className="font-semibold">{st}</span>
+                                            {seg ? <><span className="text-slate-300"> • </span>{seg}</> : null}
+                                            <span className="text-slate-300"> • </span>Sent {sent}
+                                            <span className="text-slate-300"> • </span>Skipped {skipped}
+                                            <span className="text-slate-300"> • </span>Failed {failed}
+                                          </div>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="px-2 py-1 text-[11px] border rounded bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100 disabled:opacity-60"
+                                          onClick={() => stopRetargetingJobById(jid)}
+                                          disabled={["completed", "error", "stopped"].includes(st)}
+                                        >
+                                          Stop
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                            <div className="mt-2 text-[11px] text-amber-700">
+                              Note: jobs are stored in memory. If you run multiple server instances, this list only shows jobs on the current instance.
+                            </div>
                           </div>
                           <div className="mt-2 flex items-center gap-2">
                             <input

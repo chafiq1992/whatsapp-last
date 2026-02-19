@@ -401,7 +401,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
     const bodyText = String(body?.text || msg?.message || "").trim();
     const footerText = String(footer?.text || "").trim();
 
-    const proxiedHeaderImage = (headerFmt === "IMAGE" && headerLink && /^https?:\\/\\//i.test(headerLink))
+    const proxiedHeaderImage = (headerFmt === "IMAGE" && headerLink && /^https?:\/\//i.test(headerLink))
       ? `${API_BASE}/proxy-image?url=${encodeURIComponent(headerLink)}`
       : headerLink;
 

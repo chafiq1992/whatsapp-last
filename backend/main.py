@@ -2164,6 +2164,11 @@ class DatabaseManager:
             "product_id",
             # agent attribution
             "agent_username",
+            # whatsapp template snapshot (rendered)
+            "template_name",
+            "template_language",
+            "template_components",
+            "template_snapshot",
         }
         # Columns allowed in the conversation_notes table (except auto-increment id)
         self.note_columns = {
@@ -2355,6 +2360,11 @@ class DatabaseManager:
                     caption        TEXT,
                     url            TEXT,
                     media_path     TEXT,
+                    -- WhatsApp template metadata (so UI can render exactly what customer saw)
+                    template_name      TEXT,
+                    template_language  TEXT,
+                    template_components TEXT,   -- JSON string of parameters
+                    template_snapshot   TEXT,   -- JSON string of rendered header/body/footer/buttons
                     -- replies & reactions
                     reply_to       TEXT,
                     quoted_text    TEXT,
@@ -2641,6 +2651,11 @@ class DatabaseManager:
             await self._add_column_if_missing(db, "messages", "server_ts", "TEXT")
             # Ensure agent attribution column exists
             await self._add_column_if_missing(db, "messages", "agent_username", "TEXT")
+            # Ensure template rendering columns exist
+            await self._add_column_if_missing(db, "messages", "template_name", "TEXT")
+            await self._add_column_if_missing(db, "messages", "template_language", "TEXT")
+            await self._add_column_if_missing(db, "messages", "template_components", "TEXT")
+            await self._add_column_if_missing(db, "messages", "template_snapshot", "TEXT")
 
             # Ensure conversation attribution columns exist
             await self._add_column_if_missing(db, "conversation_meta", "source", "TEXT")
@@ -3795,6 +3810,15 @@ class DatabaseManager:
 
     async def save_message(self, message: dict, wa_message_id: str, status: str):
         """Persist a sent message using the final WhatsApp ID."""
+        # Normalize template fields to JSON strings so they can be stored in TEXT columns
+        try:
+            if isinstance(message, dict):
+                if isinstance(message.get("template_components"), (list, dict)):
+                    message["template_components"] = json.dumps(message.get("template_components"), ensure_ascii=False)
+                if isinstance(message.get("template_snapshot"), (list, dict)):
+                    message["template_snapshot"] = json.dumps(message.get("template_snapshot"), ensure_ascii=False)
+        except Exception:
+            pass
         data = {
             "wa_message_id": wa_message_id,
             "temp_id": message.get("temp_id") or message.get("id"),
@@ -3809,6 +3833,11 @@ class DatabaseManager:
             "media_path": message.get("media_path"),
             "timestamp": message.get("timestamp"),
             "waveform": message.get("waveform"),
+            # template metadata (optional)
+            "template_name": message.get("template_name"),
+            "template_language": message.get("template_language"),
+            "template_components": message.get("template_components"),
+            "template_snapshot": message.get("template_snapshot"),
             # persist product identifiers so frontend can restore rich bubble
             "product_retailer_id": (
                 message.get("product_retailer_id")
@@ -4624,6 +4653,11 @@ class MessageProcessor:
         self._automation_rules_cache: dict[str, tuple[float, list[dict]]] = {}
         # Best-effort in-memory cache for inbox environment overrides (workspace-scoped)
         self._inbox_env_cache: dict[str, tuple[float, dict]] = {}
+        # Best-effort in-memory cache for WhatsApp template definitions (workspace-scoped)
+        # key: (ws, name, language) -> (ts, template_dict)
+        self._template_def_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
+        self._template_list_cache: dict[str, tuple[float, list[dict]]] = {}
+        self._template_cache_ttl_sec = 10 * 60
 
     async def _ensure_automation_rules_v2(self) -> list[dict]:
         """Ensure the global automation rules store exists in the shared auth/settings DB.
@@ -5020,6 +5054,7 @@ class MessageProcessor:
             "template_name": message_data.get("template_name"),
             "template_language": message_data.get("template_language"),
             "template_components": message_data.get("template_components"),
+            "template_snapshot": message_data.get("template_snapshot"),
         }
         # Attach agent attribution if present
         agent_username = message_data.get("agent_username")
@@ -5712,6 +5747,34 @@ class MessageProcessor:
             await self.connection_manager.send_to_user(user_id, status_update)
             
             # Save to database with real WhatsApp ID
+            # If this was a template send, attach a rendered snapshot so UI can show header/body/footer/buttons.
+            try:
+                tname = str(message.get("template_name") or "").strip()
+                if tname:
+                    lang = str(message.get("template_language") or "en").strip() or "en"
+                    comps = message.get("template_components") or []
+                    if not isinstance(comps, list):
+                        comps = []
+                    snapshot = await self._build_template_snapshot(
+                        template_name=tname,
+                        language=lang,
+                        components=comps,
+                    )
+                    if isinstance(snapshot, dict) and snapshot:
+                        message["template_name"] = tname
+                        message["template_language"] = lang
+                        message["template_components"] = json.dumps(comps, ensure_ascii=False)
+                        message["template_snapshot"] = json.dumps(snapshot, ensure_ascii=False)
+                        # Improve chat list preview: show the rendered body text instead of "[template] name"
+                        try:
+                            body_txt = str((snapshot.get("body") or {}).get("text") or "").strip()
+                            if body_txt:
+                                message["message"] = body_txt
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             await self.db_manager.save_message(message, wa_message_id, "sent")
 
             # Optional: tag Shopify order after successful WhatsApp send (best-effort).
@@ -6568,6 +6631,173 @@ class MessageProcessor:
                 cc["parameters"] = new_params
             out.append(cc)
         return out
+
+    async def _list_whatsapp_templates(self, ws: str) -> list[dict]:
+        """Fetch WhatsApp template definitions from Graph (cached)."""
+        w = _coerce_workspace(ws)
+        now = time.time()
+        try:
+            ts, items = self._template_list_cache.get(w, (0.0, []))
+            if items and (now - ts) < float(self._template_cache_ttl_sec):
+                return items
+        except Exception:
+            pass
+
+        cfg = await self._get_inbox_env(w)
+        waba_id = str((cfg or {}).get("waba_id") or "").strip()
+        if not waba_id:
+            return []
+        try:
+            token = self.whatsapp_messenger._client(w).access_token  # type: ignore[attr-defined]
+        except Exception:
+            token = ACCESS_TOKEN
+        if not token:
+            return []
+
+        url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{waba_id}/message_templates"
+        params = {"limit": 200, "fields": "name,language,status,category,components"}
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code >= 400:
+                return []
+            data = resp.json() or {}
+            arr = data.get("data") or []
+            items = [x for x in arr if isinstance(x, dict)]
+        try:
+            self._template_list_cache[w] = (now, items)
+        except Exception:
+            pass
+        return items
+
+    async def _get_template_def(self, *, template_name: str, language: str, ws: str | None = None) -> dict | None:
+        """Return a template definition dict as returned by Graph (includes components)."""
+        w = _coerce_workspace(ws or get_current_workspace())
+        name = str(template_name or "").strip()
+        lang = str(language or "").strip() or "en"
+        if not name:
+            return None
+        key = (w, name, lang)
+        now = time.time()
+        try:
+            ts, t = self._template_def_cache.get(key, (0.0, None))
+            if isinstance(t, dict) and (now - ts) < float(self._template_cache_ttl_sec):
+                return t
+        except Exception:
+            pass
+
+        items = await self._list_whatsapp_templates(w)
+        # Prefer exact name+language match
+        exact = next((x for x in items if str(x.get("name") or "") == name and str(x.get("language") or "") == lang), None)
+        if not exact:
+            exact = next((x for x in items if str(x.get("name") or "") == name), None)
+        if isinstance(exact, dict):
+            try:
+                self._template_def_cache[key] = (now, exact)
+            except Exception:
+                pass
+            return exact
+        return None
+
+    async def _build_template_snapshot(self, *, template_name: str, language: str, components: list[dict]) -> dict:
+        """Build a rendered snapshot of a WhatsApp template send so the UI can display it."""
+        ws = get_current_workspace()
+        tdef = await self._get_template_def(template_name=template_name, language=language, ws=ws)
+        comps_def = (tdef or {}).get("components") or []
+        comps_def = comps_def if isinstance(comps_def, list) else []
+
+        def _find_def(t: str) -> dict | None:
+            up = str(t or "").upper()
+            for c in comps_def:
+                try:
+                    if isinstance(c, dict) and str(c.get("type") or "").upper() == up:
+                        return c
+                except Exception:
+                    continue
+            return None
+
+        def _find_send(t: str) -> dict | None:
+            low = str(t or "").lower()
+            for c in (components or []):
+                try:
+                    if isinstance(c, dict) and str(c.get("type") or "").lower() == low:
+                        return c
+                except Exception:
+                    continue
+            return None
+
+        header_def = _find_def("HEADER") or {}
+        body_def = _find_def("BODY") or {}
+        footer_def = _find_def("FOOTER") or {}
+        buttons_def = _find_def("BUTTONS") or {}
+
+        # Render header
+        header_fmt = str(header_def.get("format") or "").upper()
+        header = {"format": header_fmt} if header_fmt else {}
+        try:
+            send_header = _find_send("header") or {}
+            params = send_header.get("parameters") or []
+            params = params if isinstance(params, list) else []
+            p0 = params[0] if params else None
+            if isinstance(p0, dict):
+                ptype = str(p0.get("type") or "").lower()
+                if ptype == "text":
+                    header["text"] = str(p0.get("text") or "")
+                elif ptype in ("image", "video", "document"):
+                    obj = p0.get(ptype) or {}
+                    if isinstance(obj, dict) and obj.get("link"):
+                        header["link"] = str(obj.get("link") or "")
+        except Exception:
+            pass
+
+        # Render body text by replacing {{1}}, {{2}}, ... with provided parameters
+        body_text_raw = str(body_def.get("text") or "")
+        body_text = body_text_raw
+        try:
+            send_body = _find_send("body") or {}
+            params = send_body.get("parameters") or []
+            params = params if isinstance(params, list) else []
+            values: list[str] = []
+            for p in params:
+                if not isinstance(p, dict):
+                    continue
+                if str(p.get("type") or "").lower() == "text":
+                    values.append(str(p.get("text") or ""))
+            for i, v in enumerate(values, start=1):
+                body_text = body_text.replace(f"{{{{{i}}}}}", v)
+        except Exception:
+            body_text = body_text_raw
+
+        # Footer text
+        footer_text = str(footer_def.get("text") or "")
+
+        # Buttons as the customer sees them (definition-side)
+        buttons_out: list[dict] = []
+        try:
+            btns = buttons_def.get("buttons") or []
+            btns = btns if isinstance(btns, list) else []
+            for b in btns:
+                if not isinstance(b, dict):
+                    continue
+                out = {"type": b.get("type"), "text": b.get("text")}
+                if b.get("url") is not None:
+                    out["url"] = b.get("url")
+                if b.get("phone_number") is not None:
+                    out["phone_number"] = b.get("phone_number")
+                buttons_out.append(out)
+        except Exception:
+            buttons_out = []
+
+        snap = {
+            "name": str(template_name or ""),
+            "language": str(language or ""),
+            "header": header,
+            "body": {"text": body_text, "raw": body_text_raw},
+            "footer": {"text": footer_text} if footer_text else {},
+            "buttons": buttons_out,
+            "rendered_at": datetime.utcnow().isoformat(),
+        }
+        return snap
 
     def _normalize_button_title(self, s: str) -> str:
         try:
@@ -11987,7 +12217,7 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
                         if digits.startswith("0") and len(digits) >= 9:
                             digits = "212" + digits[1:]
                         try:
-                            await message_processor.whatsapp_messenger.send_template_message(
+                            wa_response = await message_processor.whatsapp_messenger.send_template_message(
                                 to=digits,
                                 template_name=template_name,
                                 language=language,
@@ -11995,6 +12225,43 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
                             )
                             sent += 1
                             CUSTOMER_CAMPAIGN_JOBS[job_id]["sent"] = sent
+                            # Persist outbound message so it appears in /conversations and chat history
+                            try:
+                                wa_message_id = None
+                                if isinstance(wa_response, dict) and wa_response.get("messages"):
+                                    wa_message_id = (wa_response.get("messages") or [{}])[0].get("id")
+                                if wa_message_id:
+                                    # Build snapshot so chat bubble can display full template
+                                    snap = None
+                                    try:
+                                        snap = await message_processor._build_template_snapshot(
+                                            template_name=template_name,
+                                            language=language,
+                                            components=components if components else [],
+                                        )
+                                    except Exception:
+                                        snap = None
+                                    msg = {
+                                        "temp_id": f"cust_campaign:{job_id}:{sent}",
+                                        "user_id": digits,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "status": "sent",
+                                        "message": (str(((snap or {}).get("body") or {}).get("text") or "").strip() or f"[template] {template_name}"),
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                        "template_name": template_name,
+                                        "template_language": language,
+                                        "template_components": components if components else [],
+                                        "template_snapshot": snap or None,
+                                    }
+                                    await db_manager.save_message(msg, str(wa_message_id), "sent")
+                                    try:
+                                        await connection_manager.broadcast_to_admins({"type": "message_received", "data": {**msg, "wa_message_id": str(wa_message_id)}})
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                         except Exception as exc:
                             failed += 1
                             CUSTOMER_CAMPAIGN_JOBS[job_id]["failed"] = failed
@@ -12030,7 +12297,11 @@ async def get_customer_campaign(job_id: str, agent: dict = Depends(require_admin
 
 
 @app.post("/retargeting/customer-segments/launch")
-async def launch_retargeting_customer_segments(body: dict = Body(...), agent: dict = Depends(require_admin)):
+async def launch_retargeting_customer_segments(
+    body: dict = Body(...),
+    agent: dict = Depends(require_admin),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """Launch a retargeting job based on a saved customer segment.
 
     Body:
@@ -12055,7 +12326,7 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
     if not segment_id:
         raise HTTPException(status_code=400, detail="Missing segment_id")
 
-    seg = si.get_customer_segment_by_id(segment_id)
+    seg = await si.get_customer_segment_by_id(segment_id, x_workspace=x_workspace)
     if not seg:
         raise HTTPException(status_code=404, detail="Segment not found")
 
@@ -12226,7 +12497,7 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
                         if digits.startswith("0") and len(digits) >= 9:
                             digits = "212" + digits[1:]
                         try:
-                            await message_processor.whatsapp_messenger.send_template_message(
+                            wa_response = await message_processor.whatsapp_messenger.send_template_message(
                                 to=digits,
                                 template_name=template_name,
                                 language=language,
@@ -12236,6 +12507,43 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
                             in_batch += 1
                             RETARGETING_JOBS[job_id]["sent"] = sent
                             RETARGETING_JOBS[job_id]["last_sent_phone"] = digits
+                            # Persist outbound message so it appears in /conversations and chat history
+                            try:
+                                wa_message_id = None
+                                if isinstance(wa_response, dict) and wa_response.get("messages"):
+                                    wa_message_id = (wa_response.get("messages") or [{}])[0].get("id")
+                                if wa_message_id:
+                                    # Build snapshot so chat bubble can display full template
+                                    snap = None
+                                    try:
+                                        snap = await message_processor._build_template_snapshot(
+                                            template_name=template_name,
+                                            language=language,
+                                            components=components if components else [],
+                                        )
+                                    except Exception:
+                                        snap = None
+                                    msg = {
+                                        "temp_id": f"retargeting:{job_id}:{sent}",
+                                        "user_id": digits,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "status": "sent",
+                                        "message": (str(((snap or {}).get("body") or {}).get("text") or "").strip() or f"[template] {template_name}"),
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                        "template_name": template_name,
+                                        "template_language": language,
+                                        "template_components": components if components else [],
+                                        "template_snapshot": snap or None,
+                                    }
+                                    await db_manager.save_message(msg, str(wa_message_id), "sent")
+                                    try:
+                                        await connection_manager.broadcast_to_admins({"type": "message_received", "data": {**msg, "wa_message_id": str(wa_message_id)}})
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
 
                             # Tag the Shopify customer after successful send (best-effort)
                             if shopify_customer_tag_on_sent:
@@ -12301,7 +12609,11 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
 
 
 @app.post("/retargeting/customer-segments/preview")
-async def preview_retargeting_customer_segments(body: dict = Body(...), agent: dict = Depends(require_admin)):
+async def preview_retargeting_customer_segments(
+    body: dict = Body(...),
+    agent: dict = Depends(require_admin),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
     """Preview audience size for a saved customer segment (best-effort / may be estimated).
 
     Body:
@@ -12317,7 +12629,7 @@ async def preview_retargeting_customer_segments(body: dict = Body(...), agent: d
     segment_id = str((body or {}).get("segment_id") or "").strip()
     if not segment_id:
         raise HTTPException(status_code=400, detail="Missing segment_id")
-    seg = si.get_customer_segment_by_id(segment_id)
+    seg = await si.get_customer_segment_by_id(segment_id, x_workspace=x_workspace)
     if not seg:
         raise HTTPException(status_code=404, detail="Segment not found")
 

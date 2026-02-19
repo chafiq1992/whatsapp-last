@@ -340,7 +340,7 @@ _COUNT_CACHE: dict[str, tuple[float, int, bool]] = {}
 _COUNT_CACHE_TTL_SEC = 5 * 60
 
 
-def _segments_read() -> list[dict]:
+def _segments_read_file() -> list[dict]:
     try:
         if not _SEGMENTS_FILE.exists():
             return []
@@ -351,11 +351,76 @@ def _segments_read() -> list[dict]:
         return []
 
 
-def _segments_write(items: list[dict]) -> None:
+def _segments_write_file(items: list[dict]) -> None:
     # atomic write
     tmp = _SEGMENTS_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(_SEGMENTS_FILE)
+
+
+def _normalize_ws_id(raw: str | None) -> str:
+    try:
+        return str(raw or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _segments_settings_key(x_workspace: str | None) -> str:
+    """Workspace-scoped settings key used to persist segments in DB."""
+    try:
+        # Local import to avoid circular import at module import time.
+        from .main import _ws_setting_key, get_current_workspace  # type: ignore
+        ws = _normalize_ws_id(x_workspace) or _normalize_ws_id(get_current_workspace())
+        ws = ws or "default"
+        return _ws_setting_key("customer_segments", ws)
+    except Exception:
+        # Last resort: non-namespaced key
+        ws = _normalize_ws_id(x_workspace) or "default"
+        return f"customer_segments::{ws}"
+
+
+async def _segments_read(x_workspace: str | None) -> list[dict]:
+    """Read segments from DB settings (durable). Fallback to local file for backward-compat,
+    and auto-migrate file -> DB if needed.
+    """
+    key = _segments_settings_key(x_workspace)
+    # 1) DB (preferred)
+    try:
+        from .main import db_manager  # type: ignore
+        raw = await db_manager.get_setting(key)
+        if raw:
+            obj = json.loads(raw)
+            if isinstance(obj, list):
+                return [x for x in obj if isinstance(x, dict)]
+    except Exception:
+        pass
+    # 2) File fallback (legacy)
+    items = _segments_read_file()
+    # Best-effort migrate into DB so future reads persist
+    if items:
+        try:
+            from .main import db_manager  # type: ignore
+            await db_manager.set_setting(key, items)
+        except Exception:
+            pass
+    return items
+
+
+async def _segments_write(x_workspace: str | None, items: list[dict]) -> None:
+    """Write segments to DB settings (durable). Also best-effort write the legacy file (dev/backups)."""
+    key = _segments_settings_key(x_workspace)
+    try:
+        from .main import db_manager  # type: ignore
+        await db_manager.set_setting(key, items)
+    except Exception:
+        # If DB unavailable, keep legacy file behavior
+        _segments_write_file(items)
+        return
+    # Best-effort legacy file write (non-critical)
+    try:
+        _segments_write_file(items)
+    except Exception:
+        pass
 
 
 def _days_ago_to_date(days: int) -> str:
@@ -514,16 +579,16 @@ async def _count_customers_for_query(
 
 
 @router.get("/customer-segments")
-async def list_customer_segments():
-    return _segments_read()
+async def list_customer_segments(x_workspace: str | None = Header(None, alias="X-Workspace")):
+    return await _segments_read(x_workspace)
 
-def get_customer_segment_by_id(segment_id: str) -> dict | None:
-    """Return a saved customer segment entry by id (from customer_segments.json)."""
+async def get_customer_segment_by_id(segment_id: str, x_workspace: str | None = None) -> dict | None:
+    """Return a saved customer segment entry by id (from DB settings, legacy file fallback)."""
     sid = str(segment_id or "").strip()
     if not sid:
         return None
     try:
-        items = _segments_read()
+        items = await _segments_read(x_workspace)
     except Exception:
         items = []
     for s in items or []:
@@ -582,14 +647,14 @@ async def add_shopify_customer_tag(*, customer_id: str | int, tag: str, store: s
 
 
 @router.post("/customer-segments")
-async def save_customer_segment(body: dict = Body(...)):
+async def save_customer_segment(body: dict = Body(...), x_workspace: str | None = Header(None, alias="X-Workspace")):
     name = str((body or {}).get("name") or "").strip() or "Segment"
     dsl = str((body or {}).get("dsl") or "").strip()
     store = str((body or {}).get("store") or "").strip().upper() or None
     seg_id = str((body or {}).get("id") or "").strip() or str(uuid.uuid4())
     if not dsl:
         raise HTTPException(status_code=400, detail="Missing dsl")
-    items = _segments_read()
+    items = await _segments_read(x_workspace)
     now = datetime.now(timezone.utc).isoformat()
     compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
     entry = {
@@ -605,18 +670,18 @@ async def save_customer_segment(body: dict = Body(...)):
     }
     next_items = [x for x in items if x.get("id") != seg_id]
     next_items.insert(0, entry)
-    _segments_write(next_items)
+    await _segments_write(x_workspace, next_items)
     return entry
 
 
 @router.delete("/customer-segments/{segment_id}")
-async def delete_customer_segment(segment_id: str):
+async def delete_customer_segment(segment_id: str, x_workspace: str | None = Header(None, alias="X-Workspace")):
     sid = str(segment_id or "").strip()
     if not sid:
         raise HTTPException(status_code=400, detail="Missing segment id")
-    items = _segments_read()
+    items = await _segments_read(x_workspace)
     next_items = [x for x in items if str(x.get("id") or "") != sid]
-    _segments_write(next_items)
+    await _segments_write(x_workspace, next_items)
     return {"ok": True}
 
 

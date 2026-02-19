@@ -384,6 +384,101 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
     }
   };
 
+  const templateSnapshot = useMemo(() => parseJsonSafe(msg?.template_snapshot, null), [msg?.template_snapshot]);
+  const isTemplate = !!(templateSnapshot && typeof templateSnapshot === "object" && (templateSnapshot.body || templateSnapshot.header || templateSnapshot.buttons)) || !!String(msg?.template_name || "").trim();
+
+  const renderTemplate = () => {
+    const snap = (templateSnapshot && typeof templateSnapshot === "object") ? templateSnapshot : null;
+    const name = String((snap?.name) || msg?.template_name || "").trim();
+    const lang = String((snap?.language) || msg?.template_language || "").trim();
+    const header = (snap && typeof snap.header === "object") ? snap.header : {};
+    const body = (snap && typeof snap.body === "object") ? snap.body : {};
+    const footer = (snap && typeof snap.footer === "object") ? snap.footer : {};
+    const buttons = Array.isArray(snap?.buttons) ? snap.buttons : [];
+    const headerFmt = String(header?.format || "").toUpperCase();
+    const headerLink = String(header?.link || "").trim();
+    const headerText = String(header?.text || "").trim();
+    const bodyText = String(body?.text || msg?.message || "").trim();
+    const footerText = String(footer?.text || "").trim();
+
+    const proxiedHeaderImage = (headerFmt === "IMAGE" && headerLink && /^https?:\\/\\//i.test(headerLink))
+      ? `${API_BASE}/proxy-image?url=${encodeURIComponent(headerLink)}`
+      : headerLink;
+
+    return (
+      <div className="leading-relaxed">
+        {(name || lang) && (
+          <div className="text-[10px] uppercase tracking-wide opacity-70 mb-1">
+            Template{(name ? `: ${name}` : "")}{(lang ? ` (${lang})` : "")}
+          </div>
+        )}
+
+        {(headerFmt || headerText || headerLink) && (
+          <div className="mb-2">
+            {headerFmt && (
+              <div className="text-[11px] text-slate-500 mb-1">
+                Header: <span className="font-mono">{headerFmt}</span>
+              </div>
+            )}
+            {headerFmt === "IMAGE" && proxiedHeaderImage && (
+              <img
+                src={proxiedHeaderImage}
+                alt="Template header"
+                className="rounded-xl mb-1 w-[250px] h-auto object-cover bg-gray-100 border border-gray-200"
+                onError={(e) => handleImageError(e)}
+                loading="lazy"
+                onLoad={() => notifyResize()}
+                onClick={() => { try { headerLink && window.open(headerLink, '_blank'); } catch {} }}
+              />
+            )}
+            {headerText && (
+              <div className="whitespace-pre-wrap text-sm border rounded-lg p-2 bg-slate-50">{headerText}</div>
+            )}
+            {(headerFmt !== "IMAGE" && headerLink) && (
+              <a className="text-xs underline text-blue-200 break-all" href={headerLink} target="_blank" rel="noopener noreferrer">
+                {headerLink}
+              </a>
+            )}
+          </div>
+        )}
+
+        {bodyText && (
+          <div className="whitespace-pre-wrap break-words text-sm">{bodyText}</div>
+        )}
+
+        {footerText && (
+          <div className="mt-2 text-[11px] opacity-70 whitespace-pre-wrap">{footerText}</div>
+        )}
+
+        {buttons.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {buttons.map((b, i) => {
+              const t = String(b?.text || b?.title || b?.type || "Button");
+              const url = String(b?.url || "").trim();
+              const isUrl = !!url;
+              return isUrl ? (
+                <a
+                  key={i}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-2 py-1 rounded border text-xs bg-white underline text-blue-700"
+                  title={url}
+                >
+                  {t}
+                </a>
+              ) : (
+                <span key={i} className="px-2 py-1 rounded border text-xs bg-white">
+                  {t}
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderReferredProductPreview = () => {
     if (!isReferredProductText) return null;
     const info = catalogProducts[retailerId] || {};
@@ -944,7 +1039,8 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
           </button>
         )}
         {/* Content based on message type */}
-        {isGroupedImages ? renderGroupedImages() :
+        {isTemplate ? renderTemplate() :
+         isGroupedImages ? renderGroupedImages() :
          isImage ? renderSingleImage(mediaUrl ? `${API_BASE}/proxy-image?url=${encodeURIComponent(mediaUrl)}` : mediaUrl, "Product", msg.caption || msg.price) :
          isAudio ? renderAudio() :
          isVideo ? renderVideo() :

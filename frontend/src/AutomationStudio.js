@@ -386,6 +386,9 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     templateLanguage: "en",
     templateVars: [],
     templateHeaderUrl: "",
+    // When a WhatsApp TEMPLATE contains QUICK_REPLY buttons, you can attach follow-up automations per button.
+    // Stored on the rule as rule.meta.template_button_followups.
+    templateButtonFollowups: {},
     // Buttons action
     buttonsText: "",
     buttonsLines: "buy_item|Acheter | شراء\norder_status|Statut | حالة",
@@ -726,6 +729,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               templateLanguage: "en",
               templateVars: [],
               templateHeaderUrl: "",
+              templateButtonFollowups: {},
               buttonsText: "",
               buttonsLines: "buy_item|Acheter | شراء\norder_status|Statut | حالة",
               listText: "",
@@ -897,6 +901,14 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               templateLanguage: String(aTpl?.language || aOC?.language || "en"),
               templateVars: tplVars,
               templateHeaderUrl: tplHeaderUrl,
+              templateButtonFollowups: (() => {
+                try {
+                  const meta = (r?.meta && typeof r.meta === "object") ? r.meta : {};
+                  const fu = meta?.template_button_followups;
+                  if (fu && typeof fu === "object") return fu;
+                } catch {}
+                return {};
+              })(),
               buttonsText: String(aButtons?.text || aButtons?.message || ""),
               buttonsLines: (() => {
                 try {
@@ -1248,6 +1260,9 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   enabled: !!draft.enabled,
                   workspaces: ruleWorkspaces,
                   cooldown_seconds: Number(draft.cooldownSeconds || 0),
+                  meta: {
+                    template_button_followups: (draft.templateButtonFollowups && typeof draft.templateButtonFollowups === "object") ? draft.templateButtonFollowups : {},
+                  },
                   trigger:
                     draft.triggerSource === "shopify"
                       ? { source: "shopify", event: String(shopifyTopicEffective || "orders/paid") }
@@ -1289,7 +1304,104 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   arr[idx] = { ...arr[idx], ...rule, id: arr[idx].id };
                   return arr;
                 })();
-                await persistRules(next);
+                // Auto-create per-template-button follow-up rules (triggered by WhatsApp interactive replies).
+                const followups = (draft.templateButtonFollowups && typeof draft.templateButtonFollowups === "object") ? draft.templateButtonFollowups : {};
+                const followPrefix = `${newId}:tplbtn:`;
+                const buildFollowupActions = (cfg) => {
+                  const c = (cfg && typeof cfg === "object") ? cfg : {};
+                  const t = String(c.type || "none").toLowerCase();
+                  const out = [];
+                  if (t === "text") {
+                    const text = String(c.text || "").trim();
+                    if (text) out.push({ type: "send_text", to: "{{ phone }}", text });
+                  } else if (t === "buttons") {
+                    const body = String(c.buttonsText || "").trim();
+                    const lines = String(c.buttonsLines || "")
+                      .split(/\r?\n/g)
+                      .map((x) => x.trim())
+                      .filter(Boolean);
+                    const btns = [];
+                    for (const ln of lines) {
+                      const parts = ln.split("|");
+                      const id = String(parts[0] || "").trim();
+                      const title = String(parts.slice(1).join("|") || "").trim();
+                      if (id && title) btns.push({ id, title });
+                    }
+                    if (body && btns.length) out.push({ type: "send_buttons", to: "{{ phone }}", text: body, buttons: btns });
+                  } else if (t === "list") {
+                    const body = String(c.listText || "").trim();
+                    const buttonText = String(c.listButtonText || "Choose").trim();
+                    const sectionTitle = String(c.listSectionTitle || "").trim();
+                    const rowLines = String(c.listRowsLines || "")
+                      .split(/\r?\n/g)
+                      .map((x) => x.trim())
+                      .filter(Boolean);
+                    const rows = [];
+                    for (const ln of rowLines) {
+                      const parts = ln.split("|");
+                      const id = String(parts[0] || "").trim();
+                      const title = String(parts[1] || "").trim();
+                      const desc = String(parts.slice(2).join("|") || "").trim();
+                      if (!id || !title) continue;
+                      const row = { id, title };
+                      if (desc) row.description = desc;
+                      rows.push(row);
+                    }
+                    if (body && rows.length) {
+                      out.push({
+                        type: "send_list",
+                        to: "{{ phone }}",
+                        text: body,
+                        button_text: buttonText,
+                        sections: [{ ...(sectionTitle ? { title: sectionTitle } : {}), rows }],
+                      });
+                    }
+                  } else if (t === "catalog_set") {
+                    const setId = String(c.catalogSetId || "").trim();
+                    const caption = String(c.catalogSetCaption || "").trim();
+                    if (setId) out.push({ type: "send_catalog_set", to: "{{ phone }}", set_id: setId, caption });
+                  } else if (t === "catalog_item") {
+                    const retailerId = String(c.catalogItemRetailerId || "").trim();
+                    const caption = String(c.catalogItemCaption || "").trim();
+                    if (retailerId) out.push({ type: "send_catalog_item", to: "{{ phone }}", retailer_id: retailerId, caption });
+                  }
+                  return out;
+                };
+
+                const followupRules = [];
+                try {
+                  const keys = Object.keys(followups || {});
+                  for (let i = 0; i < keys.length; i++) {
+                    const label = String(keys[i] || "").trim();
+                    if (!label) continue;
+                    const cfg = followups[label] || {};
+                    const typ = String(cfg?.type || "none").toLowerCase();
+                    if (!typ || typ === "none") continue;
+                    const actions2 = buildFollowupActions(cfg);
+                    if (!actions2.length) continue;
+                    followupRules.push({
+                      id: `${followPrefix}${i}`,
+                      name: `${String(rule.name || "Automation")} → ${label}`,
+                      enabled: !!rule.enabled,
+                      workspaces: ruleWorkspaces,
+                      cooldown_seconds: 0,
+                      trigger: { source: "whatsapp", event: "interactive" },
+                      condition: { match: "button_title_contains", keywords: [label] },
+                      actions: actions2,
+                      meta: { parent_rule_id: newId, template_button_label: label },
+                    });
+                  }
+                } catch {}
+
+                const nextWithFollowups = (() => {
+                  const arr = Array.isArray(next) ? [...next] : [];
+                  const cleaned = arr.filter((r0) => {
+                    try { return !(String(r0?.id || "").startsWith(followPrefix)); } catch { return true; }
+                  });
+                  return [...cleaned, ...followupRules];
+                })();
+
+                await persistRules(nextWithFollowups);
                 await loadRuleStats();
                 // If this is a retargeting automation, launch the batch job immediately.
                 try {
@@ -3280,6 +3392,183 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                             </div>
                           </div>
                         )}
+
+                        {/* Template button follow-ups: define what happens when the customer clicks a template quick reply */}
+                        {String(draft.actionMode || "") === "template" &&
+                          Array.isArray(selectedTemplatePreview.buttons) &&
+                          selectedTemplatePreview.buttons.length > 0 && (
+                            <div className="mt-3 border rounded-xl p-3 bg-slate-50">
+                              <div className="text-xs font-semibold text-slate-700">Button follow-ups</div>
+                              <div className="text-[11px] text-slate-500 mt-1">
+                                When the customer clicks a template button, WhatsApp sends an <span className="font-mono">interactive</span> reply.
+                                Configure an auto-reply per button (URL buttons typically do not send replies).
+                              </div>
+
+                              <div className="mt-3 space-y-3">
+                                {(selectedTemplatePreview.buttons || []).map((b, i) => {
+                                  const label = String(b?.text || b?.title || b?.url || "").trim() || `button_${i + 1}`;
+                                  const all = (draft.templateButtonFollowups && typeof draft.templateButtonFollowups === "object") ? draft.templateButtonFollowups : {};
+                                  const cfg = (all && all[label] && typeof all[label] === "object") ? all[label] : {};
+                                  const typ = String(cfg.type || "none");
+
+                                  const setCfg = (nextCfg) => {
+                                    const merged = { ...(all || {}), [label]: { ...(cfg || {}), ...(nextCfg || {}) } };
+                                    onChange({ templateButtonFollowups: merged });
+                                  };
+
+                                  return (
+                                    <div key={`tpl-followup:${i}`} className="border rounded-lg bg-white p-3">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="text-sm font-medium text-slate-800 truncate">{label}</div>
+                                        <select
+                                          className="border rounded px-2 py-1 text-sm bg-white"
+                                          value={typ}
+                                          onChange={(e) => setCfg({ type: e.target.value })}
+                                          title="Follow-up action"
+                                        >
+                                          <option value="none">No follow-up</option>
+                                          <option value="text">Reply with text (or link)</option>
+                                          <option value="buttons">Reply with buttons</option>
+                                          <option value="list">Reply with list</option>
+                                          <option value="catalog_set">Send catalog set</option>
+                                          <option value="catalog_item">Send catalog item</option>
+                                        </select>
+                                      </div>
+
+                                      {typ === "text" && (
+                                        <div className="mt-2">
+                                          <div className="text-[11px] text-slate-500 mb-1">Reply text</div>
+                                          <textarea
+                                            className="w-full border rounded-lg px-3 py-2"
+                                            rows={3}
+                                            value={String(cfg.text || "")}
+                                            onChange={(e) => setCfg({ text: e.target.value })}
+                                            placeholder="Type your reply… (you can paste a URL)"
+                                          />
+                                        </div>
+                                      )}
+
+                                      {typ === "buttons" && (
+                                        <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                                          <div className="md:col-span-2">
+                                            <div className="text-[11px] text-slate-500 mb-1">Buttons body text</div>
+                                            <textarea
+                                              className="w-full border rounded-lg px-3 py-2"
+                                              rows={2}
+                                              value={String(cfg.buttonsText || "")}
+                                              onChange={(e) => setCfg({ buttonsText: e.target.value })}
+                                              placeholder="Please choose…"
+                                            />
+                                          </div>
+                                          <div className="md:col-span-2">
+                                            <div className="text-[11px] text-slate-500 mb-1">Buttons (one per line: id|title)</div>
+                                            <textarea
+                                              className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                                              rows={3}
+                                              value={String(cfg.buttonsLines || "")}
+                                              onChange={(e) => setCfg({ buttonsLines: e.target.value })}
+                                              placeholder={"buy_item|Acheter | شراء\norder_status|Statut | حالة"}
+                                            />
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {typ === "list" && (
+                                        <div className="mt-2 space-y-2">
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">List body text</div>
+                                            <textarea
+                                              className="w-full border rounded-lg px-3 py-2"
+                                              rows={2}
+                                              value={String(cfg.listText || "")}
+                                              onChange={(e) => setCfg({ listText: e.target.value })}
+                                              placeholder="Please choose…"
+                                            />
+                                          </div>
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                            <div>
+                                              <div className="text-[11px] text-slate-500 mb-1">List button label</div>
+                                              <input
+                                                className="w-full border rounded-lg px-3 py-2"
+                                                value={String(cfg.listButtonText || "")}
+                                                onChange={(e) => setCfg({ listButtonText: e.target.value })}
+                                                placeholder="Choose"
+                                              />
+                                            </div>
+                                            <div>
+                                              <div className="text-[11px] text-slate-500 mb-1">Section title (optional)</div>
+                                              <input
+                                                className="w-full border rounded-lg px-3 py-2"
+                                                value={String(cfg.listSectionTitle || "")}
+                                                onChange={(e) => setCfg({ listSectionTitle: e.target.value })}
+                                                placeholder="Options"
+                                              />
+                                            </div>
+                                          </div>
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">Rows (one per line: id|title|description?)</div>
+                                            <textarea
+                                              className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                                              rows={3}
+                                              value={String(cfg.listRowsLines || "")}
+                                              onChange={(e) => setCfg({ listRowsLines: e.target.value })}
+                                              placeholder={"gender_girls|Fille | بنت\ngender_boys|Garçon | ولد"}
+                                            />
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {typ === "catalog_set" && (
+                                        <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">Catalog set id</div>
+                                            <input
+                                              className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                                              value={String(cfg.catalogSetId || "")}
+                                              onChange={(e) => setCfg({ catalogSetId: e.target.value })}
+                                              placeholder="e.g. 123456789"
+                                            />
+                                          </div>
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">Caption (optional)</div>
+                                            <input
+                                              className="w-full border rounded-lg px-3 py-2"
+                                              value={String(cfg.catalogSetCaption || "")}
+                                              onChange={(e) => setCfg({ catalogSetCaption: e.target.value })}
+                                              placeholder="Short caption…"
+                                            />
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {typ === "catalog_item" && (
+                                        <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">Retailer id</div>
+                                            <input
+                                              className="w-full border rounded-lg px-3 py-2 font-mono text-xs"
+                                              value={String(cfg.catalogItemRetailerId || "")}
+                                              onChange={(e) => setCfg({ catalogItemRetailerId: e.target.value })}
+                                              placeholder="e.g. SKU123"
+                                            />
+                                          </div>
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">Caption (optional)</div>
+                                            <input
+                                              className="w-full border rounded-lg px-3 py-2"
+                                              value={String(cfg.catalogItemCaption || "")}
+                                              onChange={(e) => setCfg({ catalogItemCaption: e.target.value })}
+                                              placeholder="Short caption…"
+                                            />
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
                       </div>
                     )}
 

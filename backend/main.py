@@ -1299,6 +1299,22 @@ class RedisManager:
     def __init__(self, redis_url: str | None = None):
         self.redis_url = redis_url or REDIS_URL
         self.redis_client: Optional[redis.Redis] = None
+        # Local (per-process) throttles to reduce Redis command volume.
+        # These are best-effort: if the process restarts, counters reset.
+        try:
+            self._agent_last_seen_touch_min_interval_sec = float(
+                os.getenv("AGENT_LAST_SEEN_TOUCH_MIN_INTERVAL_SECONDS", "60") or "60"
+            )
+        except Exception:
+            self._agent_last_seen_touch_min_interval_sec = 60.0
+        try:
+            self._agent_last_seen_check_min_interval_sec = float(
+                os.getenv("AGENT_LAST_SEEN_CHECK_MIN_INTERVAL_SECONDS", "60") or "60"
+            )
+        except Exception:
+            self._agent_last_seen_check_min_interval_sec = 60.0
+        self._agent_last_seen_local_touch: dict[str, float] = {}
+        self._agent_last_seen_local_check: dict[str, float] = {}
 
     # -------- agent presence / activity (online) --------
     def _agent_last_seen_key(self, workspace: str, username: str) -> str:
@@ -1315,11 +1331,50 @@ class RedisManager:
             return
         ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
         key = self._agent_last_seen_key(ws, u)
+        # Throttle Redis writes: presence is for UX, not a strict accounting system.
+        try:
+            now = float(time.time())
+            cache_key = f"{ws}:{u}".lower()
+            last = float(self._agent_last_seen_local_touch.get(cache_key) or 0.0)
+            min_int = float(getattr(self, "_agent_last_seen_touch_min_interval_sec", 0.0) or 0.0)
+            if min_int > 0 and last and (now - last) < min_int:
+                return
+            self._agent_last_seen_local_touch[cache_key] = now
+            if len(self._agent_last_seen_local_touch) > 20000:
+                # Prevent unbounded growth in long-lived processes
+                self._agent_last_seen_local_touch.clear()
+        except Exception:
+            pass
         try:
             now = str(time.time())
             await self.redis_client.setex(key, int(AGENT_ACTIVITY_CACHE_TTL_SECONDS), now)
         except Exception:
             return
+
+    def should_check_inactivity(self, username: str, workspace: str | None = None) -> bool:
+        """Throttle how often we hit Redis to enforce inactivity expiry.
+
+        Inactivity is enforced on requests, but we don't need a Redis GET on *every* request.
+        """
+        try:
+            if not self.redis_client:
+                return False
+            u = str(username or "").strip().lower()
+            if not u:
+                return False
+            ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+            now = float(time.time())
+            cache_key = f"{ws}:{u}"
+            last = float(self._agent_last_seen_local_check.get(cache_key) or 0.0)
+            min_int = float(getattr(self, "_agent_last_seen_check_min_interval_sec", 0.0) or 0.0)
+            if min_int > 0 and last and (now - last) < min_int:
+                return False
+            self._agent_last_seen_local_check[cache_key] = now
+            if len(self._agent_last_seen_local_check) > 20000:
+                self._agent_last_seen_local_check.clear()
+            return True
+        except Exception:
+            return True
 
     async def get_agent_last_seen(self, username: str, workspace: str | None = None) -> Optional[float]:
         if not self.redis_client:
@@ -1370,9 +1425,18 @@ class RedisManager:
         try:
             ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
             key = f"recent_messages:{ws}:{user_id}"
-            await self.redis_client.lpush(key, json.dumps(message))
-            await self.redis_client.ltrim(key, 0, 49)  # Keep last 50 messages
-            await self.redis_client.expire(key, ttl)
+            # Reduce billed Redis commands: do LPUSH+LTRIM+EXPIRE in a single EVAL.
+            # Many managed Redis providers count EVAL as 1 command (instead of 3).
+            payload = json.dumps(message, ensure_ascii=False)
+            lua = """
+            redis.call('LPUSH', KEYS[1], ARGV[1])
+            redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
+            if tonumber(ARGV[3]) and tonumber(ARGV[3]) > 0 then
+              redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+            end
+            return 1
+            """
+            await self.redis_client.eval(lua, 1, key, payload, 50, int(ttl))
         except Exception as e:
             print(f"Redis cache error: {e}")
     
@@ -8644,22 +8708,28 @@ async def _auth_middleware(request: StarletteRequest, call_next):
             ws = get_current_workspace()
             uname = str((agent or {}).get("username") or "")
             if uname and getattr(redis_manager, "redis_client", None):
-                last = await redis_manager.get_agent_last_seen(uname, workspace=ws)
-                if last is not None and (time.time() - float(last)) > float(INACTIVITY_TIMEOUT_SECONDS):
-                    try:
-                        await auth_db_manager.revoke_all_refresh_tokens_for_agent(uname)
-                    except Exception:
-                        pass
-                    try:
-                        # Clear presence for all configured workspaces (so admin view updates immediately)
-                        for _w in (WORKSPACES or [DEFAULT_WORKSPACE]):
+                # Avoid a Redis GET on every request (frontends often poll).
+                # We still touch presence below; we only *check* for expiry periodically.
+                try:
+                    if redis_manager.should_check_inactivity(uname, workspace=ws):
+                        last = await redis_manager.get_agent_last_seen(uname, workspace=ws)
+                        if last is not None and (time.time() - float(last)) > float(INACTIVITY_TIMEOUT_SECONDS):
                             try:
-                                await redis_manager.clear_agent_last_seen(uname, workspace=_w)
+                                await auth_db_manager.revoke_all_refresh_tokens_for_agent(uname)
                             except Exception:
-                                continue
-                    except Exception:
-                        pass
-                    return JSONResponse(status_code=401, content={"detail": "Session expired due to inactivity"})
+                                pass
+                            try:
+                                # Clear presence for all configured workspaces (so admin view updates immediately)
+                                for _w in (WORKSPACES or [DEFAULT_WORKSPACE]):
+                                    try:
+                                        await redis_manager.clear_agent_last_seen(uname, workspace=_w)
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+                            return JSONResponse(status_code=401, content={"detail": "Session expired due to inactivity"})
+                except Exception:
+                    pass
                 # Touch activity on every authenticated request
                 await redis_manager.touch_agent_last_seen(uname, workspace=ws)
         except Exception:
@@ -9378,14 +9448,17 @@ async def handle_websocket_message(websocket: WebSocket, user_id: str, data: dic
     """Handle incoming WebSocket messages from client"""
     message_type = data.get("type")
 
-    # Any WS message counts as activity for the connected agent (best-effort).
+    # Any *non-keepalive* WS message counts as activity for the connected agent (best-effort).
+    # IMPORTANT: the frontend sends periodic ping keepalives; treating those as "activity"
+    # causes constant Redis writes even when the agent is idle.
     try:
-        meta0 = connection_manager.connection_metadata.get(websocket) or {}
-        ws0 = meta0.get("workspace") or get_current_workspace()
-        agent0 = ((meta0.get("client_info") or {}) or {}).get("agent")
-        agent0 = str(agent0 or "").strip()
-        if agent0:
-            await redis_manager.touch_agent_last_seen(agent0, workspace=str(ws0))
+        if message_type != "ping":
+            meta0 = connection_manager.connection_metadata.get(websocket) or {}
+            ws0 = meta0.get("workspace") or get_current_workspace()
+            agent0 = ((meta0.get("client_info") or {}) or {}).get("agent")
+            agent0 = str(agent0 or "").strip()
+            if agent0:
+                await redis_manager.touch_agent_last_seen(agent0, workspace=str(ws0))
     except Exception:
         pass
     

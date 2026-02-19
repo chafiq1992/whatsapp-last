@@ -335,7 +335,8 @@ router = APIRouter()
 _SEGMENTS_FILE = Path(__file__).resolve().parent / "customer_segments.json"
 _SEGMENTS_LOCK: float = 0.0  # best-effort local lock (single-process)
 
-_COUNT_CACHE: dict[str, tuple[float, int]] = {}  # key -> (ts, count)
+# key -> (ts, count, is_estimate)
+_COUNT_CACHE: dict[str, tuple[float, int, bool]] = {}
 _COUNT_CACHE_TTL_SEC = 5 * 60
 
 
@@ -429,31 +430,62 @@ def compile_segment_dsl_to_shopify_query(dsl: str) -> tuple[str, list[str], str]
     return query, conds, desc
 
 
-async def _count_customers_for_query(store: str | None, query: str) -> int:
-    key = f"{(store or '').strip().upper()}|{query.strip()}"
+async def _count_customers_for_query(
+    *,
+    query: str,
+    base: str,
+    extra_args: dict,
+    cache_key_prefix: str = "",
+    max_pages: int = 6,
+    max_seconds: float = 8.0,
+) -> tuple[int, bool]:
+    """Best-effort count for a Shopify customers/search query.
+
+    Shopify REST doesn't provide a true count endpoint for search queries. The naive way
+    is to page through all results, which can be very slow and cause 504s behind proxies.
+
+    This function returns:
+      - (count, False) when we finish paging within budget (exact)
+      - (count, True) when we stop early due to time/page budget (estimate / lower bound)
+    """
+    q = (query or "").strip()
+    key = f"{(cache_key_prefix or '').strip()}|{q}"
     now = time.time()
     try:
-        ts, cnt = _COUNT_CACHE.get(key, (0.0, -1))
+        ts, cnt, is_est = _COUNT_CACHE.get(key, (0.0, -1, True))
         if cnt >= 0 and (now - ts) < _COUNT_CACHE_TTL_SEC:
-            return cnt
+            return int(cnt), bool(is_est)
     except Exception:
         pass
 
     total = 0
     page_info: str | None = None
+    pages = 0
+    started = time.monotonic()
+    is_estimate = False
+
+    # Keep per-request timeouts small; overall budget is enforced by max_seconds.
     async with httpx.AsyncClient() as client:
         while True:
+            if pages >= max_pages:
+                is_estimate = True
+                break
+            if (time.monotonic() - started) > max_seconds:
+                is_estimate = True
+                break
+
             # IMPORTANT (Shopify cursor pagination): when page_info is present, you must NOT pass other
             # params like query/order. Only limit + page_info are allowed.
             if page_info:
                 params = {"limit": 250, "page_info": page_info}
             else:
-                params = {"limit": 250, "order": "updated_at desc", "query": query.strip()}
+                params = {"limit": 250, "order": "updated_at desc", "query": q}
+
             resp = await client.get(
-                f"{admin_api_base(store)}/customers/search.json",
+                f"{base}/customers/search.json",
                 params=params,
-                timeout=25,
-                **_client_args(store=store),
+                timeout=10,
+                **(extra_args or {}),
             )
             if resp.status_code == 403:
                 raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
@@ -462,19 +494,23 @@ async def _count_customers_for_query(store: str | None, query: str) -> int:
             payload = resp.json() or {}
             customers = payload.get("customers", []) or []
             total += len(customers)
-            # safety cap
+            pages += 1
+
+            # Safety cap (avoid pathological loops)
             if total >= 200000:
+                is_estimate = True
                 break
+
             links = _parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
             page_info = links.get("next")
             if not page_info:
                 break
 
     try:
-        _COUNT_CACHE[key] = (now, int(total))
+        _COUNT_CACHE[key] = (now, int(total), bool(is_estimate))
     except Exception:
         pass
-    return int(total)
+    return int(total), bool(is_estimate)
 
 
 @router.get("/customer-segments")
@@ -589,27 +625,41 @@ async def shopify_segment_preview(
     dsl: str = Query("", description="Segment DSL (Shopify-like FROM/SHOW/WHERE/AND/ORDER BY)"),
     store: str | None = Query(None, description="Optional Shopify store prefix (e.g. IRRAKIDS)"),
     page_info: str | None = Query(None, description="Cursor for pagination (Shopify page_info)"),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
     compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
     if not compiled_query:
         raise HTTPException(status_code=400, detail="Could not compile DSL (no supported conditions found).")
-    # base count
+    # Resolve correct Shopify context (OAuth per-workspace if connected, else env store mapping).
+    base, extra_args, store_used, store = await _shopify_http_context(store, x_workspace)
+
+    # base count (fast)
     base_count: int | None = None
     async with httpx.AsyncClient() as client:
         try:
-            c_resp = await client.get(f"{admin_api_base(store)}/customers/count.json", timeout=20, **_client_args(store=store))
+            c_resp = await client.get(f"{base}/customers/count.json", timeout=10, **(extra_args or {}))
             if c_resp.status_code == 200:
                 base_count = int((c_resp.json() or {}).get("count") or 0)
         except Exception:
             base_count = None
 
-    segment_count = await _count_customers_for_query(store, compiled_query)
-    preview = await shopify_customers(store=store, limit=50, page_info=page_info, q=compiled_query)
+    segment_count, segment_count_is_estimate = await _count_customers_for_query(
+        query=compiled_query,
+        base=base,
+        extra_args=extra_args,
+        cache_key_prefix=str(store_used),
+        max_pages=6,
+        max_seconds=8.0,
+    )
+
+    # Preview customers list
+    preview = await shopify_customers(store=store, limit=50, page_info=page_info, q=compiled_query, x_workspace=x_workspace)
     # attach meta
     preview["compiled_query"] = compiled_query
     preview["conditions"] = conds
     preview["description"] = desc
     preview["segment_count"] = segment_count
+    preview["segment_count_is_estimate"] = bool(segment_count_is_estimate)
     preview["base_count"] = base_count
     return preview
 
@@ -986,23 +1036,23 @@ async def shopify_customers(
     x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
     """List Shopify customers (paginated), with optional search."""
-    store = _resolve_store_from_workspace(store, x_workspace)
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
     async with httpx.AsyncClient() as client:
         # IMPORTANT (Shopify cursor pagination): when page_info is present, do not pass other params
         # like "order" or "query". Only "limit" + "page_info".
         if page_info:
             params: dict[str, str | int] = {"limit": int(limit), "page_info": page_info}
             # Keep endpoint stable with the original request: if q exists, we were using /customers/search.json.
-            endpoint = f"{admin_api_base(store)}/customers/search.json" if (q and q.strip()) else f"{admin_api_base(store)}/customers.json"
+            endpoint = f"{base}/customers/search.json" if (q and q.strip()) else f"{base}/customers.json"
         else:
             params = {"limit": int(limit), "order": "updated_at desc"}
             if q and q.strip():
-                endpoint = f"{admin_api_base(store)}/customers/search.json"
+                endpoint = f"{base}/customers/search.json"
                 params["query"] = q.strip()
             else:
-                endpoint = f"{admin_api_base(store)}/customers.json"
+                endpoint = f"{base}/customers.json"
 
-        resp = await client.get(endpoint, params=params, timeout=20, **_client_args(store=store))
+        resp = await client.get(endpoint, params=params, timeout=20, **(extra_args or {}))
         if resp.status_code == 403:
             raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
         if resp.status_code >= 400:
@@ -1015,7 +1065,7 @@ async def shopify_customers(
         total_count: int | None = None
         if (not q or not q.strip()) and (not page_info):
             try:
-                c_resp = await client.get(f"{admin_api_base(store)}/customers/count.json", timeout=20, **_client_args(store=store))
+                c_resp = await client.get(f"{base}/customers/count.json", timeout=10, **(extra_args or {}))
                 if c_resp.status_code == 200:
                     total_count = int((c_resp.json() or {}).get("count") or 0)
             except Exception:

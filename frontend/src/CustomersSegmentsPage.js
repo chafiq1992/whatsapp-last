@@ -59,6 +59,7 @@ export default function CustomersSegmentsPage({ embedded = false }) {
   const [description, setDescription] = useState("");
   const [segmentCount, setSegmentCount] = useState(null);
   const [baseCount, setBaseCount] = useState(null);
+  const [segmentCountIsEstimate, setSegmentCountIsEstimate] = useState(false);
   const [nextPageInfo, setNextPageInfo] = useState(null);
   const [prevPageInfo, setPrevPageInfo] = useState(null);
 
@@ -68,6 +69,9 @@ export default function CustomersSegmentsPage({ embedded = false }) {
   }, [segmentCount, baseCount]);
 
   const [segments, setSegments] = useState([]);
+  const [segmentSearch, setSegmentSearch] = useState("");
+  const [activeSegmentId, setActiveSegmentId] = useState("");
+  const [activeSegmentName, setActiveSegmentName] = useState("");
   const loadSegments = async () => {
     try {
       const res = await api.get("/customer-segments");
@@ -76,6 +80,18 @@ export default function CustomersSegmentsPage({ embedded = false }) {
       setSegments([]);
     }
   };
+
+  const filteredSegments = useMemo(() => {
+    const q = String(segmentSearch || "").trim().toLowerCase();
+    const arr = Array.isArray(segments) ? segments : [];
+    if (!q) return arr;
+    return arr.filter((s) => {
+      const name = String(s?.name || "").toLowerCase();
+      const desc = String(s?.description || "").toLowerCase();
+      const st = String(s?.store || "").toLowerCase();
+      return name.includes(q) || desc.includes(q) || st.includes(q);
+    });
+  }, [segments, segmentSearch]);
 
   useEffect(() => {
     loadSegments();
@@ -138,6 +154,7 @@ export default function CustomersSegmentsPage({ embedded = false }) {
       setDescription(String(data.description || ""));
       setSegmentCount(typeof data.segment_count === "number" ? data.segment_count : null);
       setBaseCount(typeof data.base_count === "number" ? data.base_count : null);
+      setSegmentCountIsEstimate(Boolean(data.segment_count_is_estimate));
       setNextPageInfo(data.next_page_info || null);
       setPrevPageInfo(data.prev_page_info || null);
     } catch (e) {
@@ -149,6 +166,7 @@ export default function CustomersSegmentsPage({ embedded = false }) {
       setDescription("");
       setSegmentCount(null);
       setBaseCount(null);
+      setSegmentCountIsEstimate(false);
       setNextPageInfo(null);
       setPrevPageInfo(null);
     } finally {
@@ -161,15 +179,47 @@ export default function CustomersSegmentsPage({ embedded = false }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageInfo]);
 
-  const handleSaveSegment = async () => {
+  const handleSaveSegment = async ({ asNew = false } = {}) => {
     try {
-      const name = window.prompt("Segment name?", "My segment");
+      const defaultName = activeSegmentName || "My segment";
+      const name = window.prompt("Segment name?", defaultName);
       if (!name) return;
-      await api.post("/customer-segments", { name, dsl, store: storeId || null });
+      const payload = {
+        name,
+        dsl,
+        store: storeId || null,
+        ...(activeSegmentId && !asNew ? { id: activeSegmentId } : {}),
+      };
+      const res = await api.post("/customer-segments", payload);
       await loadSegments();
-      alert("Saved segment");
+      const saved = res?.data || null;
+      if (saved?.id && !asNew) {
+        setActiveSegmentId(String(saved.id));
+        setActiveSegmentName(String(saved.name || ""));
+      }
+      if (saved?.id && asNew) {
+        setActiveSegmentId(String(saved.id));
+        setActiveSegmentName(String(saved.name || ""));
+      }
+      alert(activeSegmentId && !asNew ? "Saved changes" : "Saved segment");
     } catch (e) {
       alert("Failed to save segment");
+    }
+  };
+
+  const handleDeleteSegment = async () => {
+    const sid = String(activeSegmentId || "").trim();
+    if (!sid) return;
+    const ok = window.confirm("Delete this saved segment?");
+    if (!ok) return;
+    try {
+      await api.delete(`/customer-segments/${encodeURIComponent(sid)}`);
+      await loadSegments();
+      setActiveSegmentId("");
+      setActiveSegmentName("");
+      alert("Deleted segment");
+    } catch {
+      alert("Failed to delete segment");
     }
   };
 
@@ -250,9 +300,16 @@ export default function CustomersSegmentsPage({ embedded = false }) {
             <button className="px-3 py-1.5 text-sm border rounded" onClick={preview} disabled={loading}>
               {loading ? "Loading…" : "Preview"}
             </button>
-            <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={handleSaveSegment}>
-              Save segment
-            </button>
+            <div className="flex items-center gap-2">
+              <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={() => handleSaveSegment({ asNew: false })}>
+                {activeSegmentId ? "Save changes" : "Save segment"}
+              </button>
+              {activeSegmentId && (
+                <button className="px-3 py-1.5 text-sm border rounded" onClick={() => handleSaveSegment({ asNew: true })}>
+                  Save as new
+                </button>
+              )}
+            </div>
             <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded disabled:opacity-60" onClick={launchCampaign} disabled={launching}>
               {launching ? "Launching…" : "Launch campaign"}
             </button>
@@ -277,9 +334,16 @@ export default function CustomersSegmentsPage({ embedded = false }) {
               <button className="px-3 py-1.5 text-sm border rounded" onClick={preview} disabled={loading}>
                 {loading ? "Loading…" : "Preview"}
               </button>
-              <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={handleSaveSegment}>
-                Save segment
-              </button>
+              <div className="flex items-center gap-2">
+                <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={() => handleSaveSegment({ asNew: false })}>
+                  {activeSegmentId ? "Save changes" : "Save segment"}
+                </button>
+                {activeSegmentId && (
+                  <button className="px-3 py-1.5 text-sm border rounded" onClick={() => handleSaveSegment({ asNew: true })}>
+                    Save as new
+                  </button>
+                )}
+              </div>
               <button className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded disabled:opacity-60" onClick={launchCampaign} disabled={launching}>
                 {launching ? "Launching…" : "Launch campaign"}
               </button>
@@ -288,25 +352,47 @@ export default function CustomersSegmentsPage({ embedded = false }) {
         )}
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           <div className="lg:col-span-1">
-            <div className="text-sm font-medium text-slate-800 mb-2">Saved segments</div>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="text-sm font-medium text-slate-800">Saved segments</div>
+              {activeSegmentId && (
+                <button className="text-xs px-2 py-1 border rounded hover:bg-slate-50" onClick={handleDeleteSegment}>
+                  Delete
+                </button>
+              )}
+            </div>
             <div className="border rounded-xl overflow-hidden">
+              <div className="p-2 border-b bg-white">
+                <input
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="Search segments"
+                  value={segmentSearch}
+                  onChange={(e) => setSegmentSearch(e.target.value)}
+                />
+              </div>
               <div className="max-h-[60vh] overflow-auto divide-y">
-                {segments.map((s) => (
+                {filteredSegments.map((s) => (
                   <button
                     key={s.id}
-                    className="w-full text-left px-3 py-2 hover:bg-slate-50"
+                    className={`w-full text-left px-3 py-2 hover:bg-slate-50 ${String(activeSegmentId) === String(s.id) ? "bg-slate-50" : ""}`}
                     onClick={() => {
                       setDsl(String(s.dsl || ""));
                       if (s.store) setStoreId(String(s.store || ""));
+                      setActiveSegmentId(String(s.id || ""));
+                      setActiveSegmentName(String(s.name || ""));
                       setPageInfo(null);
                       setTimeout(() => preview(), 0);
                     }}
                   >
                     <div className="font-medium text-slate-900 truncate">{s.name || "Segment"}</div>
-                    <div className="text-xs text-slate-500 truncate">{s.description || ""}</div>
+                    <div className="text-xs text-slate-500 truncate">
+                      {s.store ? `${String(s.store)} • ` : ""}
+                      {s.description || ""}
+                    </div>
                   </button>
                 ))}
-                {segments.length === 0 && <div className="px-3 py-3 text-sm text-slate-500">No segments yet.</div>}
+                {filteredSegments.length === 0 && (
+                  <div className="px-3 py-3 text-sm text-slate-500">{segments.length === 0 ? "No segments yet." : "No segments match your search."}</div>
+                )}
               </div>
             </div>
           </div>
@@ -317,7 +403,11 @@ export default function CustomersSegmentsPage({ embedded = false }) {
               <div className="mt-1 text-sm text-slate-600">
                 {typeof segmentCount === "number" ? (
                   <>
-                    <span className="font-semibold">{formatInt(segmentCount)}</span> customers
+                    <span className="font-semibold">
+                      {formatInt(segmentCount)}
+                      {segmentCountIsEstimate ? "+" : ""}
+                    </span>{" "}
+                    customers
                     {typeof percentOfBase === "number" && (
                       <>
                         <span className="mx-2 text-slate-300">•</span>

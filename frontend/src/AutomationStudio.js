@@ -379,6 +379,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     retargetingBatchSize: 10,
     retargetingBatchEveryMinutes: 30,
     retargetingShopifyTagOnSent: "",
+    retargetingIgnoreTags: "",
     actionMode: "text", // 'text' | 'template' | 'order_confirm' | 'buttons' | 'list' | 'order_status'
     to: "{{ phone }}",
     templateName: "",
@@ -718,6 +719,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               retargetingBatchSize: 10,
               retargetingBatchEveryMinutes: 30,
               retargetingShopifyTagOnSent: "",
+              retargetingIgnoreTags: "",
               actionMode: "text",
               to: "{{ phone }}",
               templateName: "",
@@ -882,6 +884,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               retargetingBatchSize: isRetargeting ? Number(trig?.batch_size || 10) : 10,
               retargetingBatchEveryMinutes: isRetargeting ? Number(trig?.batch_every_minutes || 30) : 30,
               retargetingShopifyTagOnSent: isRetargeting ? String(trig?.shopify_customer_tag_on_sent || "") : "",
+              retargetingIgnoreTags: isRetargeting ? String(trig?.ignore_shopify_customer_tags || "") : "",
               actionMode: aStatus
                 ? "order_status"
                 : (aCatalogItem
@@ -1259,6 +1262,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                             batch_size: Number(draft.retargetingBatchSize || 10),
                             batch_every_minutes: Number(draft.retargetingBatchEveryMinutes || 30),
                             shopify_customer_tag_on_sent: String(draft.retargetingShopifyTagOnSent || "").trim(),
+                            ignore_shopify_customer_tags: String(draft.retargetingIgnoreTags || "").trim(),
                           }
                         : {
                           source: "whatsapp",
@@ -1308,16 +1312,26 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                         batch_size: Number(draft.retargetingBatchSize || 10),
                         batch_every_minutes: Number(draft.retargetingBatchEveryMinutes || 30),
                         shopify_customer_tag_on_sent: String(draft.retargetingShopifyTagOnSent || "").trim(),
+                        ignore_shopify_customer_tags: String(draft.retargetingIgnoreTags || "").trim(),
                         workspace: String(currentWorkspace || "").trim().toLowerCase(),
                       });
                       const jid = String(res?.data?.job_id || "");
-                      if (jid) alert(`Retargeting started. Job: ${jid}`);
+                      if (jid) {
+                        try {
+                          const wsKey = String(currentWorkspace || "").trim().toLowerCase() || "default";
+                          localStorage.setItem(`retargeting_last_job_id_${wsKey}`, jid);
+                        } catch {}
+                        alert(`Retargeting started. Job: ${jid}`);
+                      }
                     }
                   }
                 } catch (e) {
                   alert(e?.response?.data?.detail || "Failed to start retargeting");
                 }
-                setEditorOpen(false);
+                // Keep the editor open for retargeting so the user can preview/monitor/stop the job.
+                if (String(draft.triggerSource || "") !== "retargeting") {
+                  setEditorOpen(false);
+                }
               }}
             />
           )}
@@ -2079,6 +2093,22 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
   const [segmentsLoading, setSegmentsLoading] = useState(false);
   const [segmentsError, setSegmentsError] = useState("");
 
+  // Retargeting: preview + job monitor/stop
+  const [retargetingPreview, setRetargetingPreview] = useState(null);
+  const [retargetingPreviewLoading, setRetargetingPreviewLoading] = useState(false);
+  const [retargetingPreviewError, setRetargetingPreviewError] = useState("");
+
+  const [retargetingJobId, setRetargetingJobId] = useState(() => {
+    try {
+      const wsKey = String(currentWorkspace || "").trim().toLowerCase() || "default";
+      return localStorage.getItem(`retargeting_last_job_id_${wsKey}`) || "";
+    } catch {
+      return "";
+    }
+  });
+  const [retargetingJob, setRetargetingJob] = useState(null);
+  const [retargetingJobError, setRetargetingJobError] = useState("");
+
   useEffect(() => {
     if (String(draft.triggerSource || "") !== "retargeting") return;
     let alive = true;
@@ -2106,6 +2136,78 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.triggerSource]);
+
+  // Keep job id in sync with workspace changes
+  useEffect(() => {
+    try {
+      const wsKey = String(currentWorkspace || "").trim().toLowerCase() || "default";
+      const saved = localStorage.getItem(`retargeting_last_job_id_${wsKey}`) || "";
+      setRetargetingJobId(saved);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentWorkspace]);
+
+  useEffect(() => {
+    try {
+      const wsKey = String(currentWorkspace || "").trim().toLowerCase() || "default";
+      if (retargetingJobId) localStorage.setItem(`retargeting_last_job_id_${wsKey}`, String(retargetingJobId));
+    } catch {}
+  }, [retargetingJobId, currentWorkspace]);
+
+  const refreshRetargetingJob = async (jobId) => {
+    const id = String(jobId || "").trim();
+    if (!id) return;
+    try {
+      setRetargetingJobError("");
+      const res = await api.get(`/retargeting/jobs/${encodeURIComponent(id)}`);
+      setRetargetingJob(res?.data || null);
+    } catch (e) {
+      setRetargetingJob(null);
+      setRetargetingJobError(e?.response?.data?.detail || "Failed to load retargeting job.");
+    }
+  };
+
+  useEffect(() => {
+    if (String(draft.triggerSource || "") !== "retargeting") return;
+    const id = String(retargetingJobId || "").trim();
+    if (!id) return;
+    refreshRetargetingJob(id);
+    const t = setInterval(() => refreshRetargetingJob(id), 1500);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.triggerSource, retargetingJobId]);
+
+  const runRetargetingPreview = async () => {
+    const segId = String(draft.retargetingSegmentId || "").trim();
+    if (!segId) return;
+    try {
+      setRetargetingPreviewError("");
+      setRetargetingPreviewLoading(true);
+      const res = await api.post("/retargeting/customer-segments/preview", {
+        segment_id: segId,
+        ignore_shopify_customer_tags: String(draft.retargetingIgnoreTags || "").trim(),
+      });
+      setRetargetingPreview(res?.data || null);
+    } catch (e) {
+      setRetargetingPreview(null);
+      setRetargetingPreviewError(e?.response?.data?.detail || "Failed to preview segment audience.");
+    } finally {
+      setRetargetingPreviewLoading(false);
+    }
+  };
+
+  const stopRetargetingJob = async () => {
+    const id = String(retargetingJobId || "").trim();
+    if (!id) return;
+    const ok = window.confirm("Stop this retargeting job?");
+    if (!ok) return;
+    try {
+      await api.post(`/retargeting/jobs/${encodeURIComponent(id)}/stop`);
+      await refreshRetargetingJob(id);
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to stop job.");
+    }
+  };
 
   const safeSnap = (obj) => {
     try { return JSON.stringify(obj || {}); } catch { return ""; }
@@ -2806,6 +2908,117 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                           <div className="text-[11px] text-slate-500 mt-1">
                             Each customer who receives the message will get this tag in Shopify (requires <span className="font-mono">write_customers</span>).
                           </div>
+                        </div>
+
+                        <div className="md:col-span-2">
+                          <div className="text-xs text-slate-500 mb-1">Ignore customers with Shopify tag(s) (optional)</div>
+                          <input
+                            className="w-full border rounded-lg px-3 py-2"
+                            value={String(draft.retargetingIgnoreTags || "")}
+                            onChange={(e) => onChange({ retargetingIgnoreTags: e.target.value })}
+                            placeholder="e.g. retargeted_jan, vip"
+                          />
+                          <div className="text-[11px] text-slate-500 mt-1">
+                            If a customer already has any of these tags, they will be skipped (not messaged).
+                          </div>
+                        </div>
+
+                        <div className="md:col-span-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              className="px-3 py-2 border rounded-lg text-sm bg-white hover:bg-slate-50 disabled:opacity-60"
+                              disabled={retargetingPreviewLoading || !String(draft.retargetingSegmentId || "").trim()}
+                              onClick={runRetargetingPreview}
+                              title="Best-effort preview; counts may be estimates."
+                            >
+                              {retargetingPreviewLoading ? "Previewing…" : "Preview audience"}
+                            </button>
+                            <div className="text-[11px] text-slate-500">
+                              {retargetingPreviewError ? <span className="text-rose-700">{retargetingPreviewError}</span> : null}
+                            </div>
+                          </div>
+                          {retargetingPreview && (
+                            <div className="mt-2 text-sm text-slate-700">
+                              <div>
+                                Audience:{" "}
+                                <span className="font-semibold">
+                                  {Number(retargetingPreview.segment_count || 0)}
+                                  {retargetingPreview.segment_count_is_estimate ? "+" : ""}
+                                </span>
+                              </div>
+                              {retargetingPreview.filtered_count != null && (
+                                <div className="text-[12px] text-slate-600 mt-1">
+                                  After ignore-tags filter:{" "}
+                                  <span className="font-semibold">
+                                    {Number(retargetingPreview.filtered_count || 0)}
+                                    {retargetingPreview.filtered_count_is_estimate ? "+" : ""}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="md:col-span-2 border rounded-lg bg-white p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="text-xs font-semibold text-slate-700">Retargeting job</div>
+                              <div className="text-[11px] text-slate-500">Paste a job id to monitor/stop it (last job auto-filled).</div>
+                            </div>
+                            <button
+                              type="button"
+                              className="px-2 py-1 text-xs border rounded hover:bg-slate-50"
+                              onClick={() => setRetargetingJobId("")}
+                              disabled={!String(retargetingJobId || "").trim()}
+                            >
+                              Clear
+                            </button>
+                          </div>
+                          <div className="mt-2 flex items-center gap-2">
+                            <input
+                              className="flex-1 border rounded px-2 py-1.5 text-xs font-mono"
+                              value={String(retargetingJobId || "")}
+                              onChange={(e) => setRetargetingJobId(e.target.value)}
+                              placeholder="job_id"
+                            />
+                            <button
+                              type="button"
+                              className="px-3 py-1.5 text-xs border rounded hover:bg-slate-50 disabled:opacity-60"
+                              onClick={() => refreshRetargetingJob(retargetingJobId)}
+                              disabled={!String(retargetingJobId || "").trim()}
+                            >
+                              Refresh
+                            </button>
+                            <button
+                              type="button"
+                              className="px-3 py-1.5 text-xs border rounded bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100 disabled:opacity-60"
+                              onClick={stopRetargetingJob}
+                              disabled={!String(retargetingJobId || "").trim() || ["completed", "error", "stopped"].includes(String(retargetingJob?.status || ""))}
+                              title="Stops the job (best-effort)."
+                            >
+                              Stop
+                            </button>
+                          </div>
+                          {retargetingJobError && <div className="mt-2 text-[11px] text-rose-700">{retargetingJobError}</div>}
+                          {retargetingJob && (
+                            <div className="mt-2 text-sm text-slate-700">
+                              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                <span>
+                                  Status: <span className="font-semibold">{String(retargetingJob.status || "")}</span>
+                                </span>
+                                <span className="text-slate-300">•</span>
+                                <span>Sent: <span className="font-semibold">{Number(retargetingJob.sent || 0)}</span></span>
+                                <span className="text-slate-300">•</span>
+                                <span>Failed: <span className="font-semibold">{Number(retargetingJob.failed || 0)}</span></span>
+                                <span className="text-slate-300">•</span>
+                                <span>Skipped: <span className="font-semibold">{Number(retargetingJob.skipped_ignored_tag || 0)}</span></span>
+                                <span className="text-slate-300">•</span>
+                                <span>Tagged: <span className="font-semibold">{Number(retargetingJob.tagged || 0)}</span></span>
+                              </div>
+                              {retargetingJob.last_error && <div className="mt-1 text-[11px] text-rose-700">{String(retargetingJob.last_error)}</div>}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}

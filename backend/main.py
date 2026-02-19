@@ -11956,9 +11956,12 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
                 while True:
                     if limit and sent >= limit:
                         break
-                    params: dict[str, str | int] = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
+                    # IMPORTANT (Shopify cursor pagination): when page_info is present, do not pass other
+                    # params like "order" or "query". Only "limit" + "page_info".
                     if page_info:
-                        params["page_info"] = page_info
+                        params: dict[str, str | int] = {"limit": 250, "page_info": page_info}
+                    else:
+                        params = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
                     resp = await client.get(
                         f"{si.admin_api_base(store)}/customers/search.json",
                         params=params,
@@ -12039,6 +12042,7 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
       - batch_size: int (optional, default 10)
       - batch_every_minutes: number (optional, default 30)
       - shopify_customer_tag_on_sent: str (optional) tag to add to Shopify customer after successful send
+      - ignore_shopify_customer_tags: str|list (optional) if customer has ANY of these tags, skip sending
       - limit: int (optional, default 0) 0 = all
       - workspace: str (optional) override WhatsApp workspace
     """
@@ -12096,6 +12100,20 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
     limit = max(0, int(limit))
     shopify_customer_tag_on_sent = str((body or {}).get("shopify_customer_tag_on_sent") or "").strip()
 
+    # Ignore customers who already have certain Shopify tags (comma/newline separated or list).
+    ignore_tags_raw = (body or {}).get("ignore_shopify_customer_tags")
+    ignore_tags: list[str] = []
+    try:
+        if isinstance(ignore_tags_raw, list):
+            ignore_tags = [str(x).strip() for x in ignore_tags_raw if str(x).strip()]
+        else:
+            raw = str(ignore_tags_raw or "").replace("\r", "\n")
+            parts = [p.strip() for p in raw.replace("\n", ",").split(",")]
+            ignore_tags = [p for p in parts if p]
+    except Exception:
+        ignore_tags = []
+    ignore_tags_norm = [t.lower() for t in ignore_tags if t]
+
     ws = str((body or {}).get("workspace") or "").strip().lower()
     if not ws:
         ws = str((store or get_current_workspace()) or "").strip().lower()
@@ -12117,11 +12135,14 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
         "batch_size": batch_size,
         "batch_every_minutes": batch_every_minutes,
         "shopify_customer_tag_on_sent": shopify_customer_tag_on_sent,
+        "ignore_shopify_customer_tags": ignore_tags,
         "limit": limit,
         "compiled_query": compiled_query,
         "sent": 0,
         "failed": 0,
         "tagged": 0,
+        "skipped_ignored_tag": 0,
+        "stop_requested": False,
         "last_error": "",
     }
 
@@ -12132,22 +12153,39 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
             if start_after_minutes > 0:
                 RETARGETING_JOBS[job_id]["status"] = "waiting"
                 RETARGETING_JOBS[job_id]["starts_at"] = (datetime.now(timezone.utc) + timedelta(minutes=start_after_minutes)).isoformat()
-                await asyncio.sleep(int(start_after_minutes * 60))
+                # Allow cancellation while waiting
+                wait_s = int(start_after_minutes * 60)
+                for i in range(0, max(0, wait_s), 5):
+                    if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                        break
+                    await asyncio.sleep(min(5, wait_s - i))
+                if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                    RETARGETING_JOBS[job_id]["status"] = "stopped"
+                    RETARGETING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+                    return
                 RETARGETING_JOBS[job_id]["status"] = "running"
 
             sent = 0
             failed = 0
             tagged = 0
+            skipped_ignored = 0
             in_batch = 0
             page_info: str | None = None
+            stopping = False
 
             async with httpx.AsyncClient() as client:
                 while True:
+                    if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                        stopping = True
+                        break
                     if limit and sent >= limit:
                         break
-                    params: dict[str, str | int] = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
+                    # IMPORTANT (Shopify cursor pagination): when page_info is present, do not pass other
+                    # params like "order" or "query". Only "limit" + "page_info".
                     if page_info:
-                        params["page_info"] = page_info
+                        params: dict[str, str | int] = {"limit": 250, "page_info": page_info}
+                    else:
+                        params = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
                     resp = await client.get(
                         f"{si.admin_api_base(store)}/customers/search.json",
                         params=params,
@@ -12163,8 +12201,23 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
                         break
 
                     for c in customers:
+                        if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                            stopping = True
+                            break
                         if limit and sent >= limit:
                             break
+                        # Skip customers that already have any ignored tag (case-insensitive)
+                        if ignore_tags_norm:
+                            try:
+                                tags_str = str(c.get("tags") or "")
+                                tags = [t.strip().lower() for t in tags_str.split(",") if t and t.strip()]
+                                if tags and any(t in set(tags) for t in ignore_tags_norm):
+                                    skipped_ignored += 1
+                                    RETARGETING_JOBS[job_id]["skipped_ignored_tag"] = skipped_ignored
+                                    RETARGETING_JOBS[job_id]["last_skipped_customer_id"] = c.get("id")
+                                    continue
+                            except Exception:
+                                pass
                         raw_phone = (c.get("phone") or "") or ((c.get("default_address") or {}).get("phone") or "")
                         norm = si.normalize_phone(raw_phone)
                         digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
@@ -12211,15 +12264,27 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
                             if batch_every_minutes > 0:
                                 RETARGETING_JOBS[job_id]["status"] = "sleeping"
                                 RETARGETING_JOBS[job_id]["next_batch_at"] = (datetime.now(timezone.utc) + timedelta(minutes=float(batch_every_minutes))).isoformat()
-                                await asyncio.sleep(int(float(batch_every_minutes) * 60))
+                                sleep_s = int(float(batch_every_minutes) * 60)
+                                for i in range(0, max(0, sleep_s), 5):
+                                    if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                                        stopping = True
+                                        break
+                                    await asyncio.sleep(min(5, sleep_s - i))
+                                if stopping:
+                                    break
                                 RETARGETING_JOBS[job_id]["status"] = "running"
+                    if stopping:
+                        break
 
                     links = si._parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
                     page_info = links.get("next")
                     if not page_info:
                         break
 
-            RETARGETING_JOBS[job_id]["status"] = "completed"
+            if RETARGETING_JOBS.get(job_id, {}).get("stop_requested") or stopping:
+                RETARGETING_JOBS[job_id]["status"] = "stopped"
+            else:
+                RETARGETING_JOBS[job_id]["status"] = "completed"
             RETARGETING_JOBS[job_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
         except Exception as exc:
             RETARGETING_JOBS[job_id]["status"] = "error"
@@ -12235,12 +12300,157 @@ async def launch_retargeting_customer_segments(body: dict = Body(...), agent: di
     return {"job_id": job_id}
 
 
+@app.post("/retargeting/customer-segments/preview")
+async def preview_retargeting_customer_segments(body: dict = Body(...), agent: dict = Depends(require_admin)):
+    """Preview audience size for a saved customer segment (best-effort / may be estimated).
+
+    Body:
+      - segment_id: str (required)
+      - ignore_shopify_customer_tags: str|list (optional) tags to ignore (skip) at send time
+      - store: str (optional) override store prefix
+    """
+    try:
+        from . import shopify_integration as si  # type: ignore
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Shopify integration unavailable: {exc}")
+
+    segment_id = str((body or {}).get("segment_id") or "").strip()
+    if not segment_id:
+        raise HTTPException(status_code=400, detail="Missing segment_id")
+    seg = si.get_customer_segment_by_id(segment_id)
+    if not seg:
+        raise HTTPException(status_code=404, detail="Segment not found")
+
+    store = str((body or {}).get("store") or seg.get("store") or "").strip().upper() or None
+    compiled_query = str(seg.get("compiled_query") or "").strip()
+    if not compiled_query:
+        dsl = str(seg.get("dsl") or "").strip()
+        compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
+    if not compiled_query:
+        raise HTTPException(status_code=400, detail="Could not compile segment")
+
+    # Parse ignore tags
+    ignore_tags_raw = (body or {}).get("ignore_shopify_customer_tags")
+    ignore_tags: list[str] = []
+    try:
+        if isinstance(ignore_tags_raw, list):
+            ignore_tags = [str(x).strip() for x in ignore_tags_raw if str(x).strip()]
+        else:
+            raw = str(ignore_tags_raw or "").replace("\r", "\n")
+            parts = [p.strip() for p in raw.replace("\n", ",").split(",")]
+            ignore_tags = [p for p in parts if p]
+    except Exception:
+        ignore_tags = []
+    ignore_tags_norm = [t.lower() for t in ignore_tags if t]
+
+    # Resolve Shopify auth context (uses X-Workspace header already attached by frontend api.js)
+    try:
+        x_workspace = (agent or {}).get("workspace")  # not reliable, fallback below
+    except Exception:
+        x_workspace = None
+    # Prefer the current request workspace (thread-local)
+    try:
+        x_workspace = get_current_workspace()
+    except Exception:
+        pass
+
+    base, extra_args, store_used, store = await si._shopify_http_context(store, x_workspace)  # type: ignore[attr-defined]
+
+    # 1) Segment count (best-effort/estimated)
+    seg_count, seg_is_est = await si._count_customers_for_query(  # type: ignore[attr-defined]
+        query=compiled_query,
+        base=base,
+        extra_args=extra_args,
+        cache_key_prefix=str(store_used),
+        max_pages=6,
+        max_seconds=8.0,
+    )
+
+    # 2) If ignore tags provided, compute a lower-bound filtered count by sampling pages (estimated).
+    filtered_count = None
+    filtered_is_est = None
+    if ignore_tags_norm:
+        total = 0
+        pages = 0
+        started = time.monotonic()
+        page_info: str | None = None
+        is_estimate = False
+        async with httpx.AsyncClient() as client:
+            while True:
+                if pages >= 6 or (time.monotonic() - started) > 8.0:
+                    is_estimate = True
+                    break
+                if page_info:
+                    params = {"limit": 250, "page_info": page_info}
+                else:
+                    params = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
+                resp = await client.get(f"{base}/customers/search.json", params=params, timeout=10, **(extra_args or {}))
+                if resp.status_code == 403:
+                    raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
+                if resp.status_code >= 400:
+                    raise HTTPException(status_code=resp.status_code, detail=(resp.text or "Shopify error")[:300])
+                payload = resp.json() or {}
+                customers = payload.get("customers", []) or []
+                if not customers:
+                    break
+                pages += 1
+                for c in customers:
+                    try:
+                        tags_str = str(c.get("tags") or "")
+                        tags = [t.strip().lower() for t in tags_str.split(",") if t and t.strip()]
+                        if tags and any(t in set(tags) for t in ignore_tags_norm):
+                            continue
+                    except Exception:
+                        pass
+                    total += 1
+                links = si._parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
+                page_info = links.get("next")
+                if not page_info:
+                    break
+        filtered_count = int(total)
+        filtered_is_est = bool(is_estimate) or bool(seg_is_est)
+
+    return {
+        "segment_id": segment_id,
+        "segment_name": str(seg.get("name") or ""),
+        "store": store,
+        "compiled_query": compiled_query,
+        "segment_count": int(seg_count),
+        "segment_count_is_estimate": bool(seg_is_est),
+        "ignore_shopify_customer_tags": ignore_tags,
+        "filtered_count": filtered_count,
+        "filtered_count_is_estimate": filtered_is_est,
+    }
+
+
 @app.get("/retargeting/jobs/{job_id}")
 async def get_retargeting_job(job_id: str, agent: dict = Depends(require_admin)):
     j = RETARGETING_JOBS.get(str(job_id or "").strip())
     if not j:
         raise HTTPException(status_code=404, detail="Job not found")
     return j
+
+
+@app.post("/retargeting/jobs/{job_id}/stop")
+async def stop_retargeting_job(job_id: str, agent: dict = Depends(require_admin)):
+    jid = str(job_id or "").strip()
+    j = RETARGETING_JOBS.get(jid)
+    if not j:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        if j.get("status") in ("completed", "error", "stopped"):
+            return {"ok": True, "job_id": jid, "status": j.get("status"), "already_finished": True}
+    except Exception:
+        pass
+    j["stop_requested"] = True
+    j["stop_requested_at"] = datetime.now(timezone.utc).isoformat()
+    # If currently queued/running/sleeping, mark as stopping so UI reflects intent immediately.
+    try:
+        if j.get("status") not in ("stopped", "completed", "error"):
+            j["status"] = "stopping"
+    except Exception:
+        j["status"] = "stopping"
+    return {"ok": True, "job_id": jid, "status": j.get("status")}
 
 
 @app.post("/shopify/webhook/{workspace}")

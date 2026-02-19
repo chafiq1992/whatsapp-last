@@ -19,7 +19,7 @@ import aiofiles
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode
 from contextvars import ContextVar
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Response, UploadFile, File, Form, HTTPException, Body, Depends, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Response, UploadFile, File, Form, HTTPException, Body, Depends, Query, Header
 from starlette.requests import Request as _LimiterRequest
 from starlette.responses import Response as _LimiterResponse
 from fastapi.middleware.cors import CORSMiddleware

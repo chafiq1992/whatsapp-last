@@ -339,6 +339,166 @@ _SEGMENTS_LOCK: float = 0.0  # best-effort local lock (single-process)
 _COUNT_CACHE: dict[str, tuple[float, int, bool]] = {}
 _COUNT_CACHE_TTL_SEC = 5 * 60
 
+def _require_admin_request(request) -> dict:
+    """Best-effort admin guard without importing backend.main (avoid circular imports)."""
+    try:
+        agent = getattr(request, "state", None) and getattr(request.state, "agent", None)
+    except Exception:
+        agent = None
+    if not isinstance(agent, dict) or not agent:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not bool(agent.get("is_admin")):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return agent
+
+async def _shopify_graphql(
+    *,
+    query: str,
+    variables: dict | None = None,
+    store: str | None = None,
+    x_workspace: str | None = None,
+    timeout: float = 25.0,
+) -> dict:
+    """Execute a Shopify Admin GraphQL request using the same auth context as REST helpers."""
+    base, extra_args, _store_used, store = await _shopify_http_context(store, x_workspace)
+    url = f"{base}/graphql.json"
+    headers = {}
+    try:
+        hdrs = (extra_args or {}).get("headers") or {}
+        if isinstance(hdrs, dict):
+            headers.update(hdrs)
+    except Exception:
+        pass
+    headers.setdefault("Content-Type", "application/json")
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json={"query": str(query or ""), "variables": (variables or {})}, headers=headers, **{k: v for k, v in (extra_args or {}).items() if k != "headers"})
+        if resp.status_code == 403:
+            raise HTTPException(status_code=403, detail="Shopify token lacks required scopes or app not installed.")
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=(resp.text or "Shopify error")[:300])
+        data = resp.json() or {}
+        if isinstance(data, dict) and data.get("errors"):
+            # GraphQL top-level errors
+            raise HTTPException(status_code=502, detail=str(data.get("errors"))[:300])
+        return data if isinstance(data, dict) else {}
+
+
+async def _list_shopify_segments(
+    *,
+    store: str | None,
+    x_workspace: str | None,
+    first: int = 50,
+    after: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Return (segments, next_cursor). Each segment is {gid,name,query,createdAt,updatedAt} best-effort."""
+    q = """
+    query Segments($first:Int!, $after:String) {
+      segments(first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            id
+            name
+            query
+            createdAt
+            updatedAt
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+    """
+    payload = await _shopify_graphql(query=q, variables={"first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
+    segs = (((payload.get("data") or {}).get("segments") or {}).get("edges") or []) if isinstance(payload, dict) else []
+    out: list[dict] = []
+    next_cursor = None
+    for e in (segs if isinstance(segs, list) else []):
+        if not isinstance(e, dict):
+            continue
+        node = e.get("node") or {}
+        if not isinstance(node, dict):
+            continue
+        gid = str(node.get("id") or "").strip()
+        name = str(node.get("name") or "").strip()
+        query_txt = str(node.get("query") or "").strip()
+        if not gid or not name:
+            continue
+        out.append(
+            {
+                "gid": gid,
+                "name": name,
+                "query": query_txt,
+                "created_at": node.get("createdAt"),
+                "updated_at": node.get("updatedAt"),
+            }
+        )
+        # cursor for pagination
+        try:
+            next_cursor = str(e.get("cursor") or "") or next_cursor
+        except Exception:
+            pass
+    try:
+        has_next = bool((((payload.get("data") or {}).get("segments") or {}).get("pageInfo") or {}).get("hasNextPage"))
+    except Exception:
+        has_next = False
+    return out, (next_cursor if has_next else None)
+
+
+async def _shopify_segment_members_page(
+    *,
+    segment_gid: str,
+    store: str | None,
+    x_workspace: str | None,
+    first: int = 100,
+    after: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Return (customers, next_cursor) for a Shopify Segment (dynamic membership)."""
+    gid = str(segment_gid or "").strip()
+    if not gid:
+        return [], None
+    q = """
+    query SegmentMembers($segmentId: ID!, $first: Int!, $after: String) {
+      customerSegmentMembers(segmentId: $segmentId, first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            customer {
+              id
+              firstName
+              lastName
+              phone
+              tags
+              defaultAddress { phone }
+            }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+    """
+    payload = await _shopify_graphql(query=q, variables={"segmentId": gid, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
+    edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
+    out: list[dict] = []
+    next_cursor = None
+    for e in (edges if isinstance(edges, list) else []):
+        if not isinstance(e, dict):
+            continue
+        node = e.get("node") or {}
+        if not isinstance(node, dict):
+            continue
+        cust = node.get("customer") or {}
+        if isinstance(cust, dict) and cust:
+            out.append(cust)
+        try:
+            next_cursor = str(e.get("cursor") or "") or next_cursor
+        except Exception:
+            pass
+    try:
+        has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
+    except Exception:
+        has_next = False
+    return out, (next_cursor if has_next else None)
+
 
 def _segments_read_file() -> list[dict]:
     try:
@@ -703,6 +863,86 @@ async def save_customer_segment(body: dict = Body(...), x_workspace: str | None 
     compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
     return {**entry, "compiled_query": compiled_query, "conditions": conds, "description": desc}
 
+@router.post("/customer-segments/import-shopify")
+async def import_shopify_customer_segments(
+    request: Request,
+    body: dict = Body({}),
+    x_workspace: str | None = Header(None, alias="X-Workspace"),
+):
+    """Import saved Shopify customer segments (dynamic) into our segments list so they can be selected in UI/retargeting.
+
+    Body:
+      - store: str (optional) Shopify store prefix override
+      - limit: int (optional, default 200)
+    """
+    _ = _require_admin_request(request)
+
+    store = str((body or {}).get("store") or "").strip().upper() or None
+    try:
+        limit = int((body or {}).get("limit") or 200)
+    except Exception:
+        limit = 200
+    limit = max(1, min(limit, 2000))
+
+    items = await _segments_read(x_workspace)
+    existing_by_gid: dict[str, dict] = {}
+    for s in (items or []):
+        if not isinstance(s, dict):
+            continue
+        gid = str(s.get("shopify_segment_gid") or "").strip()
+        if gid:
+            existing_by_gid[gid] = s
+
+    imported: list[dict] = []
+    cursor = None
+    seen = 0
+    while True:
+        segs, cursor = await _list_shopify_segments(store=store, x_workspace=x_workspace, first=50, after=cursor)
+        for seg in segs:
+            if seen >= limit:
+                cursor = None
+                break
+            gid = str(seg.get("gid") or "").strip()
+            name = str(seg.get("name") or "").strip() or "Shopify segment"
+            qtxt = str(seg.get("query") or "").strip()
+            if not gid:
+                continue
+            # Stable id in our DB
+            seg_id = f"shopify:{gid}"
+            now = datetime.now(timezone.utc).isoformat()
+            prev = existing_by_gid.get(gid) or {}
+            entry = {
+                "id": seg_id,
+                "name": name,
+                "store": store,
+                "dsl": qtxt,  # ShopifyQL (may be displayed)
+                "source": "shopify",
+                "shopify_segment_gid": gid,
+                "updated_at": now,
+                "created_at": (prev.get("created_at") or now),
+            }
+            imported.append(entry)
+            seen += 1
+        if not cursor or seen >= limit:
+            break
+
+    # Merge: keep non-Shopify segments + upsert Shopify ones by gid
+    next_items: list[dict] = []
+    # keep all non-shopify and any shopify that weren't imported this run
+    imported_gids = {str(x.get("shopify_segment_gid") or "").strip() for x in imported}
+    for s in (items or []):
+        if not isinstance(s, dict):
+            continue
+        if str(s.get("source") or "").strip().lower() == "shopify":
+            gid = str(s.get("shopify_segment_gid") or "").strip()
+            if gid and gid in imported_gids:
+                continue
+        next_items.append(s)
+    # prepend imported (newest first)
+    next_items = list(imported) + next_items
+
+    await _segments_write(x_workspace, next_items)
+    return {"ok": True, "imported": len(imported)}
 
 @router.delete("/customer-segments/{segment_id}")
 async def delete_customer_segment(segment_id: str, x_workspace: str | None = Header(None, alias="X-Workspace")):

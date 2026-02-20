@@ -81,6 +81,20 @@ export default function CustomersSegmentsPage({ embedded = false }) {
     }
   };
 
+  const [importing, setImporting] = useState(false);
+  const importShopifySegments = async () => {
+    try {
+      setImporting(true);
+      await api.post("/customer-segments/import-shopify", { store: storeId || null, limit: 500 });
+      await loadSegments();
+      alert("Imported Shopify segments");
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to import Shopify segments");
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const filteredSegments = useMemo(() => {
     const q = String(segmentSearch || "").trim().toLowerCase();
     const arr = Array.isArray(segments) ? segments : [];
@@ -300,6 +314,9 @@ export default function CustomersSegmentsPage({ embedded = false }) {
             <button className="px-3 py-1.5 text-sm border rounded" onClick={preview} disabled={loading}>
               {loading ? "Loading…" : "Preview"}
             </button>
+            <button className="px-3 py-1.5 text-sm border rounded disabled:opacity-60" onClick={importShopifySegments} disabled={importing}>
+              {importing ? "Importing…" : "Import Shopify segments"}
+            </button>
             <div className="flex items-center gap-2">
               <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={() => handleSaveSegment({ asNew: false })}>
                 {activeSegmentId ? "Save changes" : "Save segment"}
@@ -333,6 +350,9 @@ export default function CustomersSegmentsPage({ embedded = false }) {
               )}
               <button className="px-3 py-1.5 text-sm border rounded" onClick={preview} disabled={loading}>
                 {loading ? "Loading…" : "Preview"}
+              </button>
+              <button className="px-3 py-1.5 text-sm border rounded disabled:opacity-60" onClick={importShopifySegments} disabled={importing}>
+                {importing ? "Importing…" : "Import Shopify segments"}
               </button>
               <div className="flex items-center gap-2">
                 <button className="px-3 py-1.5 text-sm bg-slate-900 text-white rounded" onClick={() => handleSaveSegment({ asNew: false })}>

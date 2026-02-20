@@ -6309,6 +6309,22 @@ class MessageProcessor:
                     )
                 except Exception:
                     pass
+        elif msg_type == "button":
+            # Template quick-reply button click (Meta sends type="button")
+            try:
+                btn = message.get("button") or {}
+                if not isinstance(btn, dict):
+                    btn = {}
+                title = str(btn.get("text") or "").strip()
+                payload = str(btn.get("payload") or "").strip()
+                message_obj["type"] = "text"
+                message_obj["message"] = title or "[button_reply]"
+                # Reuse interactive fields so existing automations can match on button title/id
+                message_obj["interactive_id"] = payload or title
+                message_obj["interactive_title"] = title
+            except Exception:
+                message_obj["type"] = "text"
+                message_obj["message"] = "[button_reply]"
         elif msg_type == "interactive":
             try:
                 inter = message.get("interactive", {}) or {}
@@ -6448,8 +6464,8 @@ class MessageProcessor:
         try:
             if msg_type == "text":
                 await self._maybe_auto_reply_with_catalog(sender, message_obj.get("message", ""))
-            elif msg_type == "interactive":
-                # No default acknowledgement for interactive replies: let automations / flows respond.
+            elif msg_type in ("interactive", "button"):
+                # No default acknowledgement for interactive replies (buttons/lists): let automations / flows respond.
                 pass
         except Exception as _exc:
             # Never break incoming flow due to auto-reply errors
@@ -12346,9 +12362,15 @@ async def launch_retargeting_customer_segments(
     dsl = str(seg.get("dsl") or "").strip()
     if not dsl:
         raise HTTPException(status_code=400, detail="Segment is missing dsl")
+    seg_source = str(seg.get("source") or "").strip().lower() or "custom"
+    seg_gid = str(seg.get("shopify_segment_gid") or "").strip()
+
     compiled_query, seg_conds, seg_desc = si.compile_segment_dsl_to_shopify_query(dsl)
     if not compiled_query:
-        raise HTTPException(status_code=400, detail="Could not compile segment DSL")
+        # Shopify-imported segments may not be compilable by our limited DSL compiler.
+        # Those segments are evaluated dynamically via Shopify GraphQL segment membership.
+        if not (seg_source == "shopify" and seg_gid):
+            raise HTTPException(status_code=400, detail="Could not compile segment DSL")
 
     def _num(x, default: float) -> float:
         try:
@@ -12397,6 +12419,8 @@ async def launch_retargeting_customer_segments(
         "created_by": agent.get("username"),
         "segment_id": segment_id,
         "segment_name": str(seg.get("name") or ""),
+        "segment_source": seg_source,
+        "shopify_segment_gid": seg_gid,
         "store": store,
         "workspace": ws,
         "segment_description": str(seg_desc or ""),
@@ -12445,34 +12469,45 @@ async def launch_retargeting_customer_segments(
             page_info: str | None = None
             stopping = False
 
-            async with httpx.AsyncClient() as client:
+            def _ctx_for_shopify_customer(c: dict, phone_digits: str) -> dict:
+                try:
+                    first = (c.get("first_name") or c.get("firstName") or "")
+                    last = (c.get("last_name") or c.get("lastName") or "")
+                except Exception:
+                    first = ""
+                    last = ""
+                return {
+                    "phone": phone_digits,
+                    "customer": {
+                        "first_name": str(first or ""),
+                        "last_name": str(last or ""),
+                        "firstName": str(first or ""),
+                        "lastName": str(last or ""),
+                        "phone": phone_digits,
+                    },
+                    "shopify_customer": (c or {}),
+                }
+
+            # Shopify-imported segments: evaluate membership dynamically via GraphQL
+            if seg_source == "shopify" and seg_gid:
+                cursor: str | None = None
                 while True:
                     if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
                         stopping = True
                         break
                     if limit and sent >= limit:
                         break
-                    # IMPORTANT (Shopify cursor pagination): when page_info is present, do not pass other
-                    # params like "order" or "query". Only "limit" + "page_info".
-                    if page_info:
-                        params: dict[str, str | int] = {"limit": 250, "page_info": page_info}
-                    else:
-                        params = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
-                    resp = await client.get(
-                        f"{si.admin_api_base(store)}/customers/search.json",
-                        params=params,
-                        timeout=25,
-                        **si._client_args(store=store),
+                    customers, cursor = await si._shopify_segment_members_page(  # type: ignore[attr-defined]
+                        segment_gid=seg_gid,
+                        store=store,
+                        x_workspace=x_workspace,
+                        first=100,
+                        after=cursor,
                     )
-                    if resp.status_code == 403:
-                        raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
-                    resp.raise_for_status()
-                    payload = resp.json() or {}
-                    customers = payload.get("customers", []) or []
                     if not customers:
                         break
 
-                    for c in customers:
+                    for c in customers or []:
                         if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
                             stopping = True
                             break
@@ -12490,7 +12525,8 @@ async def launch_retargeting_customer_segments(
                                     continue
                             except Exception:
                                 pass
-                        raw_phone = (c.get("phone") or "") or ((c.get("default_address") or {}).get("phone") or "")
+                        # c is GraphQL customer (phone/defaultAddress.phone) or REST-like
+                        raw_phone = (c.get("phone") or "") or (((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "") or (((c.get("default_address") or {}) if isinstance(c.get("default_address"), dict) else {}).get("phone") or "")
                         norm = si.normalize_phone(raw_phone)
                         digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
                         if not digits:
@@ -12498,11 +12534,13 @@ async def launch_retargeting_customer_segments(
                         if digits.startswith("0") and len(digits) >= 9:
                             digits = "212" + digits[1:]
                         try:
+                            ctx = _ctx_for_shopify_customer(c if isinstance(c, dict) else {}, digits)
+                            rendered_comps = message_processor._render_template_components(components if components else [], ctx)
                             wa_response = await message_processor.whatsapp_messenger.send_template_message(
                                 to=digits,
                                 template_name=template_name,
                                 language=language,
-                                components=components if components else None,
+                                components=rendered_comps if rendered_comps else None,
                             )
                             sent += 1
                             in_batch += 1
@@ -12520,7 +12558,7 @@ async def launch_retargeting_customer_segments(
                                         snap = await message_processor._build_template_snapshot(
                                             template_name=template_name,
                                             language=language,
-                                            components=components if components else [],
+                                            components=rendered_comps if rendered_comps else [],
                                         )
                                     except Exception:
                                         snap = None
@@ -12535,7 +12573,7 @@ async def launch_retargeting_customer_segments(
                                         "agent_username": "automation",
                                         "template_name": template_name,
                                         "template_language": language,
-                                        "template_components": components if components else [],
+                                        "template_components": rendered_comps if rendered_comps else [],
                                         "template_snapshot": snap or None,
                                     }
                                     await db_manager.save_message(msg, str(wa_message_id), "sent")
@@ -12585,10 +12623,155 @@ async def launch_retargeting_customer_segments(
                     if stopping:
                         break
 
-                    links = si._parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
-                    page_info = links.get("next")
-                    if not page_info:
+                    if not cursor:
                         break
+            else:
+                async with httpx.AsyncClient() as client:
+                    while True:
+                        if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                            stopping = True
+                            break
+                        if limit and sent >= limit:
+                            break
+                        # IMPORTANT (Shopify cursor pagination): when page_info is present, do not pass other
+                        # params like "order" or "query". Only "limit" + "page_info".
+                        if page_info:
+                            params: dict[str, str | int] = {"limit": 250, "page_info": page_info}
+                        else:
+                            params = {"limit": 250, "order": "updated_at desc", "query": compiled_query}
+                        resp = await client.get(
+                            f"{si.admin_api_base(store)}/customers/search.json",
+                            params=params,
+                            timeout=25,
+                            **si._client_args(store=store),
+                        )
+                        if resp.status_code == 403:
+                            raise HTTPException(status_code=403, detail="Shopify token lacks read_customers scope or app not installed.")
+                        resp.raise_for_status()
+                        payload = resp.json() or {}
+                        customers = payload.get("customers", []) or []
+                        if not customers:
+                            break
+
+                        for c in customers:
+                            if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                                stopping = True
+                                break
+                            if limit and sent >= limit:
+                                break
+                            # Skip customers that already have any ignored tag (case-insensitive)
+                            if ignore_tags_norm:
+                                try:
+                                    tags_str = str(c.get("tags") or "")
+                                    tags = [t.strip().lower() for t in tags_str.split(",") if t and t.strip()]
+                                    if tags and any(t in set(tags) for t in ignore_tags_norm):
+                                        skipped_ignored += 1
+                                        RETARGETING_JOBS[job_id]["skipped_ignored_tag"] = skipped_ignored
+                                        RETARGETING_JOBS[job_id]["last_skipped_customer_id"] = c.get("id")
+                                        continue
+                                except Exception:
+                                    pass
+                            raw_phone = (c.get("phone") or "") or ((c.get("default_address") or {}).get("phone") or "")
+                            norm = si.normalize_phone(raw_phone)
+                            digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
+                            if not digits:
+                                continue
+                            if digits.startswith("0") and len(digits) >= 9:
+                                digits = "212" + digits[1:]
+                            try:
+                                ctx = _ctx_for_shopify_customer(c if isinstance(c, dict) else {}, digits)
+                                rendered_comps = message_processor._render_template_components(components if components else [], ctx)
+                                wa_response = await message_processor.whatsapp_messenger.send_template_message(
+                                    to=digits,
+                                    template_name=template_name,
+                                    language=language,
+                                    components=rendered_comps if rendered_comps else None,
+                                )
+                                sent += 1
+                                in_batch += 1
+                                RETARGETING_JOBS[job_id]["sent"] = sent
+                                RETARGETING_JOBS[job_id]["last_sent_phone"] = digits
+                                # Persist outbound message so it appears in /conversations and chat history
+                                try:
+                                    wa_message_id = None
+                                    if isinstance(wa_response, dict) and wa_response.get("messages"):
+                                        wa_message_id = (wa_response.get("messages") or [{}])[0].get("id")
+                                    if wa_message_id:
+                                        # Build snapshot so chat bubble can display full template
+                                        snap = None
+                                        try:
+                                            snap = await message_processor._build_template_snapshot(
+                                                template_name=template_name,
+                                                language=language,
+                                                components=rendered_comps if rendered_comps else [],
+                                            )
+                                        except Exception:
+                                            snap = None
+                                        msg = {
+                                            "temp_id": f"retargeting:{job_id}:{sent}",
+                                            "user_id": digits,
+                                            "type": "text",
+                                            "from_me": True,
+                                            "status": "sent",
+                                            "message": (str(((snap or {}).get("body") or {}).get("text") or "").strip() or f"[template] {template_name}"),
+                                            "timestamp": datetime.utcnow().isoformat(),
+                                            "agent_username": "automation",
+                                            "template_name": template_name,
+                                            "template_language": language,
+                                            "template_components": rendered_comps if rendered_comps else [],
+                                            "template_snapshot": snap or None,
+                                        }
+                                        await db_manager.save_message(msg, str(wa_message_id), "sent")
+                                        try:
+                                            await connection_manager.broadcast_to_admins({"type": "message_received", "data": {**msg, "wa_message_id": str(wa_message_id)}})
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+                                # Tag the Shopify customer after successful send (best-effort)
+                                if shopify_customer_tag_on_sent:
+                                    try:
+                                        cid = c.get("id")
+                                        if cid:
+                                            res = await si.add_shopify_customer_tag(
+                                                customer_id=str(cid),
+                                                tag=shopify_customer_tag_on_sent,
+                                                store=store,
+                                            )
+                                            if isinstance(res, dict) and res.get("ok"):
+                                                tagged += 1
+                                                RETARGETING_JOBS[job_id]["tagged"] = tagged
+                                    except Exception:
+                                        pass
+                            except Exception as exc:
+                                failed += 1
+                                RETARGETING_JOBS[job_id]["failed"] = failed
+                                RETARGETING_JOBS[job_id]["last_error"] = str(exc)[:300]
+
+                            # Batch throttle
+                            if in_batch >= int(batch_size):
+                                in_batch = 0
+                                # If we still have more to send, pause before next batch
+                                if batch_every_minutes > 0:
+                                    RETARGETING_JOBS[job_id]["status"] = "sleeping"
+                                    RETARGETING_JOBS[job_id]["next_batch_at"] = (datetime.now(timezone.utc) + timedelta(minutes=float(batch_every_minutes))).isoformat()
+                                    sleep_s = int(float(batch_every_minutes) * 60)
+                                    for i in range(0, max(0, sleep_s), 5):
+                                        if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                                            stopping = True
+                                            break
+                                        await asyncio.sleep(min(5, sleep_s - i))
+                                    if stopping:
+                                        break
+                                    RETARGETING_JOBS[job_id]["status"] = "running"
+                        if stopping:
+                            break
+
+                        links = si._parse_link_header_page_info(resp.headers.get("link") or resp.headers.get("Link"))
+                        page_info = links.get("next")
+                        if not page_info:
+                            break
 
             if RETARGETING_JOBS.get(job_id, {}).get("stop_requested") or stopping:
                 RETARGETING_JOBS[job_id]["status"] = "stopped"
@@ -12635,12 +12818,17 @@ async def preview_retargeting_customer_segments(
         raise HTTPException(status_code=404, detail="Segment not found")
 
     store = str((body or {}).get("store") or seg.get("store") or "").strip().upper() or None
+    seg_source = str(seg.get("source") or "").strip().lower() or "custom"
+    seg_gid = str(seg.get("shopify_segment_gid") or "").strip()
+
+    compiled_query = ""
     # Always compile from DSL at request time so relative times stay dynamic.
     dsl = str(seg.get("dsl") or "").strip()
-    if not dsl:
+    if not dsl and not (seg_source == "shopify" and seg_gid):
         raise HTTPException(status_code=400, detail="Segment is missing dsl")
-    compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
-    if not compiled_query:
+    if dsl:
+        compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
+    if not compiled_query and not (seg_source == "shopify" and seg_gid):
         raise HTTPException(status_code=400, detail="Could not compile segment DSL")
 
     # Parse ignore tags
@@ -12669,6 +12857,57 @@ async def preview_retargeting_customer_segments(
         pass
 
     base, extra_args, store_used, store = await si._shopify_http_context(store, x_workspace)  # type: ignore[attr-defined]
+
+    # Shopify-imported segments: estimate count by sampling GraphQL segment members
+    if seg_source == "shopify" and seg_gid:
+        total = 0
+        pages = 0
+        started = time.monotonic()
+        cursor: str | None = None
+        is_estimate = False
+        while True:
+            if pages >= 6 or (time.monotonic() - started) > 8.0:
+                is_estimate = True
+                break
+            customers, cursor = await si._shopify_segment_members_page(  # type: ignore[attr-defined]
+                segment_gid=seg_gid,
+                store=store,
+                x_workspace=x_workspace,
+                first=100,
+                after=cursor,
+            )
+            if not customers:
+                break
+            pages += 1
+            # Apply ignore tags filter locally (best-effort)
+            for c in customers:
+                try:
+                    if ignore_tags_norm:
+                        tags = c.get("tags")
+                        if isinstance(tags, list):
+                            tset = {str(x).strip().lower() for x in tags if str(x).strip()}
+                        else:
+                            tset = {t.strip().lower() for t in str(tags or "").split(",") if t and t.strip()}
+                        if tset and any(t in tset for t in ignore_tags_norm):
+                            continue
+                except Exception:
+                    pass
+                total += 1
+            if not cursor:
+                break
+        return {
+            "segment_id": segment_id,
+            "segment_name": str(seg.get("name") or ""),
+            "store": store,
+            "segment_source": "shopify",
+            "shopify_segment_gid": seg_gid,
+            "compiled_query": "",
+            "segment_count": int(total),
+            "segment_count_is_estimate": bool(is_estimate),
+            "ignore_shopify_customer_tags": ignore_tags,
+            "filtered_count": int(total),
+            "filtered_count_is_estimate": bool(is_estimate),
+        }
 
     # 1) Segment count (best-effort/estimated)
     seg_count, seg_is_est = await si._count_customers_for_query(  # type: ignore[attr-defined]

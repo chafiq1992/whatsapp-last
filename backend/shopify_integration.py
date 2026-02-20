@@ -497,32 +497,42 @@ async def _shopify_segment_members_page(
     gid = str(segment_gid or "").strip()
     if not gid:
         return [], None
-    # In Shopify 2026-01, CustomerSegmentMember IS the customer profile.
-    # We fetch only ids from the connection, then hydrate via nodes(ids:...) to also get tags/phone.
+    # Shopify 2026-01: customerSegmentMembers returns CustomerSegmentMember nodes (profile summary).
     q = """
     query SegmentMembers($segmentId: ID!, $first: Int!, $after: String) {
       customerSegmentMembers(segmentId: $segmentId, first: $first, after: $after) {
-        edges { cursor node { id } }
+        edges {
+          cursor
+          node {
+            id
+            displayName
+            firstName
+            lastName
+            defaultPhoneNumber { phoneNumber }
+            defaultAddress { phone }
+            numberOfOrders
+            amountSpent { amount currencyCode }
+            lastOrderId
+          }
+        }
         pageInfo { hasNextPage }
       }
     }
     """
     payload = await _shopify_graphql(query=q, variables={"segmentId": gid, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
     edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
+    out: list[dict] = []
     next_cursor = None
-    ids: list[str] = []
     for e in (edges if isinstance(edges, list) else []):
         if not isinstance(e, dict):
             continue
         node = e.get("node") or {}
-        if isinstance(node, dict) and node.get("id"):
-            ids.append(str(node.get("id")))
+        if isinstance(node, dict) and node:
+            out.append(node)
         try:
             next_cursor = str(e.get("cursor") or "") or next_cursor
         except Exception:
             pass
-    cust_map = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
-    out = [cust_map[i] for i in ids if i in cust_map]
     try:
         has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
     except Exception:
@@ -547,27 +557,38 @@ async def _shopify_segment_members_by_query_page(
     q = """
     query SegmentMembersByQuery($query: String!, $first: Int!, $after: String) {
       customerSegmentMembers(query: $query, first: $first, after: $after) {
-        edges { cursor node { id } }
+        edges {
+          cursor
+          node {
+            id
+            displayName
+            firstName
+            lastName
+            defaultPhoneNumber { phoneNumber }
+            defaultAddress { phone }
+            numberOfOrders
+            amountSpent { amount currencyCode }
+            lastOrderId
+          }
+        }
         pageInfo { hasNextPage }
       }
     }
     """
     payload = await _shopify_graphql(query=q, variables={"query": qtxt, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
     edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
+    out: list[dict] = []
     next_cursor = None
-    ids: list[str] = []
     for e in (edges if isinstance(edges, list) else []):
         if not isinstance(e, dict):
             continue
         node = e.get("node") or {}
-        if isinstance(node, dict) and node.get("id"):
-            ids.append(str(node.get("id")))
+        if isinstance(node, dict) and node:
+            out.append(node)
         try:
             next_cursor = str(e.get("cursor") or "") or next_cursor
         except Exception:
             pass
-    cust_map = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
-    out = [cust_map[i] for i in ids if i in cust_map]
     try:
         has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
     except Exception:
@@ -1122,7 +1143,11 @@ async def shopify_segment_preview(
             fn = str(c.get("firstName") or "").strip()
             ln = str(c.get("lastName") or "").strip()
             name = (f"{fn} {ln}".strip() or fn or ln or "")
-            phone = str(c.get("phone") or "") or str(((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "")
+            phone = (
+                str(((c.get("defaultPhoneNumber") or {}) if isinstance(c.get("defaultPhoneNumber"), dict) else {}).get("phoneNumber") or "").strip()
+                or str(((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "").strip()
+                or str(c.get("phone") or "").strip()
+            )
             rows.append(
                 {
                     "id": c.get("id"),

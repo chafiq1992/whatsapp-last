@@ -12714,8 +12714,13 @@ async def launch_retargeting_customer_segments(
                                     continue
                             except Exception:
                                 pass
-                        # c is GraphQL customer (phone/defaultAddress.phone) or REST-like
-                        raw_phone = (c.get("phone") or "") or (((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "") or (((c.get("default_address") or {}) if isinstance(c.get("default_address"), dict) else {}).get("phone") or "")
+                        # c is GraphQL CustomerSegmentMember (defaultPhoneNumber/defaultAddress) or REST-like
+                        raw_phone = (
+                            (c.get("phone") or "")
+                            or (str(((c.get("defaultPhoneNumber") or {}) if isinstance(c.get("defaultPhoneNumber"), dict) else {}).get("phoneNumber") or "").strip())
+                            or (((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "")
+                            or (((c.get("default_address") or {}) if isinstance(c.get("default_address"), dict) else {}).get("phone") or "")
+                        )
                         norm = si.normalize_phone(raw_phone)
                         digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
                         if not digits:
@@ -12875,7 +12880,11 @@ async def launch_retargeting_customer_segments(
                             except Exception:
                                 pass
 
-                        raw_phone = (c.get("phone") or "") or (((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "")
+                        raw_phone = (
+                            (c.get("phone") or "")
+                            or (str(((c.get("defaultPhoneNumber") or {}) if isinstance(c.get("defaultPhoneNumber"), dict) else {}).get("phoneNumber") or "").strip())
+                            or (((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "")
+                        )
                         norm = si.normalize_phone(raw_phone)
                         digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
                         if not digits:

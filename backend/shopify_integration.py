@@ -397,6 +397,7 @@ async def _segment_member_customer_field(*, store: str | None, x_workspace: str 
             return cached
     except Exception:
         pass
+    # 1) Try introspection (fast path). Some shops disable introspection -> fall back.
     q = """
     query IntrospectCustomerSegmentMember {
       __type(name: "CustomerSegmentMember") {
@@ -414,6 +415,44 @@ async def _segment_member_customer_field(*, store: str | None, x_workspace: str 
         if "customerId" in names:
             _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = "customerId"
             return "customerId"
+    except Exception:
+        # fall back to probe queries below
+        pass
+
+    # 2) Probe queries (works even when introspection is blocked)
+    probe_customer = """
+    query Probe($query: String!) {
+      customerSegmentMembers(query: $query, first: 1) {
+        edges { node { customer { id } } }
+      }
+    }
+    """
+    try:
+        await _shopify_graphql(query=probe_customer, variables={"query": "FROM customers SHOW id WHERE number_of_orders > 0 ORDER BY updated_at"}, store=store, x_workspace=x_workspace, timeout=15.0)
+        _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = "customer"
+        return "customer"
+    except HTTPException as exc:
+        try:
+            d = str(getattr(exc, "detail", "") or "")
+            if "Field 'customer' doesn't exist" in d or "undefinedField" in d and "customer" in d:
+                pass
+            else:
+                # Could be other errors; keep probing customerId anyway
+                pass
+        except Exception:
+            pass
+
+    probe_customer_id = """
+    query Probe($query: String!) {
+      customerSegmentMembers(query: $query, first: 1) {
+        edges { node { customerId } }
+      }
+    }
+    """
+    try:
+        await _shopify_graphql(query=probe_customer_id, variables={"query": "FROM customers SHOW id WHERE number_of_orders > 0 ORDER BY updated_at"}, store=store, x_workspace=x_workspace, timeout=15.0)
+        _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = "customerId"
+        return "customerId"
     except Exception:
         pass
     try:
@@ -621,7 +660,7 @@ async def _shopify_segment_members_by_query_page(
 
     Not all Shopify versions support this; callers should be prepared to fall back.
     """
-    qtxt = str(query_text or "").strip()
+    qtxt = _normalize_shopifyql_query(query_text)
     if not qtxt:
         return [], None
     mode = await _segment_member_customer_field(store=store, x_workspace=x_workspace)
@@ -835,6 +874,13 @@ def compile_segment_dsl_to_shopify_query(dsl: str) -> tuple[str, list[str], str]
             conds.append(ln[6:].strip())
         elif up.startswith("AND "):
             conds.append(ln[4:].strip())
+        elif up.startswith("FROM ") or up.startswith("SHOW ") or up.startswith("ORDER BY"):
+            continue
+        else:
+            # Allow condition-only DSL like: "number_of_orders = 0"
+            # (common when users paste just the predicate)
+            if any(op in ln for op in (">=", "<=", ">", "<", "=")) and " " in ln:
+                conds.append(ln.strip())
 
     tokens: list[str] = []
     for c in conds:
@@ -881,6 +927,28 @@ def compile_segment_dsl_to_shopify_query(dsl: str) -> tuple[str, list[str], str]
         desc = desc.replace("last order < ", "whose last order was placed before ").replace("last order <= ", "whose last order was placed on or before ")
         desc = desc.replace("last order > ", "whose last order was placed after ").replace("last order >= ", "whose last order was placed on or after ")
     return query, conds, desc
+
+
+def _normalize_shopifyql_query(dsl: str) -> str:
+    """Ensure a query is valid ShopifyQL for customerSegmentMembers(query: ...).
+
+    If user provides only conditions (no FROM/SHOW), we wrap it.
+    """
+    s = str(dsl or "").strip()
+    if not s:
+        return ""
+    up = s.upper()
+    if "FROM " in up and "SHOW " in up:
+        return s
+    # Condition-only -> wrap with a minimal valid segment query
+    return "\n".join(
+        [
+            "FROM customers",
+            "SHOW id",
+            f"WHERE {s}",
+            "ORDER BY updated_at",
+        ]
+    )
 
 
 async def _count_customers_for_query(

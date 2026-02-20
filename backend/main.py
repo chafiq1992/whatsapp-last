@@ -12872,6 +12872,7 @@ async def launch_retargeting_customer_segments(
                         x_workspace=x_workspace,
                         first=100,
                         after=cursor,
+                        with_tags=bool(ignore_tags_norm),
                     )
                     if not customers:
                         break
@@ -12885,9 +12886,12 @@ async def launch_retargeting_customer_segments(
                         # Skip customers that already have any ignored tag (case-insensitive)
                         if ignore_tags_norm:
                             try:
-                                tags_str = str(c.get("tags") or "")
-                                tags = [t.strip().lower() for t in tags_str.split(",") if t and t.strip()]
-                                if tags and any(t in set(tags) for t in ignore_tags_norm):
+                                tags = c.get("tags")
+                                if isinstance(tags, list):
+                                    tset = {str(x).strip().lower() for x in tags if str(x).strip()}
+                                else:
+                                    tset = {t.strip().lower() for t in str(tags or "").split(",") if t and t.strip()}
+                                if tset and any(t in tset for t in ignore_tags_norm):
                                     skipped_ignored += 1
                                     RETARGETING_JOBS[job_id]["skipped_ignored_tag"] = skipped_ignored
                                     RETARGETING_JOBS[job_id]["last_skipped_customer_id"] = c.get("id")
@@ -13037,6 +13041,7 @@ async def launch_retargeting_customer_segments(
                             x_workspace=x_workspace,
                             first=100,
                             after=cursor,
+                            with_tags=bool(ignore_tags_norm),
                         )
                     except Exception:
                         customers = []
@@ -13417,6 +13422,7 @@ async def preview_retargeting_customer_segments(
                 x_workspace=x_workspace,
                 first=100,
                 after=cursor,
+                with_tags=bool(ignore_tags_norm),
             )
             if not customers:
                 break

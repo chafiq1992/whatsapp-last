@@ -492,6 +492,7 @@ async def _shopify_segment_members_page(
     x_workspace: str | None,
     first: int = 100,
     after: str | None = None,
+    with_tags: bool = False,
 ) -> tuple[list[dict], str | None]:
     """Return (customers, next_cursor) for a Shopify Segment (dynamic membership)."""
     gid = str(segment_gid or "").strip()
@@ -533,6 +534,36 @@ async def _shopify_segment_members_page(
             next_cursor = str(e.get("cursor") or "") or next_cursor
         except Exception:
             pass
+
+    # Enrich with Customer.tags (customerSegmentMembers nodes often omit tags).
+    # This enables ignore-tag filtering in retargeting automations.
+    if with_tags and out:
+        try:
+            ids = [str(c.get("id") or "").strip() for c in out if isinstance(c, dict) and str(c.get("id") or "").strip()]
+            by_id = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
+            if isinstance(by_id, dict) and by_id:
+                for c in out:
+                    try:
+                        cid = str((c or {}).get("id") or "").strip()
+                        if not cid:
+                            continue
+                        cust = by_id.get(cid)
+                        if not isinstance(cust, dict):
+                            continue
+                        if cust.get("tags") is not None:
+                            c["tags"] = cust.get("tags")
+                        if cust.get("phone") and not c.get("phone"):
+                            c["phone"] = cust.get("phone")
+                        if cust.get("defaultAddress") and not c.get("defaultAddress"):
+                            c["defaultAddress"] = cust.get("defaultAddress")
+                        if cust.get("firstName") and not c.get("firstName"):
+                            c["firstName"] = cust.get("firstName")
+                        if cust.get("lastName") and not c.get("lastName"):
+                            c["lastName"] = cust.get("lastName")
+                    except Exception:
+                        continue
+        except Exception:
+            pass
     try:
         has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
     except Exception:
@@ -546,6 +577,7 @@ async def _shopify_segment_members_by_query_page(
     x_workspace: str | None,
     first: int = 100,
     after: str | None = None,
+    with_tags: bool = False,
 ) -> tuple[list[dict], str | None]:
     """Return (customers, next_cursor) for a Shopify segment query (ShopifyQL).
 
@@ -587,6 +619,35 @@ async def _shopify_segment_members_by_query_page(
             out.append(node)
         try:
             next_cursor = str(e.get("cursor") or "") or next_cursor
+        except Exception:
+            pass
+
+    # Enrich with Customer.tags for ignore-tag filtering.
+    if with_tags and out:
+        try:
+            ids = [str(c.get("id") or "").strip() for c in out if isinstance(c, dict) and str(c.get("id") or "").strip()]
+            by_id = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
+            if isinstance(by_id, dict) and by_id:
+                for c in out:
+                    try:
+                        cid = str((c or {}).get("id") or "").strip()
+                        if not cid:
+                            continue
+                        cust = by_id.get(cid)
+                        if not isinstance(cust, dict):
+                            continue
+                        if cust.get("tags") is not None:
+                            c["tags"] = cust.get("tags")
+                        if cust.get("phone") and not c.get("phone"):
+                            c["phone"] = cust.get("phone")
+                        if cust.get("defaultAddress") and not c.get("defaultAddress"):
+                            c["defaultAddress"] = cust.get("defaultAddress")
+                        if cust.get("firstName") and not c.get("firstName"):
+                            c["firstName"] = cust.get("firstName")
+                        if cust.get("lastName") and not c.get("lastName"):
+                            c["lastName"] = cust.get("lastName")
+                    except Exception:
+                        continue
         except Exception:
             pass
     try:

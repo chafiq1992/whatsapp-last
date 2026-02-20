@@ -1953,12 +1953,41 @@ class WorkspaceWhatsAppRouter:
                     body = response.text
                 except Exception:
                     body = "<no body>"
+                # Best-effort parse Graph error details
+                detail = body
+                try:
+                    j = response.json()
+                    if isinstance(j, dict) and isinstance(j.get("error"), dict):
+                        err = j.get("error") or {}
+                        msg = str(err.get("message") or "").strip()
+                        code = err.get("code")
+                        etype = err.get("type")
+                        fbtrace = err.get("fbtrace_id")
+                        extra = ""
+                        try:
+                            ed = err.get("error_data") or {}
+                            if isinstance(ed, dict) and ed.get("details"):
+                                extra = str(ed.get("details") or "").strip()
+                        except Exception:
+                            extra = ""
+                        parts = [p for p in [msg, extra] if p]
+                        detail = " • ".join(parts) if parts else detail
+                        if code is not None:
+                            detail = f"code={code} {detail}".strip()
+                        if etype:
+                            detail = f"type={etype} {detail}".strip()
+                        if fbtrace:
+                            detail = f"{detail} (fbtrace_id={fbtrace})"
+                except Exception:
+                    detail = body
                 print(
                     f"❌ WhatsApp API request to {endpoint} failed with status {response.status_code}: {body}"
                 )
-                raise Exception(
-                    f"WhatsApp API request failed with status {response.status_code}"
-                )
+                # Raise with detail so jobs/UI can show the root cause.
+                short = str(detail or "").strip().replace("\n", " ")
+                if len(short) > 500:
+                    short = short[:500] + "…"
+                raise Exception(f"WhatsApp API request failed with status {response.status_code}: {short}")
 
             return response.json()
 
@@ -6980,6 +7009,56 @@ class MessageProcessor:
             "rendered_at": datetime.utcnow().isoformat(),
         }
         return snap
+
+    async def _ensure_template_components_for_send(self, *, template_name: str, language: str, components: list[dict] | None) -> list[dict]:
+        """Ensure required template components are present before send (best-effort).
+
+        Today we only auto-inject a fallback HEADER media component when the template
+        requires it and the caller didn't provide one.
+        """
+        comps = components if isinstance(components, list) else []
+        ws = get_current_workspace()
+        tdef = await self._get_template_def(template_name=template_name, language=language, ws=ws)
+        comps_def = (tdef or {}).get("components") or []
+        comps_def = comps_def if isinstance(comps_def, list) else []
+
+        header_def = next((c for c in comps_def if isinstance(c, dict) and str(c.get("type") or "").upper() == "HEADER"), None) or {}
+        header_fmt = str((header_def or {}).get("format") or "").upper()
+        if header_fmt in ("IMAGE", "VIDEO", "DOCUMENT"):
+            # Does send already provide a media header?
+            has_header_media = False
+            try:
+                for c in comps or []:
+                    if not isinstance(c, dict) or str(c.get("type") or "").lower() != "header":
+                        continue
+                    params = c.get("parameters") if isinstance(c.get("parameters"), list) else []
+                    for p in params:
+                        if not isinstance(p, dict):
+                            continue
+                        ptype = str(p.get("type") or "").lower()
+                        if ptype != header_fmt.lower():
+                            continue
+                        obj = p.get(ptype) if isinstance(p.get(ptype), dict) else {}
+                        link = str((obj or {}).get("link") or "").strip()
+                        mid = str((obj or {}).get("id") or "").strip()
+                        if link or mid:
+                            has_header_media = True
+                            break
+                    if has_header_media:
+                        break
+            except Exception:
+                has_header_media = False
+
+            if not has_header_media:
+                # Use global fallback image URL (best-effort). If missing, caller must provide.
+                fb = (WHATSAPP_TEMPLATE_HEADER_FALLBACK_IMAGE_URL or ORDER_CONFIRM_HEADER_IMAGE_URL or "").strip()
+                if fb:
+                    kind = header_fmt.lower()
+                    header_comp = {"type": "header", "parameters": [{"type": kind, kind: {"link": fb}}]}
+                    # Prepend header to avoid ordering issues
+                    comps = [header_comp] + [c for c in comps if isinstance(c, dict) and str(c.get("type") or "").lower() != "header"]
+
+        return comps
 
     def _normalize_button_title(self, s: str) -> str:
         try:
@@ -12730,6 +12809,11 @@ async def launch_retargeting_customer_segments(
                         try:
                             ctx = _ctx_for_shopify_customer(c if isinstance(c, dict) else {}, digits)
                             rendered_comps = message_processor._render_template_components(components if components else [], ctx)
+                            rendered_comps = await message_processor._ensure_template_components_for_send(
+                                template_name=template_name,
+                                language=language,
+                                components=rendered_comps,
+                            )
                             wa_response = await message_processor.whatsapp_messenger.send_template_message(
                                 to=digits,
                                 template_name=template_name,
@@ -12894,6 +12978,11 @@ async def launch_retargeting_customer_segments(
                         try:
                             ctx = _ctx_for_shopify_customer(c if isinstance(c, dict) else {}, digits)
                             rendered_comps = message_processor._render_template_components(components if components else [], ctx)
+                            rendered_comps = await message_processor._ensure_template_components_for_send(
+                                template_name=template_name,
+                                language=language,
+                                components=rendered_comps,
+                            )
                             wa_response = await message_processor.whatsapp_messenger.send_template_message(
                                 to=digits,
                                 template_name=template_name,
@@ -13020,6 +13109,11 @@ async def launch_retargeting_customer_segments(
                             try:
                                 ctx = _ctx_for_shopify_customer(c if isinstance(c, dict) else {}, digits)
                                 rendered_comps = message_processor._render_template_components(components if components else [], ctx)
+                                rendered_comps = await message_processor._ensure_template_components_for_send(
+                                    template_name=template_name,
+                                    language=language,
+                                    components=rendered_comps,
+                                )
                                 wa_response = await message_processor.whatsapp_messenger.send_template_message(
                                     to=digits,
                                     template_name=template_name,

@@ -384,14 +384,31 @@ async def _segments_read(x_workspace: str | None) -> list[dict]:
     and auto-migrate file -> DB if needed.
     """
     key = _segments_settings_key(x_workspace)
-    # 1) DB (preferred)
+    # 1) Auth/settings DB (preferred): durable admin config store
+    try:
+        from .main import auth_db_manager  # type: ignore
+        raw = await auth_db_manager.get_setting(key)
+        if raw:
+            obj = json.loads(raw)
+            if isinstance(obj, list):
+                return [x for x in obj if isinstance(x, dict)]
+    except Exception:
+        pass
+    # 2) Legacy DB location (messages DB settings). Keep for backward-compat.
     try:
         from .main import db_manager  # type: ignore
         raw = await db_manager.get_setting(key)
         if raw:
             obj = json.loads(raw)
             if isinstance(obj, list):
-                return [x for x in obj if isinstance(x, dict)]
+                items = [x for x in obj if isinstance(x, dict)]
+                # Best-effort migrate into auth DB so future reads persist in the right place.
+                try:
+                    from .main import auth_db_manager  # type: ignore
+                    await auth_db_manager.set_setting(key, items)
+                except Exception:
+                    pass
+                return items
     except Exception:
         pass
     # 2) File fallback (legacy)
@@ -399,8 +416,8 @@ async def _segments_read(x_workspace: str | None) -> list[dict]:
     # Best-effort migrate into DB so future reads persist
     if items:
         try:
-            from .main import db_manager  # type: ignore
-            await db_manager.set_setting(key, items)
+            from .main import auth_db_manager  # type: ignore
+            await auth_db_manager.set_setting(key, items)
         except Exception:
             pass
     return items
@@ -410,12 +427,17 @@ async def _segments_write(x_workspace: str | None, items: list[dict]) -> None:
     """Write segments to DB settings (durable). Also best-effort write the legacy file (dev/backups)."""
     key = _segments_settings_key(x_workspace)
     try:
-        from .main import db_manager  # type: ignore
-        await db_manager.set_setting(key, items)
+        from .main import auth_db_manager  # type: ignore
+        await auth_db_manager.set_setting(key, items)
     except Exception:
-        # If DB unavailable, keep legacy file behavior
-        _segments_write_file(items)
-        return
+        # Backward-compat: try legacy DB location (messages DB settings)
+        try:
+            from .main import db_manager  # type: ignore
+            await db_manager.set_setting(key, items)
+        except Exception:
+            # If DB unavailable, keep legacy file behavior
+            _segments_write_file(items)
+            return
     # Best-effort legacy file write (non-critical)
     try:
         _segments_write_file(items)
@@ -580,7 +602,15 @@ async def _count_customers_for_query(
 
 @router.get("/customer-segments")
 async def list_customer_segments(x_workspace: str | None = Header(None, alias="X-Workspace")):
-    return await _segments_read(x_workspace)
+    items = await _segments_read(x_workspace)
+    out: list[dict] = []
+    for s in (items or []):
+        if not isinstance(s, dict):
+            continue
+        dsl = str(s.get("dsl") or "").strip()
+        compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
+        out.append({**s, "compiled_query": compiled_query, "conditions": conds, "description": desc})
+    return out
 
 async def get_customer_segment_by_id(segment_id: str, x_workspace: str | None = None) -> dict | None:
     """Return a saved customer segment entry by id (from DB settings, legacy file fallback)."""
@@ -656,22 +686,22 @@ async def save_customer_segment(body: dict = Body(...), x_workspace: str | None 
         raise HTTPException(status_code=400, detail="Missing dsl")
     items = await _segments_read(x_workspace)
     now = datetime.now(timezone.utc).isoformat()
-    compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
-    entry = {
+    # IMPORTANT: to keep segments dynamic (Shopify-like), persist ONLY the segment definition.
+    # Derived fields (compiled_query/description/conditions) are recomputed at preview/send time.
+    entry: dict = {
         "id": seg_id,
         "name": name,
         "store": store,
         "dsl": dsl,
-        "compiled_query": compiled_query,
-        "conditions": conds,
-        "description": desc,
         "updated_at": now,
         "created_at": (next((x.get("created_at") for x in items if x.get("id") == seg_id), None) or now),
     }
     next_items = [x for x in items if x.get("id") != seg_id]
     next_items.insert(0, entry)
     await _segments_write(x_workspace, next_items)
-    return entry
+    # Return enriched entry for UI convenience (computed at request time)
+    compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
+    return {**entry, "compiled_query": compiled_query, "conditions": conds, "description": desc}
 
 
 @router.delete("/customer-segments/{segment_id}")

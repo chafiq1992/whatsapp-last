@@ -12341,15 +12341,14 @@ async def launch_retargeting_customer_segments(
     # Segment store prefix (e.g. IRRANOVA) is stored with the segment; allow override via body.store if needed.
     store = str((body or {}).get("store") or seg.get("store") or "").strip().upper() or None
 
-    # Compiled query can be stored with segment; if missing, compile from dsl
-    compiled_query = str(seg.get("compiled_query") or "").strip()
+    # IMPORTANT: always compile from DSL at runtime so relative date filters (e.g. -90d)
+    # remain dynamic like Shopify segments. Do NOT rely on any stored compiled_query snapshot.
+    dsl = str(seg.get("dsl") or "").strip()
+    if not dsl:
+        raise HTTPException(status_code=400, detail="Segment is missing dsl")
+    compiled_query, seg_conds, seg_desc = si.compile_segment_dsl_to_shopify_query(dsl)
     if not compiled_query:
-        dsl = str(seg.get("dsl") or "").strip()
-        if not dsl:
-            raise HTTPException(status_code=400, detail="Segment is missing dsl/compiled_query")
-        compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
-    if not compiled_query:
-        raise HTTPException(status_code=400, detail="Could not compile segment")
+        raise HTTPException(status_code=400, detail="Could not compile segment DSL")
 
     def _num(x, default: float) -> float:
         try:
@@ -12400,6 +12399,8 @@ async def launch_retargeting_customer_segments(
         "segment_name": str(seg.get("name") or ""),
         "store": store,
         "workspace": ws,
+        "segment_description": str(seg_desc or ""),
+        "segment_conditions": seg_conds if isinstance(seg_conds, list) else [],
         "template_name": template_name,
         "language": language,
         "start_after_minutes": start_after_minutes,
@@ -12634,12 +12635,13 @@ async def preview_retargeting_customer_segments(
         raise HTTPException(status_code=404, detail="Segment not found")
 
     store = str((body or {}).get("store") or seg.get("store") or "").strip().upper() or None
-    compiled_query = str(seg.get("compiled_query") or "").strip()
+    # Always compile from DSL at request time so relative times stay dynamic.
+    dsl = str(seg.get("dsl") or "").strip()
+    if not dsl:
+        raise HTTPException(status_code=400, detail="Segment is missing dsl")
+    compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
     if not compiled_query:
-        dsl = str(seg.get("dsl") or "").strip()
-        compiled_query, _conds, _desc = si.compile_segment_dsl_to_shopify_query(dsl)
-    if not compiled_query:
-        raise HTTPException(status_code=400, detail="Could not compile segment")
+        raise HTTPException(status_code=400, detail="Could not compile segment DSL")
 
     # Parse ignore tags
     ignore_tags_raw = (body or {}).get("ignore_shopify_customer_tags")

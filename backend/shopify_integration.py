@@ -400,8 +400,8 @@ async def _list_shopify_segments(
             id
             name
             query
-            createdAt
-            updatedAt
+            creationDate
+            lastEditDate
           }
         }
         pageInfo { hasNextPage }
@@ -428,8 +428,8 @@ async def _list_shopify_segments(
                 "gid": gid,
                 "name": name,
                 "query": query_txt,
-                "created_at": node.get("createdAt"),
-                "updated_at": node.get("updatedAt"),
+                "created_at": node.get("creationDate"),
+                "updated_at": node.get("lastEditDate"),
             }
         )
         # cursor for pagination
@@ -477,6 +477,64 @@ async def _shopify_segment_members_page(
     }
     """
     payload = await _shopify_graphql(query=q, variables={"segmentId": gid, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
+    edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
+    out: list[dict] = []
+    next_cursor = None
+    for e in (edges if isinstance(edges, list) else []):
+        if not isinstance(e, dict):
+            continue
+        node = e.get("node") or {}
+        if not isinstance(node, dict):
+            continue
+        cust = node.get("customer") or {}
+        if isinstance(cust, dict) and cust:
+            out.append(cust)
+        try:
+            next_cursor = str(e.get("cursor") or "") or next_cursor
+        except Exception:
+            pass
+    try:
+        has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
+    except Exception:
+        has_next = False
+    return out, (next_cursor if has_next else None)
+
+async def _shopify_segment_members_by_query_page(
+    *,
+    query_text: str,
+    store: str | None,
+    x_workspace: str | None,
+    first: int = 100,
+    after: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """Return (customers, next_cursor) for a Shopify segment query (ShopifyQL).
+
+    Not all Shopify versions support this; callers should be prepared to fall back.
+    """
+    qtxt = str(query_text or "").strip()
+    if not qtxt:
+        return [], None
+    q = """
+    query SegmentMembersByQuery($query: String!, $first: Int!, $after: String) {
+      customerSegmentMembers(query: $query, first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            customer {
+              id
+              firstName
+              lastName
+              phone
+              tags
+              defaultAddress { phone }
+            }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+    """
+    payload = await _shopify_graphql(query=q, variables={"query": qtxt, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
     edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
     out: list[dict] = []
     next_cursor = None
@@ -962,9 +1020,11 @@ async def shopify_segment_preview(
     page_info: str | None = Query(None, description="Cursor for pagination (Shopify page_info)"),
     x_workspace: str | None = Header(None, alias="X-Workspace"),
 ):
+    dsl = str(dsl or "").strip()
+    if not dsl:
+        raise HTTPException(status_code=400, detail="Missing dsl")
+
     compiled_query, conds, desc = compile_segment_dsl_to_shopify_query(dsl)
-    if not compiled_query:
-        raise HTTPException(status_code=400, detail="Could not compile DSL (no supported conditions found).")
     # Resolve correct Shopify context (OAuth per-workspace if connected, else env store mapping).
     base, extra_args, store_used, store = await _shopify_http_context(store, x_workspace)
 
@@ -978,6 +1038,80 @@ async def shopify_segment_preview(
         except Exception:
             base_count = None
 
+    # Prefer ShopifyQL segment evaluation via GraphQL (matches Shopify segment builder semantics).
+    # If not supported by this shop/API, fall back to REST customer search query compilation.
+    try:
+        # Count + first page (best-effort sampling)
+        total = 0
+        pages = 0
+        started = time.monotonic()
+        cursor: str | None = None
+        is_estimate = False
+        first_page_customers: list[dict] = []
+        while True:
+            if pages >= 6 or (time.monotonic() - started) > 8.0:
+                is_estimate = True
+                break
+            customers, cursor = await _shopify_segment_members_by_query_page(
+                query_text=dsl,
+                store=store,
+                x_workspace=x_workspace,
+                first=100,
+                after=cursor,
+            )
+            if pages == 0:
+                first_page_customers = customers[:50]
+            if not customers:
+                break
+            total += len(customers)
+            pages += 1
+            if not cursor:
+                break
+
+        # Map into UI-friendly rows (best-effort)
+        rows = []
+        for c in first_page_customers:
+            if not isinstance(c, dict):
+                continue
+            fn = str(c.get("firstName") or "").strip()
+            ln = str(c.get("lastName") or "").strip()
+            name = (f"{fn} {ln}".strip() or fn or ln or "")
+            phone = str(c.get("phone") or "") or str(((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "")
+            rows.append(
+                {
+                    "id": c.get("id"),
+                    "customer_name": name,
+                    "note": "",
+                    "email_subscription_status": "",
+                    "location": "",
+                    "orders": 0,
+                    "amount_spent": {"value": 0, "currency": ""},
+                    "phone": phone,
+                }
+            )
+
+        return {
+            "customers": rows,
+            "compiled_query": "",  # not applicable for ShopifyQL path
+            "conditions": conds,
+            "description": desc,
+            "segment_count": int(total),
+            "segment_count_is_estimate": bool(is_estimate),
+            "base_count": base_count,
+            "next_page_info": None,
+            "prev_page_info": None,
+        }
+    except HTTPException:
+        # fall through to REST path on Shopify error
+        pass
+    except Exception:
+        # fall through to REST path
+        pass
+
+    # Fallback: compile into REST search query (limited; may not match ShopifyQL for all conditions)
+    if not compiled_query:
+        raise HTTPException(status_code=400, detail="Could not compile DSL (no supported conditions found).")
+
     segment_count, segment_count_is_estimate = await _count_customers_for_query(
         query=compiled_query,
         base=base,
@@ -987,9 +1121,7 @@ async def shopify_segment_preview(
         max_seconds=8.0,
     )
 
-    # Preview customers list
     preview = await shopify_customers(store=store, limit=50, page_info=page_info, q=compiled_query, x_workspace=x_workspace)
-    # attach meta
     preview["compiled_query"] = compiled_query
     preview["conditions"] = conds
     preview["description"] = desc

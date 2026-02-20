@@ -12488,7 +12488,9 @@ async def launch_retargeting_customer_segments(
                     "shopify_customer": (c or {}),
                 }
 
-            # Shopify-imported segments: evaluate membership dynamically via GraphQL
+            # Prefer Shopify GraphQL segment membership evaluation:
+            # - Shopify-imported segments (segmentId)
+            # - Custom segments defined via ShopifyQL DSL (query)
             if seg_source == "shopify" and seg_gid:
                 cursor: str | None = None
                 while True:
@@ -12623,6 +12625,130 @@ async def launch_retargeting_customer_segments(
                     if stopping:
                         break
 
+                    if not cursor:
+                        break
+            elif str(dsl or "").strip().upper().startswith("FROM "):
+                # Evaluate custom ShopifyQL segment query directly (matches Shopify segment builder semantics).
+                cursor = None
+                while True:
+                    if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                        stopping = True
+                        break
+                    if limit and sent >= limit:
+                        break
+                    try:
+                        customers, cursor = await si._shopify_segment_members_by_query_page(  # type: ignore[attr-defined]
+                            query_text=dsl,
+                            store=store,
+                            x_workspace=x_workspace,
+                            first=100,
+                            after=cursor,
+                        )
+                    except Exception:
+                        customers = []
+                        cursor = None
+                    if not customers:
+                        break
+                    for c in customers or []:
+                        if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                            stopping = True
+                            break
+                        if limit and sent >= limit:
+                            break
+                        # Skip customers that already have any ignored tag (case-insensitive)
+                        if ignore_tags_norm:
+                            try:
+                                tags = c.get("tags")
+                                if isinstance(tags, list):
+                                    tset = {str(x).strip().lower() for x in tags if str(x).strip()}
+                                else:
+                                    tset = {t.strip().lower() for t in str(tags or "").split(",") if t and t.strip()}
+                                if tset and any(t in tset for t in ignore_tags_norm):
+                                    skipped_ignored += 1
+                                    RETARGETING_JOBS[job_id]["skipped_ignored_tag"] = skipped_ignored
+                                    RETARGETING_JOBS[job_id]["last_skipped_customer_id"] = c.get("id")
+                                    continue
+                            except Exception:
+                                pass
+
+                        raw_phone = (c.get("phone") or "") or (((c.get("defaultAddress") or {}) if isinstance(c.get("defaultAddress"), dict) else {}).get("phone") or "")
+                        norm = si.normalize_phone(raw_phone)
+                        digits = "".join(ch for ch in str(norm or "") if ch.isdigit())
+                        if not digits:
+                            continue
+                        if digits.startswith("0") and len(digits) >= 9:
+                            digits = "212" + digits[1:]
+                        try:
+                            ctx = _ctx_for_shopify_customer(c if isinstance(c, dict) else {}, digits)
+                            rendered_comps = message_processor._render_template_components(components if components else [], ctx)
+                            wa_response = await message_processor.whatsapp_messenger.send_template_message(
+                                to=digits,
+                                template_name=template_name,
+                                language=language,
+                                components=rendered_comps if rendered_comps else None,
+                            )
+                            sent += 1
+                            in_batch += 1
+                            RETARGETING_JOBS[job_id]["sent"] = sent
+                            RETARGETING_JOBS[job_id]["last_sent_phone"] = digits
+                            # Persist outbound message so it appears in /conversations and chat history
+                            try:
+                                wa_message_id = None
+                                if isinstance(wa_response, dict) and wa_response.get("messages"):
+                                    wa_message_id = (wa_response.get("messages") or [{}])[0].get("id")
+                                if wa_message_id:
+                                    snap = None
+                                    try:
+                                        snap = await message_processor._build_template_snapshot(
+                                            template_name=template_name,
+                                            language=language,
+                                            components=rendered_comps if rendered_comps else [],
+                                        )
+                                    except Exception:
+                                        snap = None
+                                    msg = {
+                                        "temp_id": f"retargeting:{job_id}:{sent}",
+                                        "user_id": digits,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "status": "sent",
+                                        "message": (str(((snap or {}).get("body") or {}).get("text") or "").strip() or f"[template] {template_name}"),
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                        "template_name": template_name,
+                                        "template_language": language,
+                                        "template_components": rendered_comps if rendered_comps else [],
+                                        "template_snapshot": snap or None,
+                                    }
+                                    await db_manager.save_message(msg, str(wa_message_id), "sent")
+                                    try:
+                                        await connection_manager.broadcast_to_admins({"type": "message_received", "data": {**msg, "wa_message_id": str(wa_message_id)}})
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        except Exception as exc:
+                            failed += 1
+                            RETARGETING_JOBS[job_id]["failed"] = failed
+                            RETARGETING_JOBS[job_id]["last_error"] = str(exc)[:300]
+
+                        # Batch throttle
+                        if in_batch >= int(batch_size):
+                            in_batch = 0
+                            if batch_every_minutes > 0:
+                                RETARGETING_JOBS[job_id]["status"] = "sleeping"
+                                RETARGETING_JOBS[job_id]["next_batch_at"] = (datetime.now(timezone.utc) + timedelta(minutes=float(batch_every_minutes))).isoformat()
+                                sleep_s = int(float(batch_every_minutes) * 60)
+                                for i in range(0, max(0, sleep_s), 5):
+                                    if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
+                                        stopping = True
+                                        break
+                                    await asyncio.sleep(min(5, sleep_s - i))
+                                if stopping:
+                                    break
+                                RETARGETING_JOBS[job_id]["status"] = "running"
+                    if stopping:
+                        break
                     if not cursor:
                         break
             else:

@@ -7013,8 +7013,9 @@ class MessageProcessor:
     async def _ensure_template_components_for_send(self, *, template_name: str, language: str, components: list[dict] | None) -> list[dict]:
         """Ensure required template components are present before send (best-effort).
 
-        Today we only auto-inject a fallback HEADER media component when the template
-        requires it and the caller didn't provide one.
+        Today we:
+        - auto-inject a fallback HEADER media component when the template requires it and the caller didn't provide one.
+        - ensure all TEXT parameters have a non-empty text value (Meta rejects empty strings).
         """
         comps = components if isinstance(components, list) else []
         ws = get_current_workspace()
@@ -7057,6 +7058,31 @@ class MessageProcessor:
                     header_comp = {"type": "header", "parameters": [{"type": kind, kind: {"link": fb}}]}
                     # Prepend header to avoid ordering issues
                     comps = [header_comp] + [c for c in comps if isinstance(c, dict) and str(c.get("type") or "").lower() != "header"]
+
+        # Ensure TEXT parameters are never empty (prevents Graph error #131008)
+        try:
+            fixed: list[dict] = []
+            for c in (comps or []):
+                if not isinstance(c, dict):
+                    continue
+                cc = dict(c)
+                params = cc.get("parameters")
+                if isinstance(params, list):
+                    new_params: list[dict] = []
+                    for p in params:
+                        if not isinstance(p, dict):
+                            continue
+                        pp = dict(p)
+                        if str(pp.get("type") or "").lower() == "text":
+                            txt = str(pp.get("text") or "").strip()
+                            # WhatsApp rejects empty; use a safe placeholder.
+                            pp["text"] = txt if txt else "-"
+                        new_params.append(pp)
+                    cc["parameters"] = new_params
+                fixed.append(cc)
+            comps = fixed
+        except Exception:
+            pass
 
         return comps
 

@@ -7016,12 +7016,41 @@ class MessageProcessor:
         Today we:
         - auto-inject a fallback HEADER media component when the template requires it and the caller didn't provide one.
         - ensure all TEXT parameters have a non-empty text value (Meta rejects empty strings).
+        - ensure BODY/HEADER(TEXT) placeholder counts ({{1}}, {{2}}, ...) are satisfied by providing enough text parameters.
         """
         comps = components if isinstance(components, list) else []
         ws = get_current_workspace()
         tdef = await self._get_template_def(template_name=template_name, language=language, ws=ws)
         comps_def = (tdef or {}).get("components") or []
         comps_def = comps_def if isinstance(comps_def, list) else []
+
+        def _max_placeholder_index(text: str) -> int:
+            try:
+                # WhatsApp template placeholders look like {{1}}, {{2}}, ...
+                nums = [int(x) for x in re.findall(r"\{\{\s*(\d+)\s*\}\}", str(text or ""))]  # type: ignore[name-defined]
+                return max(nums) if nums else 0
+            except Exception:
+                return 0
+
+        def _find_def(comp_type: str) -> dict:
+            up = str(comp_type or "").upper()
+            for c in comps_def or []:
+                try:
+                    if isinstance(c, dict) and str(c.get("type") or "").upper() == up:
+                        return c
+                except Exception:
+                    continue
+            return {}
+
+        def _find_send(comp_type: str) -> dict | None:
+            low = str(comp_type or "").lower()
+            for c in comps or []:
+                try:
+                    if isinstance(c, dict) and str(c.get("type") or "").lower() == low:
+                        return c
+                except Exception:
+                    continue
+            return None
 
         header_def = next((c for c in comps_def if isinstance(c, dict) and str(c.get("type") or "").upper() == "HEADER"), None) or {}
         header_fmt = str((header_def or {}).get("format") or "").upper()
@@ -7058,6 +7087,52 @@ class MessageProcessor:
                     header_comp = {"type": "header", "parameters": [{"type": kind, kind: {"link": fb}}]}
                     # Prepend header to avoid ordering issues
                     comps = [header_comp] + [c for c in comps if isinstance(c, dict) and str(c.get("type") or "").lower() != "header"]
+
+        # Ensure we provide enough BODY params for {{1}}, {{2}}, ... placeholders
+        try:
+            body_def = _find_def("BODY") or {}
+            body_text = str(body_def.get("text") or "")
+            need_body = _max_placeholder_index(body_text)
+            if need_body > 0:
+                send_body = _find_send("body")
+                if not isinstance(send_body, dict):
+                    send_body = {"type": "body", "parameters": []}
+                    comps = [send_body] + comps
+                params = send_body.get("parameters") if isinstance(send_body.get("parameters"), list) else []
+                # count text params
+                have = 0
+                for p in params:
+                    if isinstance(p, dict) and str(p.get("type") or "").lower() == "text":
+                        have += 1
+                if have < need_body:
+                    # append missing params with safe placeholder '-'
+                    for _ in range(need_body - have):
+                        params.append({"type": "text", "text": "-"})
+                    send_body["parameters"] = params
+        except Exception:
+            pass
+
+        # Ensure HEADER(TEXT) placeholder params if template has header format TEXT with {{n}}
+        try:
+            if header_fmt == "TEXT":
+                header_text = str((header_def or {}).get("text") or "")
+                need_h = _max_placeholder_index(header_text)
+                if need_h > 0:
+                    send_header = _find_send("header")
+                    if not isinstance(send_header, dict):
+                        send_header = {"type": "header", "parameters": []}
+                        comps = [send_header] + comps
+                    params = send_header.get("parameters") if isinstance(send_header.get("parameters"), list) else []
+                    have = 0
+                    for p in params:
+                        if isinstance(p, dict) and str(p.get("type") or "").lower() == "text":
+                            have += 1
+                    if have < need_h:
+                        for _ in range(need_h - have):
+                            params.append({"type": "text", "text": "-"})
+                        send_header["parameters"] = params
+        except Exception:
+            pass
 
         # Ensure TEXT parameters are never empty (prevents Graph error #131008)
         try:

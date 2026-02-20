@@ -23,7 +23,17 @@ export function getSafeMediaUrl(raw) {
 function renderTick(msg, self) {
   if (!self) return null;
   const status = msg.status || "sent";   // fall-back if backend is late
-  return ICONS[status] || null;
+  const icon = ICONS[status] || null;
+  if (!icon) return null;
+  // Show failure reason (if available from webhook statuses[].errors)
+  try {
+    if (String(status).toLowerCase() === "failed") {
+      const raw = msg?.status_error;
+      const s = (typeof raw === "string") ? raw.trim() : (raw ? JSON.stringify(raw) : "");
+      if (s) return <span title={s}>{icon}</span>;
+    }
+  } catch {}
+  return icon;
 }
 
 // Format timestamp utility

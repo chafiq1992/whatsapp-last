@@ -2340,6 +2340,7 @@ class DatabaseManager:
             "type",
             "from_me",
             "status",
+            "status_error",
             "price",
             "caption",
             "media_path",
@@ -2551,6 +2552,7 @@ class DatabaseManager:
                     type           TEXT DEFAULT 'text',
                     from_me        INTEGER DEFAULT 0,             -- bool 0/1
                     status         TEXT  DEFAULT 'sending',
+                    status_error   TEXT,
                     price          TEXT,
                     caption        TEXT,
                     url            TEXT,
@@ -2831,6 +2833,8 @@ class DatabaseManager:
 
             await self._add_column_if_missing(db, "messages", "temp_id", "TEXT")
             await self._add_column_if_missing(db, "messages", "url", "TEXT")
+            # Store WhatsApp failure details (from webhook statuses[].errors)
+            await self._add_column_if_missing(db, "messages", "status_error", "TEXT")
             # reply/reactions columns (idempotent)
             await self._add_column_if_missing(db, "messages", "reply_to", "TEXT")
             await self._add_column_if_missing(db, "messages", "quoted_text", "TEXT")
@@ -3889,7 +3893,7 @@ class DatabaseManager:
                 await db.execute("DELETE FROM conversation_notes WHERE id = ?", (note_id,))
                 await db.commit()
 
-    async def update_message_status(self, wa_message_id: str, status: str):
+    async def update_message_status(self, wa_message_id: str, status: str, status_error: str | None = None):
         """Persist a status update for a message identified by wa_message_id.
 
         Returns the temp_id if available so the UI can reconcile optimistic bubbles.
@@ -3919,7 +3923,14 @@ class DatabaseManager:
                 pass
 
         if user_id:
-            await self.upsert_message({"user_id": user_id, "wa_message_id": wa_message_id, "status": status})
+            payload = {"user_id": user_id, "wa_message_id": wa_message_id, "status": status}
+            # Persist error details only for failed; clear on non-failed updates.
+            if str(status or "").lower() == "failed":
+                if status_error:
+                    payload["status_error"] = status_error
+            else:
+                payload["status_error"] = None
+            await self.upsert_message(payload)
         # If we couldn't resolve user_id, do nothing to avoid inserting orphan rows
         return temp_id
 
@@ -6345,8 +6356,18 @@ class MessageProcessor:
             if not wa_id or not status:
                 continue
 
+            # Capture failure details (best-effort) so the UI can explain the red X icon.
+            status_error = None
+            try:
+                if str(status).lower() == "failed":
+                    errs = item.get("errors")
+                    if errs:
+                        status_error = json.dumps(errs, ensure_ascii=False)[:5000]
+            except Exception:
+                status_error = None
+
             # Update DB and fetch temp_id/user_id (skip if user_id unknown)
-            temp_id = await self.db_manager.update_message_status(wa_id, status)
+            temp_id = await self.db_manager.update_message_status(wa_id, status, status_error=status_error)
             user_id = await self.db_manager.get_user_for_message(wa_id)
             if not user_id:
                 continue
@@ -6361,6 +6382,7 @@ class MessageProcessor:
                     "temp_id": temp_id,
                     "wa_message_id": wa_id,
                     "status": status,
+                    **({"status_error": status_error} if status_error else {}),
                     "timestamp": timestamp,
                 }
             })

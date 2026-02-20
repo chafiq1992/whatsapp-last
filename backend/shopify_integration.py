@@ -339,7 +339,7 @@ _SEGMENTS_LOCK: float = 0.0  # best-effort local lock (single-process)
 _COUNT_CACHE: dict[str, tuple[float, int, bool]] = {}
 _COUNT_CACHE_TTL_SEC = 5 * 60
 
-_SEGMENT_MEMBER_FIELD_CACHE: dict[str, str] = {}  # cache_key -> "customer" | "customerId" | ""
+_SEGMENT_MEMBER_FIELD_CACHE: dict[str, str] = {}  # deprecated (kept for backwards compat)
 
 def _require_admin_request(request) -> dict:
     """Best-effort admin guard without importing backend.main (avoid circular imports)."""
@@ -385,80 +385,10 @@ async def _shopify_graphql(
         return data if isinstance(data, dict) else {}
 
 async def _segment_member_customer_field(*, store: str | None, x_workspace: str | None) -> str:
-    """Detect how to fetch customer info from CustomerSegmentMember for this shop.
+    """Deprecated: CustomerSegmentMember is itself the customer profile in 2026-01+.
 
-    Some shops expose `CustomerSegmentMember.customer`, others expose `customerId`.
-    We use GraphQL introspection once (cached) and adapt queries accordingly.
+    Kept only to avoid import-time errors if older code paths still call it.
     """
-    cache_key = f"{str(store or '').strip().upper()}|{str(x_workspace or '').strip().lower()}"
-    try:
-        cached = _SEGMENT_MEMBER_FIELD_CACHE.get(cache_key)
-        if cached:
-            return cached
-    except Exception:
-        pass
-    # 1) Try introspection (fast path). Some shops disable introspection -> fall back.
-    q = """
-    query IntrospectCustomerSegmentMember {
-      __type(name: "CustomerSegmentMember") {
-        fields { name }
-      }
-    }
-    """
-    try:
-        payload = await _shopify_graphql(query=q, variables={}, store=store, x_workspace=x_workspace, timeout=15.0)
-        fields = (((payload.get("data") or {}).get("__type") or {}).get("fields") or []) if isinstance(payload, dict) else []
-        names = {str(f.get("name") or "") for f in (fields if isinstance(fields, list) else []) if isinstance(f, dict)}
-        if "customer" in names:
-            _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = "customer"
-            return "customer"
-        if "customerId" in names:
-            _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = "customerId"
-            return "customerId"
-    except Exception:
-        # fall back to probe queries below
-        pass
-
-    # 2) Probe queries (works even when introspection is blocked)
-    probe_customer = """
-    query Probe($query: String!) {
-      customerSegmentMembers(query: $query, first: 1) {
-        edges { node { customer { id } } }
-      }
-    }
-    """
-    try:
-        await _shopify_graphql(query=probe_customer, variables={"query": "FROM customers SHOW id WHERE number_of_orders > 0 ORDER BY updated_at"}, store=store, x_workspace=x_workspace, timeout=15.0)
-        _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = "customer"
-        return "customer"
-    except HTTPException as exc:
-        try:
-            d = str(getattr(exc, "detail", "") or "")
-            if "Field 'customer' doesn't exist" in d or "undefinedField" in d and "customer" in d:
-                pass
-            else:
-                # Could be other errors; keep probing customerId anyway
-                pass
-        except Exception:
-            pass
-
-    probe_customer_id = """
-    query Probe($query: String!) {
-      customerSegmentMembers(query: $query, first: 1) {
-        edges { node { customerId } }
-      }
-    }
-    """
-    try:
-        await _shopify_graphql(query=probe_customer_id, variables={"query": "FROM customers SHOW id WHERE number_of_orders > 0 ORDER BY updated_at"}, store=store, x_workspace=x_workspace, timeout=15.0)
-        _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = "customerId"
-        return "customerId"
-    except Exception:
-        pass
-    try:
-        _SEGMENT_MEMBER_FIELD_CACHE[cache_key] = ""
-    except Exception:
-        pass
     return ""
 
 async def _fetch_customers_by_ids(
@@ -567,86 +497,37 @@ async def _shopify_segment_members_page(
     gid = str(segment_gid or "").strip()
     if not gid:
         return [], None
-    mode = await _segment_member_customer_field(store=store, x_workspace=x_workspace)
-    if mode == "customer":
-        q = """
-        query SegmentMembers($segmentId: ID!, $first: Int!, $after: String) {
-          customerSegmentMembers(segmentId: $segmentId, first: $first, after: $after) {
-            edges {
-              cursor
-              node {
-                customer {
-                  id
-                  firstName
-                  lastName
-                  phone
-                  tags
-                  defaultAddress { phone }
-                }
-              }
-            }
-            pageInfo { hasNextPage }
-          }
-        }
-        """
-        payload = await _shopify_graphql(query=q, variables={"segmentId": gid, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
-        edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
-        out: list[dict] = []
-        next_cursor = None
-        for e in (edges if isinstance(edges, list) else []):
-            if not isinstance(e, dict):
-                continue
-            node = e.get("node") or {}
-            if not isinstance(node, dict):
-                continue
-            cust = node.get("customer") or {}
-            if isinstance(cust, dict) and cust:
-                out.append(cust)
-            try:
-                next_cursor = str(e.get("cursor") or "") or next_cursor
-            except Exception:
-                pass
+    # In Shopify 2026-01, CustomerSegmentMember IS the customer profile.
+    # We fetch only ids from the connection, then hydrate via nodes(ids:...) to also get tags/phone.
+    q = """
+    query SegmentMembers($segmentId: ID!, $first: Int!, $after: String) {
+      customerSegmentMembers(segmentId: $segmentId, first: $first, after: $after) {
+        edges { cursor node { id } }
+        pageInfo { hasNextPage }
+      }
+    }
+    """
+    payload = await _shopify_graphql(query=q, variables={"segmentId": gid, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
+    edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
+    next_cursor = None
+    ids: list[str] = []
+    for e in (edges if isinstance(edges, list) else []):
+        if not isinstance(e, dict):
+            continue
+        node = e.get("node") or {}
+        if isinstance(node, dict) and node.get("id"):
+            ids.append(str(node.get("id")))
         try:
-            has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
+            next_cursor = str(e.get("cursor") or "") or next_cursor
         except Exception:
-            has_next = False
-        return out, (next_cursor if has_next else None)
-
-    if mode == "customerId":
-        q = """
-        query SegmentMembers($segmentId: ID!, $first: Int!, $after: String) {
-          customerSegmentMembers(segmentId: $segmentId, first: $first, after: $after) {
-            edges {
-              cursor
-              node { customerId }
-            }
-            pageInfo { hasNextPage }
-          }
-        }
-        """
-        payload = await _shopify_graphql(query=q, variables={"segmentId": gid, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
-        edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
-        next_cursor = None
-        ids: list[str] = []
-        for e in (edges if isinstance(edges, list) else []):
-            if not isinstance(e, dict):
-                continue
-            node = e.get("node") or {}
-            if isinstance(node, dict) and node.get("customerId"):
-                ids.append(str(node.get("customerId")))
-            try:
-                next_cursor = str(e.get("cursor") or "") or next_cursor
-            except Exception:
-                pass
-        cust_map = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
-        out = [cust_map[i] for i in ids if i in cust_map]
-        try:
-            has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
-        except Exception:
-            has_next = False
-        return out, (next_cursor if has_next else None)
-
-    raise HTTPException(status_code=502, detail="Shopify GraphQL schema missing CustomerSegmentMember.customer/customerId")
+            pass
+    cust_map = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
+    out = [cust_map[i] for i in ids if i in cust_map]
+    try:
+        has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
+    except Exception:
+        has_next = False
+    return out, (next_cursor if has_next else None)
 
 async def _shopify_segment_members_by_query_page(
     *,
@@ -663,86 +544,35 @@ async def _shopify_segment_members_by_query_page(
     qtxt = _normalize_shopifyql_query(query_text)
     if not qtxt:
         return [], None
-    mode = await _segment_member_customer_field(store=store, x_workspace=x_workspace)
-    if mode == "customer":
-        q = """
-        query SegmentMembersByQuery($query: String!, $first: Int!, $after: String) {
-          customerSegmentMembers(query: $query, first: $first, after: $after) {
-            edges {
-              cursor
-              node {
-                customer {
-                  id
-                  firstName
-                  lastName
-                  phone
-                  tags
-                  defaultAddress { phone }
-                }
-              }
-            }
-            pageInfo { hasNextPage }
-          }
-        }
-        """
-        payload = await _shopify_graphql(query=q, variables={"query": qtxt, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
-        edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
-        out: list[dict] = []
-        next_cursor = None
-        for e in (edges if isinstance(edges, list) else []):
-            if not isinstance(e, dict):
-                continue
-            node = e.get("node") or {}
-            if not isinstance(node, dict):
-                continue
-            cust = node.get("customer") or {}
-            if isinstance(cust, dict) and cust:
-                out.append(cust)
-            try:
-                next_cursor = str(e.get("cursor") or "") or next_cursor
-            except Exception:
-                pass
+    q = """
+    query SegmentMembersByQuery($query: String!, $first: Int!, $after: String) {
+      customerSegmentMembers(query: $query, first: $first, after: $after) {
+        edges { cursor node { id } }
+        pageInfo { hasNextPage }
+      }
+    }
+    """
+    payload = await _shopify_graphql(query=q, variables={"query": qtxt, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
+    edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
+    next_cursor = None
+    ids: list[str] = []
+    for e in (edges if isinstance(edges, list) else []):
+        if not isinstance(e, dict):
+            continue
+        node = e.get("node") or {}
+        if isinstance(node, dict) and node.get("id"):
+            ids.append(str(node.get("id")))
         try:
-            has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
+            next_cursor = str(e.get("cursor") or "") or next_cursor
         except Exception:
-            has_next = False
-        return out, (next_cursor if has_next else None)
-
-    if mode == "customerId":
-        q = """
-        query SegmentMembersByQuery($query: String!, $first: Int!, $after: String) {
-          customerSegmentMembers(query: $query, first: $first, after: $after) {
-            edges {
-              cursor
-              node { customerId }
-            }
-            pageInfo { hasNextPage }
-          }
-        }
-        """
-        payload = await _shopify_graphql(query=q, variables={"query": qtxt, "first": int(first), "after": after}, store=store, x_workspace=x_workspace, timeout=25.0)
-        edges = (((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("edges") or []) if isinstance(payload, dict) else []
-        next_cursor = None
-        ids: list[str] = []
-        for e in (edges if isinstance(edges, list) else []):
-            if not isinstance(e, dict):
-                continue
-            node = e.get("node") or {}
-            if isinstance(node, dict) and node.get("customerId"):
-                ids.append(str(node.get("customerId")))
-            try:
-                next_cursor = str(e.get("cursor") or "") or next_cursor
-            except Exception:
-                pass
-        cust_map = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
-        out = [cust_map[i] for i in ids if i in cust_map]
-        try:
-            has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
-        except Exception:
-            has_next = False
-        return out, (next_cursor if has_next else None)
-
-    raise HTTPException(status_code=502, detail="Shopify GraphQL schema missing CustomerSegmentMember.customer/customerId")
+            pass
+    cust_map = await _fetch_customers_by_ids(ids=ids, store=store, x_workspace=x_workspace)
+    out = [cust_map[i] for i in ids if i in cust_map]
+    try:
+        has_next = bool((((payload.get("data") or {}).get("customerSegmentMembers") or {}).get("pageInfo") or {}).get("hasNextPage"))
+    except Exception:
+        has_next = False
+    return out, (next_cursor if has_next else None)
 
 
 def _segments_read_file() -> list[dict]:

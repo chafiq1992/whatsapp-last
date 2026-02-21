@@ -251,19 +251,32 @@ async def webhook_db_worker(rt: WebhookRuntime, worker_id: int):
 async def start_webhook_workers(rt: WebhookRuntime) -> None:
     """Start webhook background workers so /webhook can ACK quickly."""
     try:
-        if bool(getattr(rt.db_manager, "use_postgres", False)) and bool(rt.use_db_queue):
-            await ensure_webhook_events_table(rt)
-        if bool(getattr(rt.db_manager, "use_postgres", False)) and bool(rt.use_db_queue) and bool(rt.state.db_ready):
-            for i in range(max(1, int(rt.workers))):
-                asyncio.create_task(webhook_db_worker(rt, i + 1))
-            print(f"Webhook DB workers started: {max(1, int(rt.workers))} (batch={rt.db_batch_size})")
-        else:
+        r = getattr(rt.redis_manager, "redis_client", None)
+        use_stream = bool(r and bool(rt.use_redis_stream))
+
+        # Prefer Redis Streams when available (durable + avoids growing webhook_events in Postgres).
+        if use_stream:
             await ensure_webhook_stream_group(rt)
             for i in range(max(1, int(rt.workers))):
                 asyncio.create_task(webhook_worker(rt, i + 1))
-            print(
-                f"Webhook workers started: {max(1, int(rt.workers))} (queue maxsize={getattr(rt.webhook_queue,'maxsize',None)})"
-            )
+            print(f"Webhook Redis-stream workers started: {max(1, int(rt.workers))} (stream={rt.stream_key})")
+            return
+
+        # Fallback (no Redis): Postgres-backed queue table.
+        if bool(getattr(rt.db_manager, "use_postgres", False)) and bool(rt.use_db_queue):
+            await ensure_webhook_events_table(rt)
+            if bool(rt.state.db_ready):
+                for i in range(max(1, int(rt.workers))):
+                    asyncio.create_task(webhook_db_worker(rt, i + 1))
+                print(f"Webhook DB workers started: {max(1, int(rt.workers))} (batch={rt.db_batch_size})")
+                return
+
+        # Last resort: in-memory queue (not durable).
+        for i in range(max(1, int(rt.workers))):
+            asyncio.create_task(webhook_worker(rt, i + 1))
+        print(
+            f"Webhook in-memory workers started: {max(1, int(rt.workers))} (queue maxsize={getattr(rt.webhook_queue,'maxsize',None)})"
+        )
     except Exception as exc:
         print(f"Webhook worker startup failed: {exc}")
 

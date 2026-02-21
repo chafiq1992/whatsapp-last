@@ -49,13 +49,14 @@ class WebhookRuntime:
 
     def backend_name(self) -> str:
         try:
-            if bool(getattr(self.db_manager, "use_postgres", False)) and bool(self.use_db_queue) and bool(self.state.db_ready):
-                return "db"
+            r = getattr(self.redis_manager, "redis_client", None)
+            if bool(r) and bool(self.use_redis_stream):
+                return "redis_stream"
         except Exception:
             pass
         try:
-            if bool(self.use_redis_stream) and bool(getattr(self.redis_manager, "redis_client", None)):
-                return "redis_stream"
+            if bool(getattr(self.db_manager, "use_postgres", False)) and bool(self.use_db_queue) and bool(self.state.db_ready):
+                return "db"
         except Exception:
             pass
         return "memory"

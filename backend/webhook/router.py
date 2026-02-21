@@ -92,31 +92,22 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
 
         # ACK fast: enqueue for background processing. Avoid slow DB calls here to prevent 504s.
         try:
-            if bool(getattr(rt.db_manager, "use_postgres", False)) and bool(rt.use_db_queue):
+            # Preferred durable backend: Redis Streams (fast + keeps Postgres small when both are enabled).
+            r = getattr(rt.redis_manager, "redis_client", None)
+            if r and bool(rt.use_redis_stream):
+                await r.xadd(rt.stream_key, {"payload": json.dumps(data)})
+            # Fallback durable backend (no Redis): Postgres-backed queue table.
+            elif bool(getattr(rt.db_manager, "use_postgres", False)) and bool(rt.use_db_queue):
                 if await ensure_webhook_events_table(rt):
-                    try:
-                        await asyncio.wait_for(
-                            db_enqueue_webhook(rt, data),
-                            timeout=max(0.2, float(rt.enqueue_timeout_seconds)),
-                        )
-                    except Exception:
-                        r = getattr(rt.redis_manager, "redis_client", None)
-                        if r and bool(rt.use_redis_stream):
-                            await r.xadd(rt.stream_key, {"payload": json.dumps(data)})
-                        else:
-                            rt.webhook_queue.put_nowait(data)
-                else:
-                    r = getattr(rt.redis_manager, "redis_client", None)
-                    if r and bool(rt.use_redis_stream):
-                        await r.xadd(rt.stream_key, {"payload": json.dumps(data)})
-                    else:
-                        rt.webhook_queue.put_nowait(data)
-            else:
-                r = getattr(rt.redis_manager, "redis_client", None)
-                if r and bool(rt.use_redis_stream):
-                    await r.xadd(rt.stream_key, {"payload": json.dumps(data)})
+                    await asyncio.wait_for(
+                        db_enqueue_webhook(rt, data),
+                        timeout=max(0.2, float(rt.enqueue_timeout_seconds)),
+                    )
                 else:
                     rt.webhook_queue.put_nowait(data)
+            # Last resort: in-memory queue (not durable).
+            else:
+                rt.webhook_queue.put_nowait(data)
         except asyncio.QueueFull:
             return PlainTextResponse("Webhook queue full", status_code=503)
         except Exception:

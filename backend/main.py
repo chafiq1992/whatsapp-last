@@ -55,7 +55,7 @@ from .observability.context import (
     reset_agent_username as _reset_agent_username,
 )
 from .observability.logging import configure_logging as _configure_logging
-from .webhook import WebhookRuntime, WebhookState, create_webhook_router, start_webhook_workers
+from .webhook import WebhookRuntime, WebhookState, create_webhook_router, start_webhook_maintenance, start_webhook_workers
 
 from fastapi.staticfiles import StaticFiles
 from base64 import b64encode
@@ -9763,6 +9763,11 @@ async def startup():
     if not os.getenv("PYTEST_CURRENT_TEST"):
         try:
             await start_webhook_workers(webhook_runtime)
+            # Maintenance (retention/trim). Safe no-op when backends are disabled/unavailable.
+            try:
+                start_webhook_maintenance(webhook_runtime)
+            except Exception:
+                pass
             # Mirror runtime flag into legacy global for any old helper callers.
             try:
                 globals()["WEBHOOK_DB_READY"] = bool(webhook_runtime.state.db_ready)

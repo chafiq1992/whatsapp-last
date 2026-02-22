@@ -5855,8 +5855,27 @@ class MessageProcessor:
                         # Prefer reliability: fetch the remote URL, upload to WhatsApp, then send by media_id
                         local_tmp_path: Optional[Path] = None
                         try:
-                            async with httpx.AsyncClient(timeout=30.0) as client:
-                                resp = await client.get(media_url)
+                            # If this is a private GCS object (common), sign it so Cloud Run can download it.
+                            # This also helps WhatsApp since we always upload by media_id (never send audio by link).
+                            download_url = media_url
+                            try:
+                                signed = maybe_signed_url_for(media_url, ttl_seconds=3600)
+                                if signed:
+                                    download_url = signed
+                            except Exception:
+                                download_url = media_url
+
+                            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                                resp = await client.get(download_url)
+                                # If we didn't sign first and got forbidden, retry once with a signed URL.
+                                if (resp.status_code == 403) and (download_url == media_url):
+                                    try:
+                                        signed2 = maybe_signed_url_for(media_url, ttl_seconds=3600)
+                                        if signed2:
+                                            download_url = signed2
+                                            resp = await client.get(download_url)
+                                    except Exception:
+                                        pass
                                 if resp.status_code >= 400 or not resp.content:
                                     raise Exception(f"download status {resp.status_code}")
                                 # Determine extension from content-type or URL

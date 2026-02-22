@@ -7254,38 +7254,97 @@ class MessageProcessor:
     def _oc_pending_key(self, ws: str, user_id: str) -> str:
         return f"automation:order_confirm:pending:{_coerce_workspace(ws)}:{str(user_id or '').strip()}"
 
+    def _oc_pending_db_key(self, ws: str, user_id: str) -> str:
+        # Store under workspace-scoped settings so it survives restarts even without Redis.
+        # We include user_id in the base key so each conversation has its own pending state.
+        return _ws_setting_key(f"order_confirm_pending:{str(user_id or '').strip()}", ws)
+
     async def _set_order_confirm_pending(self, *, ws: str, user_id: str, state: dict, ttl_sec: int = 24 * 3600) -> None:
+        # Prefer Redis (fast + auto-expiry), but fall back to DB so flows work on Cloud Run without Redis.
+        try:
+            payload = dict(state or {})
+        except Exception:
+            payload = {}
+        try:
+            payload["created_at"] = payload.get("created_at") or datetime.utcnow().isoformat()
+        except Exception:
+            pass
+        try:
+            payload["expires_at_ts"] = int(time.time()) + max(60, int(ttl_sec or 0))
+        except Exception:
+            pass
+        raw = ""
+        try:
+            raw = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            raw = "{}"
+
         try:
             rds = getattr(self.redis_manager, "redis_client", None)
-            if not rds:
+            if rds:
+                key = self._oc_pending_key(ws, user_id)
+                await rds.set(key, raw, ex=int(ttl_sec))
                 return
-            key = self._oc_pending_key(ws, user_id)
-            await rds.set(key, json.dumps(state, ensure_ascii=False), ex=int(ttl_sec))
+        except Exception:
+            # fall through to DB
+            pass
+        try:
+            await self.db_manager.set_setting(self._oc_pending_db_key(ws, user_id), raw)
         except Exception:
             return
 
     async def _get_order_confirm_pending(self, *, ws: str, user_id: str) -> Optional[dict]:
+        raw = None
+        # 1) Redis fast path
         try:
             rds = getattr(self.redis_manager, "redis_client", None)
-            if not rds:
-                return None
-            key = self._oc_pending_key(ws, user_id)
-            raw = await rds.get(key)
-            if not raw:
-                return None
+            if rds:
+                key = self._oc_pending_key(ws, user_id)
+                raw = await rds.get(key)
+        except Exception:
+            raw = None
+        # 2) DB fallback
+        if not raw:
+            try:
+                raw = await self.db_manager.get_setting(self._oc_pending_db_key(ws, user_id))
+            except Exception:
+                raw = None
+        if not raw:
+            return None
+        try:
             if isinstance(raw, (bytes, bytearray)):
                 raw = raw.decode("utf-8", errors="ignore")
-            obj = json.loads(raw) if isinstance(raw, str) else None
-            return obj if isinstance(obj, dict) else None
         except Exception:
+            pass
+        try:
+            obj = json.loads(raw) if isinstance(raw, str) else None
+        except Exception:
+            obj = None
+        if not isinstance(obj, dict):
             return None
+        # Expiry enforcement for DB-backed records
+        try:
+            exp = int(obj.get("expires_at_ts") or 0)
+            if exp and int(time.time()) > exp:
+                try:
+                    await self._clear_order_confirm_pending(ws=ws, user_id=user_id)
+                except Exception:
+                    pass
+                return None
+        except Exception:
+            pass
+        return obj
 
     async def _clear_order_confirm_pending(self, *, ws: str, user_id: str) -> None:
+        # Best-effort delete from both Redis and DB.
         try:
             rds = getattr(self.redis_manager, "redis_client", None)
-            if not rds:
-                return
-            await rds.delete(self._oc_pending_key(ws, user_id))
+            if rds:
+                await rds.delete(self._oc_pending_key(ws, user_id))
+        except Exception:
+            pass
+        try:
+            await self.db_manager.delete_setting(self._oc_pending_db_key(ws, user_id))
         except Exception:
             return
 
@@ -13676,6 +13735,30 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
             _CURRENT_WORKSPACE.reset(ws_token)
         except Exception:
             pass
+
+
+@app.post("/shopify/webhooks/orders/create")
+async def shopify_webhook_orders_create_legacy(
+    request: Request,
+    workspace: str | None = Query(default=None),
+    x_workspace: str | None = Header(default=None, alias="X-Workspace"),
+):
+    """Legacy Shopify Orders/Create webhook endpoint (compatibility).
+
+    Older deployments and some UI flows used:
+      POST /shopify/webhooks/orders/create?workspace=<workspace>
+
+    The recommended endpoint is:
+      POST /shopify/webhook/{workspace}
+    """
+    ws = _coerce_workspace(workspace or x_workspace)
+    if not ws:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing workspace. Use /shopify/webhook/{workspace} (recommended) or add ?workspace=<workspace> to this legacy URL.",
+        )
+    # Forward to the canonical handler (keeps HMAC verification + automation logic identical).
+    return await shopify_webhook_endpoint(ws, request)
 
 
 @app.post("/delivery/webhook/{workspace}")

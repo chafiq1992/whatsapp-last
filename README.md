@@ -45,16 +45,15 @@ Replace the values with the credentials for your Shopify store. Alternatively us
 
 Shopify webhooks are **public endpoints** (Shopify does not send `Authorization` headers). Authentication is done via the `X-Shopify-Hmac-Sha256` signature header.
 
-- **Recommended URL (multi-workspace)**:
+- **Recommended URL (multi-workspace; workspace at the end)**:
   - `POST /shopify/webhook/{workspace}`
   - Example URLs to paste in Shopify:
     - `https://<your-domain>/shopify/webhook/irrakids`
     - `https://<your-domain>/shopify/webhook/irranova`
 
-- **Compatibility URL (legacy / older deployments)**:
+- **Legacy / compatibility (only if you already use it)**:
   - `POST /shopify/webhooks/orders/create?workspace=<workspace>`
-  - Example:
-    - `https://<your-domain>/shopify/webhooks/orders/create?workspace=irrakids`
+  - Example: `https://<your-domain>/shopify/webhooks/orders/create?workspace=irrakids`
 
 ### Webhook secret (HMAC)
 

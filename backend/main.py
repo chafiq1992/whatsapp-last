@@ -1024,7 +1024,17 @@ CATALOG_ID = os.getenv("CATALOG_ID", "CATALOGID")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", ACCESS_TOKEN)
 # App credentials for webhook signature verification and token debugging
 META_APP_ID = os.getenv("META_APP_ID", "") or os.getenv("FB_APP_ID", "")
-META_APP_SECRET = os.getenv("META_APP_SECRET", "") or os.getenv("FB_APP_SECRET", "")
+def _strip_wrapping_quotes_env(value: str) -> str:
+    """Remove one pair of wrapping quotes if present (common Cloud Run/.env mistake)."""
+    try:
+        s = str(value or "").strip()
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+            return s[1:-1].strip()
+        return s
+    except Exception:
+        return str(value or "").strip()
+
+META_APP_SECRET = _strip_wrapping_quotes_env(os.getenv("META_APP_SECRET", "") or os.getenv("FB_APP_SECRET", ""))
 
 # Embedded Signup (Facebook Login for Business) configuration.
 # This is NOT a secret; it's the "Configuration ID" (config_id) you create in Meta App Dashboard.
@@ -7254,10 +7264,18 @@ class MessageProcessor:
     def _oc_pending_key(self, ws: str, user_id: str) -> str:
         return f"automation:order_confirm:pending:{_coerce_workspace(ws)}:{str(user_id or '').strip()}"
 
+    def _oc_pending_key_global(self, user_id: str) -> str:
+        """Global fallback key (no workspace). Helps when phone_id→workspace mapping is misconfigured."""
+        return f"automation:order_confirm:pending_any:{str(user_id or '').strip()}"
+
     def _oc_pending_db_key(self, ws: str, user_id: str) -> str:
         # Store under workspace-scoped settings so it survives restarts even without Redis.
         # We include user_id in the base key so each conversation has its own pending state.
         return _ws_setting_key(f"order_confirm_pending:{str(user_id or '').strip()}", ws)
+
+    def _oc_pending_db_key_global(self, user_id: str) -> str:
+        # Global fallback key in settings (no workspace namespace).
+        return f"order_confirm_pending_any:{str(user_id or '').strip()}"
 
     async def _set_order_confirm_pending(self, *, ws: str, user_id: str, state: dict, ttl_sec: int = 24 * 3600) -> None:
         # Prefer Redis (fast + auto-expiry), but fall back to DB so flows work on Cloud Run without Redis.
@@ -7279,17 +7297,23 @@ class MessageProcessor:
         except Exception:
             raw = "{}"
 
+        # 1) Redis writes (both workspace-scoped + global fallback)
         try:
             rds = getattr(self.redis_manager, "redis_client", None)
             if rds:
-                key = self._oc_pending_key(ws, user_id)
-                await rds.set(key, raw, ex=int(ttl_sec))
+                await rds.set(self._oc_pending_key(ws, user_id), raw, ex=int(ttl_sec))
+                await rds.set(self._oc_pending_key_global(user_id), raw, ex=int(ttl_sec))
                 return
         except Exception:
             # fall through to DB
             pass
+        # 2) DB writes (both workspace-scoped + global fallback)
         try:
             await self.db_manager.set_setting(self._oc_pending_db_key(ws, user_id), raw)
+        except Exception:
+            pass
+        try:
+            await self.db_manager.set_setting(self._oc_pending_db_key_global(user_id), raw)
         except Exception:
             return
 
@@ -7299,14 +7323,20 @@ class MessageProcessor:
         try:
             rds = getattr(self.redis_manager, "redis_client", None)
             if rds:
-                key = self._oc_pending_key(ws, user_id)
-                raw = await rds.get(key)
+                raw = await rds.get(self._oc_pending_key(ws, user_id))
+                if not raw:
+                    raw = await rds.get(self._oc_pending_key_global(user_id))
         except Exception:
             raw = None
         # 2) DB fallback
         if not raw:
             try:
                 raw = await self.db_manager.get_setting(self._oc_pending_db_key(ws, user_id))
+            except Exception:
+                raw = None
+        if not raw:
+            try:
+                raw = await self.db_manager.get_setting(self._oc_pending_db_key_global(user_id))
             except Exception:
                 raw = None
         if not raw:
@@ -7341,10 +7371,15 @@ class MessageProcessor:
             rds = getattr(self.redis_manager, "redis_client", None)
             if rds:
                 await rds.delete(self._oc_pending_key(ws, user_id))
+                await rds.delete(self._oc_pending_key_global(user_id))
         except Exception:
             pass
         try:
             await self.db_manager.delete_setting(self._oc_pending_db_key(ws, user_id))
+        except Exception:
+            pass
+        try:
+            await self.db_manager.delete_setting(self._oc_pending_db_key_global(user_id))
         except Exception:
             return
 

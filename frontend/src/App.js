@@ -528,6 +528,13 @@ export default function App() {
         try {
           const data = JSON.parse(e.data);
           if (data.type === 'pong') return;
+          // Hard guard: never apply WS events from a different workspace.
+          // This prevents brief "flash" of cross-workspace messages during routing / reconnect edges.
+          try {
+            const evWs = String(data.workspace || '').trim().toLowerCase();
+            const curWs = String(workspace || '').trim().toLowerCase();
+            if (evWs && curWs && evWs !== curWs) return;
+          } catch {}
           if (data.type === "message_received") {
             const msg = data.data || {};
             const userId = msg.user_id;
@@ -598,6 +605,17 @@ export default function App() {
               setConversations((prev) => prev.map((c) => c.user_id === userId ? { ...c, tags } : c));
               if (activeUserRef.current?.user_id === userId) {
                 setActiveUser((prev) => prev ? { ...prev, tags } : prev);
+              }
+            }
+          }
+          if (data.type === "conversation_assignment_updated") {
+            const d = data.data || {};
+            const userId = d.user_id;
+            const assignedAgent = (d.assigned_agent === null || d.assigned_agent === undefined) ? null : String(d.assigned_agent || '');
+            if (userId) {
+              setConversations((prev) => prev.map((c) => c.user_id === userId ? { ...c, assigned_agent: assignedAgent } : c));
+              if (activeUserRef.current?.user_id === userId) {
+                setActiveUser((prev) => prev ? { ...prev, assigned_agent: assignedAgent } : prev);
               }
             }
           }
@@ -674,6 +692,15 @@ export default function App() {
     }
   };
 
+  // Helper to update assignment on a conversation and keep activeUser in sync
+  const handleUpdateConversationAssignee = (userId, assignedAgent) => {
+    const val = (assignedAgent === null || assignedAgent === undefined || String(assignedAgent).trim() === '') ? null : String(assignedAgent);
+    setConversations(prev => prev.map(c => c.user_id === userId ? { ...c, assigned_agent: val } : c));
+    if (activeUserRef.current?.user_id === userId) {
+      setActiveUser(prev => prev ? { ...prev, assigned_agent: val } : prev);
+    }
+  };
+
   if (isLoginPath) {
     return (
       <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center bg-gray-900 text-white">Loading…</div>}>
@@ -734,6 +761,7 @@ export default function App() {
               currentAgent={currentAgent}
               loading={loadingConversations}
               onUpdateConversationTags={handleUpdateConversationTags}
+              onUpdateConversationAssignee={handleUpdateConversationAssignee}
             onLoadMore={loadMoreConversations}
             hasMore={convHasMore}
             loadingMore={convLoadingMore}
@@ -754,6 +782,7 @@ export default function App() {
             currentAgent={currentAgent}
             adminWs={adminWsRef.current}
             onUpdateConversationTags={handleUpdateConversationTags}
+            onUpdateConversationAssignee={handleUpdateConversationAssignee}
             workspace={workspace}
           />
         ) : null}

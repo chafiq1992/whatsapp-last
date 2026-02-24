@@ -598,6 +598,12 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     const handleAdmin = (event) => {
       try {
         const data = JSON.parse(event.data);
+        // Guard: ignore cross-workspace events
+        try {
+          const evWs = String(data.workspace || '').trim().toLowerCase();
+          const curWs = String(workspace || '').trim().toLowerCase();
+          if (evWs && curWs && evWs !== curWs) return;
+        } catch {}
         if (data.type === 'message_received' && data.data?.user_id === uid) {
           setMessages(prev => mergeAndDedupe(prev, [data.data]));
         }
@@ -607,7 +613,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     return () => {
       try { adminWs.removeEventListener('message', handleAdmin); } catch {}
     };
-  }, [adminWs, activeUser?.user_id]);
+  }, [adminWs, activeUser?.user_id, workspace]);
 
   // Update search hits when query or messages change
   useEffect(() => {

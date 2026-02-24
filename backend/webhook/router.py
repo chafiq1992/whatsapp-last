@@ -24,7 +24,9 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
             token = params.get("hub.verify_token")
             challenge = params.get("hub.challenge")
 
-            rt.vlog(f"🔐 Webhook verification: mode={mode}, token={token}, challenge={challenge}")
+            # Avoid leaking verify tokens in logs.
+            tok_hint = (str(token or "")[:3] + "***") if token else ""
+            rt.vlog(f"🔐 Webhook verification: mode={mode}, token={tok_hint}, challenge={'set' if bool(challenge) else 'missing'}")
             ok_token = False
             try:
                 ok_token = bool(token) and (
@@ -40,13 +42,44 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
 
         # POST
         try:
-            if rt.meta_app_secret:
+            # Validate signature if we have app secret(s).
+            secrets = []
+            try:
+                secrets = [s.strip() for s in (rt.meta_app_secrets or []) if str(s or "").strip()]
+            except Exception:
+                secrets = []
+            if not secrets:
+                try:
+                    if str(getattr(rt, "meta_app_secret", "") or "").strip():
+                        secrets = [str(getattr(rt, "meta_app_secret", "") or "").strip()]
+                except Exception:
+                    secrets = []
+
+            if secrets:
                 body_bytes = await request.body()
                 sig_header = request.headers.get("X-Hub-Signature-256", "")
-                expected = hmac.new(rt.meta_app_secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
                 presented = sig_header.split("=", 1)[1] if "=" in sig_header else sig_header
-                if not presented or not hmac.compare_digest(presented, expected):
+                presented = (presented or "").strip()
+                ok = False
+                if presented:
+                    for sec in secrets:
+                        expected = hmac.new(sec.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
+                        if hmac.compare_digest(presented, expected):
+                            ok = True
+                            break
+                if not ok:
                     rt.vlog("❌ Invalid webhook signature")
+                    # High-signal diagnostics without leaking secrets/signatures.
+                    try:
+                        rt.vlog(
+                            "webhook_sig_debug "
+                            f"body_len={len(body_bytes)} "
+                            f"sig_header_len={len(sig_header or '')} "
+                            f"sig_prefix={(sig_header or '')[:16]} "
+                            f"secrets_tried={len(secrets)}"
+                        )
+                    except Exception:
+                        pass
                     return PlainTextResponse("Invalid signature", status_code=401)
                 data = json.loads(body_bytes.decode("utf-8") or "{}")
             else:

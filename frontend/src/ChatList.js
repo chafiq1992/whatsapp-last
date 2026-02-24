@@ -84,6 +84,7 @@ function ChatList({
   currentAgent = '',
   loading = false,
   onUpdateConversationTags,
+  onUpdateConversationAssignee,
   onLoadMore,
   hasMore = true,
   loadingMore = false,
@@ -174,13 +175,11 @@ function ChatList({
   // Optionally fetch filtered conversations from backend for scalability (debounced)
   useEffect(() => {
     const controller = new AbortController();
-    const shouldFetchFromServer =
-      !!search ||
-      !!showUnreadOnly ||
-      !!needsReplyOnly ||
-      !!showArchive ||
-      (assignedFilter && assignedFilter !== 'all') ||
-      (Array.isArray(tagFilters) && tagFilters.length > 0);
+    // UX-first: keep agent/tag filters instant by default (client-side on the loaded list).
+    // Use server-side filtering only when the user is actively searching (so results can include
+    // conversations not yet loaded via pagination).
+    const qTrim = String(search || '').trim();
+    const shouldFetchFromServer = qTrim.length >= 2;
 
     // If no server-side filters are active, rely on App's conversation list.
     if (!shouldFetchFromServer) {
@@ -189,7 +188,8 @@ function ChatList({
 
     const run = () => {
       const params = new URLSearchParams();
-      if (search) params.set('q', search);
+      if (qTrim) params.set('q', qTrim);
+      // Preserve other active filters when searching (expected behavior)
       if (showUnreadOnly) params.set('unread_only', 'true');
       if (assignedFilter && assignedFilter !== 'all') params.set('assigned', assignedFilter);
       if (tagFilters.length) params.set('tags', tagFilters.join(','));
@@ -251,15 +251,11 @@ function ChatList({
   }, [search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showArchive]);
 
   const isUsingServerFilters = useMemo(() => {
+    const qTrim = String(search || '').trim();
     return (
-      !!search ||
-      !!showUnreadOnly ||
-      !!needsReplyOnly ||
-      !!showArchive ||
-      (assignedFilter && assignedFilter !== 'all') ||
-      (Array.isArray(tagFilters) && tagFilters.length > 0)
+      qTrim.length >= 2
     );
-  }, [search, showUnreadOnly, needsReplyOnly, showArchive, assignedFilter, tagFilters]);
+  }, [search]);
 
   // Admin WebSocket handled in App; avoid duplicate WS here to prevent double updates
 
@@ -590,6 +586,7 @@ function ChatList({
                 agents={agents}
                 tagOptions={tagOptions}
                 onUpdateConversationTags={onUpdateConversationTags}
+                onUpdateConversationAssignee={onUpdateConversationAssignee}
                 registerRowNode={registerRowNode}
               />
             )}
@@ -616,11 +613,13 @@ const ConversationRow = memo(function Row({
   agents = [],
   tagOptions = [],
   onUpdateConversationTags,
+  onUpdateConversationAssignee,
   registerRowNode,
 }) {
   const selected = active === conv.user_id;
   const [assignOpen, setAssignOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState(conv.assigned_agent || '');
+  const [assignSaving, setAssignSaving] = useState(false);
   const [tagsEditOpen, setTagsEditOpen] = useState(false);
   const [tagsInput, setTagsInput] = useState("");
   const [tags, setTags] = useState(conv.tags || []);
@@ -641,6 +640,16 @@ const ConversationRow = memo(function Row({
     return () => { try { t && clearTimeout(t); } catch {} };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conv?._flash_ts]);
+
+  // Keep local state in sync with upstream conversation updates (WS events, refresh, other agents).
+  useEffect(() => {
+    try { setSelectedAgent(conv.assigned_agent || ''); } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conv.assigned_agent]);
+  useEffect(() => {
+    try { setTags(Array.isArray(conv.tags) ? conv.tags : []); } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(conv.tags || [])]);
   return (
     <div
       ref={rowRef}
@@ -779,7 +788,32 @@ const ConversationRow = memo(function Row({
                   <div className="mb-2">
                     <label className="text-xs text-gray-400">Assign to</label>
                     <div className="flex gap-2 mt-1">
-                      <select className="flex-1 bg-gray-800 text-white p-2 rounded" value={selectedAgent} onChange={(e)=>{ const v = e.target.value; setSelectedAgent(v); (async ()=>{ try { await api.post(`/conversations/${encodeURIComponent(String(conv.user_id))}/assign`, { agent: v || null }); } catch(e) {} })(); setAssignOpen(false); }}>
+                      <select
+                        className="flex-1 bg-gray-800 text-white p-2 rounded disabled:opacity-60"
+                        value={selectedAgent}
+                        disabled={assignSaving}
+                        onChange={(e)=> {
+                          const v = e.target.value;
+                          const prev = selectedAgent;
+                          setSelectedAgent(v);
+                          setAssignSaving(true);
+                          // Optimistic UI update
+                          try { typeof onUpdateConversationAssignee === 'function' && onUpdateConversationAssignee(conv.user_id, v || null); } catch {}
+                          (async ()=> {
+                            try {
+                              const res = await api.post(`/conversations/${encodeURIComponent(String(conv.user_id))}/assign`, { agent: v || null });
+                              const aa = res?.data?.assigned_agent;
+                              try { typeof onUpdateConversationAssignee === 'function' && onUpdateConversationAssignee(conv.user_id, aa); } catch {}
+                            } catch(e) {
+                              // Revert on error
+                              try { setSelectedAgent(prev); } catch {}
+                              try { typeof onUpdateConversationAssignee === 'function' && onUpdateConversationAssignee(conv.user_id, prev || null); } catch {}
+                            } finally {
+                              setAssignSaving(false);
+                            }
+                          })();
+                        }}
+                      >
                         <option value="">Unassigned</option>
                         {agents.map(a => (
                           <option key={a.username} value={a.username}>{a.name || a.username}</option>
@@ -806,7 +840,6 @@ const ConversationRow = memo(function Row({
                                 try { typeof onUpdateConversationTags === 'function' && onUpdateConversationTags(conv.user_id, newTags); } catch {}
                               } catch(e) {}
                             })();
-                            setAssignOpen(false);
                           }
                         }}
                       >
@@ -836,7 +869,6 @@ const ConversationRow = memo(function Row({
                                 try { typeof onUpdateConversationTags === 'function' && onUpdateConversationTags(conv.user_id, newTags); } catch {}
                               } catch(e) {}
                             })();
-                            setAssignOpen(false);
                           }} className="text-xs text-gray-300 hover:text-white">✕</button>
                         </div>
                       ))}

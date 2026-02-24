@@ -1035,6 +1035,16 @@ def _strip_wrapping_quotes_env(value: str) -> str:
         return str(value or "").strip()
 
 META_APP_SECRET = _strip_wrapping_quotes_env(os.getenv("META_APP_SECRET", "") or os.getenv("FB_APP_SECRET", ""))
+# Optional: allow multiple app secrets for webhook signature verification (secret rotation / mixed deploys).
+# Comma-separated. Example: META_APP_SECRETS=oldsecret,newsecret
+try:
+    META_APP_SECRETS = [
+        _strip_wrapping_quotes_env(s)
+        for s in (os.getenv("META_APP_SECRETS", "") or "").split(",")
+        if _strip_wrapping_quotes_env(s).strip()
+    ]
+except Exception:
+    META_APP_SECRETS = []
 
 # Embedded Signup (Facebook Login for Business) configuration.
 # This is NOT a secret; it's the "Configuration ID" (config_id) you create in Meta App Dashboard.
@@ -1388,12 +1398,37 @@ class ConnectionManager:
         _vlog(f"📤 Attempting to send to user {user_id}")
         _vlog("📤 Message content:", json.dumps(message, indent=2))
         """Send message to all connections of a specific user"""
-        key = self._key(user_id, workspace)
+        # Determine workspace for routing:
+        # - explicit arg wins
+        # - otherwise allow the payload itself to carry a workspace hint (message.workspace or message.data.workspace)
+        # - finally fall back to the current request/task workspace
+        ws = None
+        try:
+            if workspace:
+                ws = _coerce_workspace(workspace)
+            elif isinstance(message, dict) and message.get("workspace"):
+                ws = _coerce_workspace(str(message.get("workspace")))
+            elif isinstance(message, dict) and isinstance(message.get("data"), dict) and message["data"].get("workspace"):
+                ws = _coerce_workspace(str(message["data"].get("workspace")))
+        except Exception:
+            ws = None
+        ws = ws or get_current_workspace()
+
+        # Always attach workspace to WS payloads so the frontend can safely ignore
+        # cross-workspace events (and so we can debug routing issues).
+        payload = message
+        try:
+            if isinstance(message, dict) and "workspace" not in message:
+                payload = {**message, "workspace": ws}
+        except Exception:
+            payload = message
+
+        key = self._key(user_id, ws)
         if key in self.active_connections:
             disconnected = set()
             for websocket in self.active_connections[key].copy():
                 try:
-                    await websocket.send_json(message)
+                    await websocket.send_json(payload)
                 except:
                     disconnected.add(websocket)
             
@@ -1401,7 +1436,7 @@ class ConnectionManager:
                 self.disconnect(ws)
         else:
             # Queue message for offline user
-            self.message_queue[key].append(message)
+            self.message_queue[key].append(payload)
             if len(self.message_queue[key]) > 100:
                 self.message_queue[key] = self.message_queue[key][-50:]
 
@@ -1433,7 +1468,7 @@ class ConnectionManager:
         except Exception as exc:
             _vlog(f"WS publish error: {exc}")
     
-    async def broadcast_to_admins(self, message: dict, exclude_user: str = None):
+    async def broadcast_to_admins(self, message: dict, exclude_user: str = None, workspace: str | None = None):
         """Broadcast message to inbox listeners.
 
         Historically this looked up "admin users" from the DB (users.is_admin=1) and sent to those user_ids.
@@ -1445,7 +1480,7 @@ class ConnectionManager:
         # Always send to the shared inbox channel where all agents connect (/ws/admin).
         try:
             if exclude_user != "admin":
-                await self.send_to_user("admin", message)
+                await self.send_to_user("admin", message, workspace=workspace)
         except Exception:
             pass
 
@@ -1458,7 +1493,7 @@ class ConnectionManager:
             if admin_id in (exclude_user, "admin"):
                 continue
             try:
-                await self.send_to_user(admin_id, message)
+                await self.send_to_user(admin_id, message, workspace=workspace)
             except Exception:
                 pass
     
@@ -2336,6 +2371,9 @@ class DatabaseManager:
         self._pool_lock = asyncio.Lock()
         self._pool_failed_until: float = 0.0
         self._pool_last_error: Optional[BaseException] = None
+        # Schema init guard: avoids repeated init_db() calls per process.
+        self._schema_initialized: bool = False
+        self._schema_init_lock = asyncio.Lock()
         # In-memory cache for agent auth records (password_hash + is_admin). Speeds up login and
         # reduces impact of transient DB slowness. TTL is controlled by AGENT_AUTH_CACHE_TTL_SECONDS.
         self._agent_auth_cache: Dict[str, dict] = {}
@@ -2548,6 +2586,25 @@ class DatabaseManager:
 
     # ── schema ──
     async def init_db(self):
+        """Initialize/migrate DB schema (idempotent)."""
+        try:
+            if bool(self._schema_initialized):
+                return
+        except Exception:
+            pass
+        async with self._schema_init_lock:
+            try:
+                if bool(self._schema_initialized):
+                    return
+            except Exception:
+                pass
+            await self._init_db_impl()
+            try:
+                self._schema_initialized = True
+            except Exception:
+                pass
+
+    async def _init_db_impl(self):
         async with self._conn() as db:
             # IMPORTANT: keep schema compatible with both SQLite and Postgres (we transform a few tokens below).
             # We include a workspace column for shared-DB multi-workspace isolation.
@@ -3601,12 +3658,22 @@ class DatabaseManager:
             "series": series,
         }
 
-    async def upsert_conversation_meta(self, user_id: str, assigned_agent: Optional[str] = None, tags: Optional[List[str]] = None, avatar_url: Optional[str] = None):
+    _UNSET = object()
+
+    async def upsert_conversation_meta(
+        self,
+        user_id: str,
+        assigned_agent: Any = _UNSET,
+        tags: Any = _UNSET,
+        avatar_url: Any = _UNSET,
+    ):
         async with self._conn() as db:
             existing = await self.get_conversation_meta(user_id)
-            new_tags = tags if tags is not None else existing.get("tags")
-            new_assignee = assigned_agent if assigned_agent is not None else existing.get("assigned_agent")
-            new_avatar = avatar_url if avatar_url is not None else existing.get("avatar_url")
+            # IMPORTANT: allow explicitly setting NULL (e.g., unassign agent).
+            # We use _UNSET to mean "no change"; None is a valid explicit value.
+            new_tags = (existing.get("tags") if tags is self._UNSET else tags)
+            new_assignee = (existing.get("assigned_agent") if assigned_agent is self._UNSET else assigned_agent)
+            new_avatar = (existing.get("avatar_url") if avatar_url is self._UNSET else avatar_url)
 
             query = self._convert(
                 """
@@ -4849,7 +4916,15 @@ class WorkspaceDatabaseRouter:
 
     @asynccontextmanager
     async def _conn(self):
-        async with self._mgr()._conn() as db:
+        m = self._mgr()
+        # Ensure schema is initialized for lazily created tenant DB managers.
+        # This prevents runtime errors like: column "workspace" does not exist
+        try:
+            await asyncio.wait_for(m.init_db(), timeout=60.0)
+        except Exception:
+            # Best-effort: callers still handle DB errors.
+            pass
+        async with m._conn() as db:
             yield db
 
     def __getattr__(self, name: str):
@@ -5241,6 +5316,7 @@ class MessageProcessor:
         optimistic_message = {
             "id": temp_id,
             "user_id": user_id,
+            "workspace": get_current_workspace(),
             "message": message_text,
             "type": message_type,
             "from_me": True,
@@ -6496,6 +6572,7 @@ class MessageProcessor:
                 bubble = {
                     "id": wa_message_id,
                     "user_id": sender,
+                    "workspace": get_current_workspace(),
                     "type": "reaction",
                     "from_me": False,
                     "status": "received",
@@ -6518,6 +6595,7 @@ class MessageProcessor:
         message_obj = {
             "id": wa_message_id,
             "user_id": sender,
+            "workspace": get_current_workspace(),
             "type": msg_type,
             "from_me": False,
             "status": "received",
@@ -9369,6 +9447,7 @@ webhook_runtime = WebhookRuntime(
     verify_token=VERIFY_TOKEN,
     verify_tokens=RUNTIME_WEBHOOK_VERIFY_TOKENS,
     meta_app_secret=META_APP_SECRET,
+    meta_app_secrets=list(META_APP_SECRETS or []),
     # Do NOT block ingress by a static env allowlist; routing is enforced later per-workspace.
     allowed_phone_number_ids=set(),
     # Use runtime mapping (DB-driven) so new workspace phone ids work without redeploy.
@@ -14306,6 +14385,17 @@ async def assign_conversation(user_id: str, payload: dict = Body(...), actor: di
         if target_agent == "":
             target_agent = None
     await db_manager.set_conversation_assignment(user_id, target_agent)
+    # Realtime update for chat list UIs (keeps all agents in sync without refresh).
+    try:
+        await connection_manager.broadcast_to_admins(
+            {
+                "type": "conversation_assignment_updated",
+                "data": {"user_id": user_id, "assigned_agent": target_agent},
+            },
+            workspace=get_current_workspace(),
+        )
+    except Exception:
+        pass
     return {"ok": True, "user_id": user_id, "assigned_agent": target_agent}
 
 @app.post("/conversations/{user_id}/tags")
@@ -14320,6 +14410,17 @@ async def update_conversation_tags(user_id: str, payload: dict = Body(...), acto
         if assignee not in (None, actor.get("username")):
             raise HTTPException(status_code=403, detail="Forbidden")
     await db_manager.set_conversation_tags(user_id, tags)
+    # Realtime update for chat list UIs.
+    try:
+        await connection_manager.broadcast_to_admins(
+            {
+                "type": "conversation_tags_updated",
+                "data": {"user_id": user_id, "tags": tags},
+            },
+            workspace=get_current_workspace(),
+        )
+    except Exception:
+        pass
     return {"ok": True, "user_id": user_id, "tags": tags}
 
 @app.get("/health")

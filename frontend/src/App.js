@@ -40,6 +40,9 @@ export default function App() {
       return 'irranova';
     }
   });
+  // Workspace must be fail-closed in ALL async handlers (WS, custom events) to avoid cross-workspace bleed.
+  // Do NOT rely on React closure values during workspace switching.
+  const workspaceRef = useRef(workspace);
   const [products, setProducts] = useState([]);
   const [catalogProducts, setCatalogProducts] = useState({});
   const [conversations, setConversations] = useState([]);
@@ -68,6 +71,10 @@ export default function App() {
   const adminWsRef = useRef(null);
   const convPollRef = useRef(null);
   const adminPingRef = useRef(null);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
 
   useEffect(() => {
     activeUserRef.current = activeUser;
@@ -99,6 +106,13 @@ export default function App() {
     const handler = (ev) => {
       const d = ev.detail || {};
       if (!d.user_id) return;
+      // Never apply events from a different (or missing) workspace.
+      try {
+        const evWs = String(d.workspace || '').trim().toLowerCase();
+        const curWs = String(workspaceRef.current || '').trim().toLowerCase();
+        if (!evWs || !curWs) return;
+        if (evWs !== curWs) return;
+      } catch { return; }
       setConversations((prev) => {
         const list = Array.isArray(prev) ? [...prev] : [];
         const idx = list.findIndex((c) => c.user_id === d.user_id);
@@ -533,7 +547,7 @@ export default function App() {
           try {
             // Prefer top-level workspace; fall back to payload workspace (common for message_* events).
             const evWs = String(data.workspace || data?.data?.workspace || '').trim().toLowerCase();
-            const curWs = String(workspace || '').trim().toLowerCase();
+            const curWs = String(workspaceRef.current || '').trim().toLowerCase();
             // Fail-closed: if the event has no workspace, ignore it (prevents cross-workspace flashes).
             if (!evWs || !curWs) return;
             if (evWs !== curWs) return;
@@ -733,6 +747,13 @@ export default function App() {
             try {
               const w = String(next || 'irranova').trim().toLowerCase() || 'irranova';
               try { localStorage.setItem('workspace', w); } catch {}
+            // Immediately update ref + tear down sockets BEFORE state switch to prevent cross-workspace races.
+            workspaceRef.current = w;
+            try { if (adminWsRef.current) adminWsRef.current.close(); } catch {}
+            try { if (wsRef.current) wsRef.current.close(); } catch {}
+            try { if (adminPingRef.current) clearInterval(adminPingRef.current); } catch {}
+            adminPingRef.current = null;
+            setAdminWsConnected(false);
               // Reset view state so we don't show mixed data while switching
               setActiveUser(null);
               activeUserRef.current = null;

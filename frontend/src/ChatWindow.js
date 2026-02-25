@@ -587,7 +587,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
       const prev = lastPreviewRef.current || {};
       if (prev.user_id === uid && prev.time === time && prev.message === preview && prev.type === t && prev.from_me === fromMe && prev.status === status) return;
       lastPreviewRef.current = { user_id: uid, time, message: preview, type: t, from_me: fromMe, status };
-      window.dispatchEvent(new CustomEvent('conversation-preview', { detail: { user_id: uid, last_message: preview, last_message_type: t, last_message_time: time, last_message_from_me: fromMe, last_message_status: status } }));
+      window.dispatchEvent(new CustomEvent('conversation-preview', { detail: { user_id: uid, last_message: preview, last_message_type: t, last_message_time: time, last_message_from_me: fromMe, last_message_status: status, workspace } }));
     } catch {}
   }, [messages, activeUser?.user_id]);
 
@@ -817,6 +817,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
         last_message_time: messageObj.timestamp,
         last_message_from_me: true,
         last_message_status: messageObj.status,
+        workspace,
       }}));
     } catch {}
 
@@ -1680,6 +1681,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
                   last_message_time: messageObj.timestamp,
                   last_message_from_me: true,
                   last_message_status: 'sending',
+                  workspace,
                 }}));
               } catch {}
             } else {
@@ -1696,6 +1698,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
                   last_message_time: ts,
                   last_message_from_me: true,
                   last_message_status: 'sent',
+                  workspace,
                 }}));
               } catch {}
             }

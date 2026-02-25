@@ -5988,6 +5988,19 @@ class MessageProcessor:
                                     })
                                 except Exception:
                                     pass
+                                # Keep Redis recent_messages cache consistent so other agents can load playable URLs.
+                                # Without this, /messages/{user_id} may serve stale cached entries with local file paths.
+                                try:
+                                    cache_update = dict(message or {})
+                                    cache_update["workspace"] = cache_update.get("workspace") or get_current_workspace()
+                                    cache_update["temp_id"] = cache_update.get("temp_id") or temp_id
+                                    cache_update["id"] = cache_update.get("id") or temp_id
+                                    cache_update["url"] = gcs_url
+                                    if cache_update.get("type") in ("audio", "video", "image"):
+                                        cache_update["message"] = gcs_url
+                                    await self.redis_manager.cache_message(user_id, cache_update, workspace=cache_update.get("workspace"))
+                                except Exception:
+                                    pass
                                 try:
                                     await self.db_manager.upsert_message({
                                         "user_id": user_id,
@@ -6183,6 +6196,19 @@ class MessageProcessor:
                 pass
 
             await self.db_manager.save_message(message, wa_message_id, "sent")
+            # Also refresh Redis cache with the final record (including wa_message_id and status),
+            # so new agent sessions loading from cache see the same canonical message as DB.
+            try:
+                final_cached = dict(message or {})
+                final_cached["workspace"] = final_cached.get("workspace") or get_current_workspace()
+                final_cached["wa_message_id"] = wa_message_id
+                final_cached["status"] = "sent"
+                final_cached["temp_id"] = final_cached.get("temp_id") or temp_id
+                # Preserve optimistic id semantics so UIs that key off temp_id can reconcile.
+                final_cached["id"] = final_cached.get("id") or temp_id
+                await self.redis_manager.cache_message(user_id, final_cached, workspace=final_cached.get("workspace"))
+            except Exception:
+                pass
 
             # Optional: tag Shopify order after successful WhatsApp send (best-effort).
             try:
@@ -10614,7 +10640,49 @@ async def get_conversation_messages(user_id: str, offset: int = 0, limit: int = 
     if offset == 0:
         cached_messages = await redis_manager.get_recent_messages(user_id, limit)
         if cached_messages:
-            return {"messages": cached_messages, "source": "cache"}
+            # Normalize/dedupe cache and reject non-playable media URLs (e.g., server-local paths).
+            try:
+                def _coalesce_ts(m: dict) -> str:
+                    return str(m.get("server_ts") or m.get("timestamp") or "")
+                def _safe_http_url(raw: object) -> str:
+                    try:
+                        s = str(raw or "").strip()
+                        if s.startswith("http://") or s.startswith("https://"):
+                            return s
+                    except Exception:
+                        pass
+                    return ""
+                def _effective_media_url(m: dict) -> str:
+                    u = _safe_http_url(m.get("url"))
+                    if u:
+                        return u
+                    return _safe_http_url(m.get("message")) if isinstance(m.get("message"), str) else ""
+                def _cached_media_ok(m: dict) -> bool:
+                    t = str(m.get("type") or "").lower()
+                    if t not in ("audio", "image", "video"):
+                        return True
+                    if _effective_media_url(m):
+                        return True
+                    st = str(m.get("status") or "sending").strip().lower()
+                    return st in ("sending", "failed")
+                by_key: dict[str, dict] = {}
+                for m in [x for x in cached_messages if isinstance(x, dict)][::-1]:  # oldest -> newest
+                    k = (str(m.get("temp_id") or "").strip()
+                         or str(m.get("wa_message_id") or "").strip()
+                         or str(m.get("id") or "").strip())
+                    if not k:
+                        k = f"sig:{_coalesce_ts(m)}:{int(bool(m.get('from_me')))}:{str(m.get('type') or '')}:{str(m.get('message') or '')[:64]}"
+                    by_key[k] = m
+                normalized = list(by_key.values())
+                try:
+                    normalized.sort(key=lambda mm: _coalesce_ts(mm))
+                except Exception:
+                    pass
+                normalized = normalized[-max(1, min(limit, 200)):]
+                if normalized and all(_cached_media_ok(m) for m in normalized):
+                    return {"messages": normalized, "source": "cache"}
+            except Exception:
+                pass
     
     messages = await db_manager.get_messages(user_id, offset, limit)
     return {"messages": messages, "source": "database"}
@@ -15079,6 +15147,71 @@ async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, 
     - else: use legacy offset/limit window (ascending)
     """
     try:
+        def _coalesce_ts(m: dict) -> str:
+            try:
+                return str(m.get("server_ts") or m.get("timestamp") or "")
+            except Exception:
+                return ""
+
+        def _safe_http_url(raw: object) -> str:
+            try:
+                s = str(raw or "").strip()
+                if s.startswith("http://") or s.startswith("https://"):
+                    return s
+            except Exception:
+                pass
+            return ""
+
+        def _effective_media_url(m: dict) -> str:
+            # Prefer explicit url; fall back to message if it looks like an URL.
+            u = _safe_http_url(m.get("url"))
+            if u:
+                return u
+            return _safe_http_url(m.get("message")) if isinstance(m.get("message"), str) else ""
+
+        def _cached_media_is_playable(m: dict) -> bool:
+            try:
+                t = str(m.get("type") or "").lower()
+                if t not in ("audio", "image", "video"):
+                    return True
+                # If it's media, ensure we have an absolute http(s) URL once the message is finalized.
+                # For optimistic 'sending' bubbles, allow cache-through so agents still see the message immediately.
+                if _effective_media_url(m):
+                    return True
+                st = str(m.get("status") or "sending").strip().lower()
+                return st in ("sending", "failed")
+            except Exception:
+                return False
+
+        def _normalize_cached(cached: list[dict], max_items: int) -> list[dict]:
+            # De-dupe by a stable key, preferring newer cached entries.
+            # IMPORTANT: prefer temp_id so we can reconcile optimistic -> final without duplicates.
+            by_key: dict[str, dict] = {}
+            for m in (cached or [])[::-1]:  # oldest -> newest, so newest wins
+                if not isinstance(m, dict):
+                    continue
+                k = ""
+                try:
+                    k = str(m.get("temp_id") or "").strip() or str(m.get("wa_message_id") or "").strip() or str(m.get("id") or "").strip()
+                except Exception:
+                    k = ""
+                if not k:
+                    # fallback signature
+                    try:
+                        k = f"sig:{_coalesce_ts(m)}:{int(bool(m.get('from_me')))}:{str(m.get('type') or '')}:{str(m.get('message') or '')[:64]}"
+                    except Exception:
+                        k = f"sig:{len(by_key)}"
+                by_key[k] = m
+            out = list(by_key.values())
+            # Sort to chronological order like DB endpoints (oldest -> newest)
+            try:
+                out.sort(key=lambda mm: _coalesce_ts(mm))
+            except Exception:
+                pass
+            if max_items and len(out) > max_items:
+                out = out[-max_items:]
+            return out
+
         if since:
             return await asyncio.wait_for(
                 db_manager.get_messages_since(user_id, since, limit=max(1, min(limit, 500))),
@@ -15093,7 +15226,11 @@ async def get_messages_endpoint(user_id: str, offset: int = 0, limit: int = 50, 
         if offset == 0:
             cached_messages = await redis_manager.get_recent_messages(user_id, limit)
             if cached_messages:
-                return cached_messages
+                normalized = _normalize_cached([m for m in cached_messages if isinstance(m, dict)], max_items=max(1, min(limit, 200)))
+                # If cache contains non-playable media (e.g., server-local file paths), fall back to DB.
+                # This fixes cross-agent playback for voice notes where only the sender saw a blob URL.
+                if normalized and all(_cached_media_is_playable(m) for m in normalized):
+                    return normalized
         messages = await asyncio.wait_for(
             db_manager.get_messages(user_id, offset, limit),
             timeout=max(0.5, float(MESSAGES_DB_TIMEOUT_SECONDS)),

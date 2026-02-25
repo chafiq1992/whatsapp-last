@@ -531,9 +531,12 @@ export default function App() {
           // Hard guard: never apply WS events from a different workspace.
           // This prevents brief "flash" of cross-workspace messages during routing / reconnect edges.
           try {
-            const evWs = String(data.workspace || '').trim().toLowerCase();
+            // Prefer top-level workspace; fall back to payload workspace (common for message_* events).
+            const evWs = String(data.workspace || data?.data?.workspace || '').trim().toLowerCase();
             const curWs = String(workspace || '').trim().toLowerCase();
-            if (evWs && curWs && evWs !== curWs) return;
+            // Fail-closed: if the event has no workspace, ignore it (prevents cross-workspace flashes).
+            if (!evWs || !curWs) return;
+            if (evWs !== curWs) return;
           } catch {}
           if (data.type === "message_received") {
             const msg = data.data || {};

@@ -600,9 +600,10 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
         const data = JSON.parse(event.data);
         // Guard: ignore cross-workspace events
         try {
-          const evWs = String(data.workspace || '').trim().toLowerCase();
+          const evWs = String(data.workspace || data?.data?.workspace || '').trim().toLowerCase();
           const curWs = String(workspace || '').trim().toLowerCase();
-          if (evWs && curWs && evWs !== curWs) return;
+          if (!evWs || !curWs) return;
+          if (evWs !== curWs) return;
         } catch {}
         if (data.type === 'message_received' && data.data?.user_id === uid) {
           setMessages(prev => mergeAndDedupe(prev, [data.data]));

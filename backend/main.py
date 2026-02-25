@@ -801,6 +801,9 @@ AGENT_AUTH_CACHE_TTL_SECONDS = int(os.getenv("AGENT_AUTH_CACHE_TTL_SECONDS", "60
 # Agent auth cache in Redis (shared across instances). This is the robust path for Cloud Run:
 # even if Postgres is slow/unreachable during cold starts, agents can still login.
 AGENT_AUTH_REDIS_TTL_SECONDS = int(os.getenv("AGENT_AUTH_REDIS_TTL_SECONDS", str(7 * 24 * 3600)))  # 7 days
+
+# Conversation meta expiry (assignment + tags)
+CONVERSATION_META_EXPIRE_DAYS = int(os.getenv("CONVERSATION_META_EXPIRE_DAYS", "3") or "3")
 # For login, use a shorter DB timeout and fall back to Redis cache. Prevents 15s hangs.
 AUTH_LOGIN_DB_TIMEOUT_SECONDS = float(os.getenv("AUTH_LOGIN_DB_TIMEOUT_SECONDS", "6"))
 
@@ -1634,7 +1637,16 @@ class RedisManager:
             return
         
         try:
-            ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+            # Prefer explicit arg; otherwise derive from the message payload (more robust in async tasks).
+            ws = None
+            try:
+                if workspace:
+                    ws = _coerce_workspace(workspace)
+                elif isinstance(message, dict) and message.get("workspace"):
+                    ws = _coerce_workspace(str(message.get("workspace")))
+            except Exception:
+                ws = None
+            ws = ws or get_current_workspace()
             key = f"recent_messages:{ws}:{user_id}"
             # Reduce billed Redis commands: do LPUSH+LTRIM+EXPIRE in a single EVAL.
             # Many managed Redis providers count EVAL as 1 command (instead of 3).
@@ -1670,7 +1682,19 @@ class RedisManager:
         if not self.redis_client:
             return
         try:
-            ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+            # Prefer explicit arg; otherwise derive from message/workspace hints for correctness even when
+            # the current ContextVar workspace is stale (common in background tasks).
+            ws = None
+            try:
+                if workspace:
+                    ws = _coerce_workspace(workspace)
+                elif isinstance(message, dict) and message.get("workspace"):
+                    ws = _coerce_workspace(str(message.get("workspace")))
+                elif isinstance(message, dict) and isinstance(message.get("data"), dict) and message["data"].get("workspace"):
+                    ws = _coerce_workspace(str(message["data"].get("workspace")))
+            except Exception:
+                ws = None
+            ws = ws or get_current_workspace()
             payload = json.dumps({"workspace": ws, "user_id": user_id, "message": message})
             await self.redis_client.publish("ws_events", payload)
         except Exception as exc:
@@ -2719,7 +2743,9 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS conversation_meta (
                     user_id        TEXT PRIMARY KEY,
                     assigned_agent TEXT REFERENCES agents(username),
+                    assigned_agent_updated_at TEXT,
                     tags           TEXT, -- JSON array of strings
+                    tags_updated_at TEXT,
                     avatar_url     TEXT,
                     -- attribution fields (e.g. website WhatsApp icon)
                     source         TEXT,
@@ -2927,15 +2953,22 @@ class DatabaseManager:
             await self._add_column_if_missing(db, "conversation_meta", "source", "TEXT")
             await self._add_column_if_missing(db, "conversation_meta", "click_id", "TEXT")
             await self._add_column_if_missing(db, "conversation_meta", "source_first_inbound_ts", "TEXT")
+            # Expiry support for assignment/tags (3-day TTL)
+            await self._add_column_if_missing(db, "conversation_meta", "assigned_agent_updated_at", "TEXT")
+            await self._add_column_if_missing(db, "conversation_meta", "tags_updated_at", "TEXT")
             try:
                 # Indexes (idempotent)
                 if self.use_postgres:
                     await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_source_ts ON conversation_meta (source, source_first_inbound_ts)")
                     await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_click_id ON conversation_meta (click_id)")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_assigned_ts ON conversation_meta (assigned_agent, assigned_agent_updated_at)")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_tags_ts ON conversation_meta (tags_updated_at)")
                     await db.execute("CREATE INDEX IF NOT EXISTS idx_whatsapp_clicks_ts ON whatsapp_clicks (ts)")
                 else:
                     await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_source_ts ON conversation_meta (source, source_first_inbound_ts)")
                     await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_click_id ON conversation_meta (click_id)")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_assigned_ts ON conversation_meta (assigned_agent, datetime(assigned_agent_updated_at))")
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_conv_tags_ts ON conversation_meta (datetime(tags_updated_at))")
                     await db.execute("CREATE INDEX IF NOT EXISTS idx_whatsapp_clicks_ts ON whatsapp_clicks (ts)")
                     await db.commit()
             except Exception:
@@ -3348,7 +3381,7 @@ class DatabaseManager:
     async def get_conversation_meta(self, user_id: str) -> dict:
         async with self._conn() as db:
             query = self._convert(
-                "SELECT assigned_agent, tags, avatar_url, source, click_id, source_first_inbound_ts "
+                "SELECT assigned_agent, assigned_agent_updated_at, tags, tags_updated_at, avatar_url, source, click_id, source_first_inbound_ts "
                 "FROM conversation_meta WHERE user_id = ?"
             )
             params = (user_id,)
@@ -3365,6 +3398,31 @@ class DatabaseManager:
                     d["tags"] = json.loads(d["tags"]) if d["tags"] else []
             except Exception:
                 d["tags"] = []
+
+            # Expire tags/assignment after N days (default 3).
+            try:
+                cutoff = datetime.utcnow() - timedelta(days=max(0, int(CONVERSATION_META_EXPIRE_DAYS or 3)))
+
+                def _parse_iso(x: Any) -> Optional[datetime]:
+                    try:
+                        s = str(x or "").strip()
+                        if not s:
+                            return None
+                        # Accept "Z" suffix
+                        if s.endswith("Z"):
+                            s = s[:-1]
+                        return datetime.fromisoformat(s)
+                    except Exception:
+                        return None
+
+                a_ts = _parse_iso(d.get("assigned_agent_updated_at"))
+                if a_ts and a_ts < cutoff:
+                    d["assigned_agent"] = None
+                t_ts = _parse_iso(d.get("tags_updated_at"))
+                if t_ts and t_ts < cutoff:
+                    d["tags"] = []
+            except Exception:
+                pass
             return d
 
     async def log_whatsapp_click(
@@ -3674,18 +3732,31 @@ class DatabaseManager:
             new_tags = (existing.get("tags") if tags is self._UNSET else tags)
             new_assignee = (existing.get("assigned_agent") if assigned_agent is self._UNSET else assigned_agent)
             new_avatar = (existing.get("avatar_url") if avatar_url is self._UNSET else avatar_url)
+            # Track update timestamps so the UI can expire tags/assignment after N days.
+            now_iso = datetime.utcnow().isoformat()
+            new_assignee_ts = (existing.get("assigned_agent_updated_at") if assigned_agent is self._UNSET else now_iso)
+            new_tags_ts = (existing.get("tags_updated_at") if tags is self._UNSET else now_iso)
 
             query = self._convert(
                 """
-                INSERT INTO conversation_meta (user_id, assigned_agent, tags, avatar_url)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO conversation_meta (user_id, assigned_agent, assigned_agent_updated_at, tags, tags_updated_at, avatar_url)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     assigned_agent=EXCLUDED.assigned_agent,
+                    assigned_agent_updated_at=EXCLUDED.assigned_agent_updated_at,
                     tags=EXCLUDED.tags,
+                    tags_updated_at=EXCLUDED.tags_updated_at,
                     avatar_url=EXCLUDED.avatar_url
                 """
             )
-            params = (user_id, new_assignee, json.dumps(new_tags) if isinstance(new_tags, list) else new_tags, new_avatar)
+            params = (
+                user_id,
+                new_assignee,
+                new_assignee_ts,
+                json.dumps(new_tags) if isinstance(new_tags, list) else new_tags,
+                new_tags_ts,
+                new_avatar,
+            )
             if self.use_postgres:
                 await db.execute(query, *params)
             else:
@@ -4264,7 +4335,9 @@ class DatabaseManager:
                       COALESCE(c.unread_count, 0) AS unread_count,
                       COALESCE(ur.unresponded_count, 0) AS unresponded_count,
                       cm.assigned_agent,
+                      cm.assigned_agent_updated_at,
                       cm.tags,
+                      cm.tags_updated_at,
                       cm.avatar_url AS avatar
                     FROM page p
                     LEFT JOIN users u ON u.user_id = p.user_id
@@ -4298,6 +4371,29 @@ class DatabaseManager:
                         "assigned_agent": r["assigned_agent"],
                         "tags": tags_list,
                     }
+                    # Expire assignment/tags after N days (default 3) before filtering.
+                    try:
+                        cutoff = datetime.utcnow() - timedelta(days=max(0, int(CONVERSATION_META_EXPIRE_DAYS or 3)))
+
+                        def _parse_iso(x: Any) -> Optional[datetime]:
+                            try:
+                                s = str(x or "").strip()
+                                if not s:
+                                    return None
+                                if s.endswith("Z"):
+                                    s = s[:-1]
+                                return datetime.fromisoformat(s)
+                            except Exception:
+                                return None
+
+                        a_ts = _parse_iso(r["assigned_agent_updated_at"] if "assigned_agent_updated_at" in r else None)
+                        if a_ts and a_ts < cutoff:
+                            conv["assigned_agent"] = None
+                        t_ts = _parse_iso(r["tags_updated_at"] if "tags_updated_at" in r else None)
+                        if t_ts and t_ts < cutoff:
+                            conv["tags"] = []
+                    except Exception:
+                        pass
                     # Apply light in-memory filters
                     if q:
                         # IMPORTANT: match against both name and user_id/phone so searching by number works
@@ -14385,18 +14481,32 @@ async def assign_conversation(user_id: str, payload: dict = Body(...), actor: di
         if target_agent == "":
             target_agent = None
     await db_manager.set_conversation_assignment(user_id, target_agent)
+    meta = {}
+    try:
+        meta = await db_manager.get_conversation_meta(user_id)
+    except Exception:
+        meta = {}
     # Realtime update for chat list UIs (keeps all agents in sync without refresh).
     try:
         await connection_manager.broadcast_to_admins(
             {
                 "type": "conversation_assignment_updated",
-                "data": {"user_id": user_id, "assigned_agent": target_agent},
+                "data": {
+                    "user_id": user_id,
+                    "assigned_agent": target_agent,
+                    "assigned_agent_updated_at": meta.get("assigned_agent_updated_at"),
+                },
             },
             workspace=get_current_workspace(),
         )
     except Exception:
         pass
-    return {"ok": True, "user_id": user_id, "assigned_agent": target_agent}
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "assigned_agent": target_agent,
+        "assigned_agent_updated_at": meta.get("assigned_agent_updated_at"),
+    }
 
 @app.post("/conversations/{user_id}/tags")
 async def update_conversation_tags(user_id: str, payload: dict = Body(...), actor: dict = Depends(get_current_agent)):
@@ -14410,18 +14520,23 @@ async def update_conversation_tags(user_id: str, payload: dict = Body(...), acto
         if assignee not in (None, actor.get("username")):
             raise HTTPException(status_code=403, detail="Forbidden")
     await db_manager.set_conversation_tags(user_id, tags)
+    meta = {}
+    try:
+        meta = await db_manager.get_conversation_meta(user_id)
+    except Exception:
+        meta = {}
     # Realtime update for chat list UIs.
     try:
         await connection_manager.broadcast_to_admins(
             {
                 "type": "conversation_tags_updated",
-                "data": {"user_id": user_id, "tags": tags},
+                "data": {"user_id": user_id, "tags": tags, "tags_updated_at": meta.get("tags_updated_at")},
             },
             workspace=get_current_workspace(),
         )
     except Exception:
         pass
-    return {"ok": True, "user_id": user_id, "tags": tags}
+    return {"ok": True, "user_id": user_id, "tags": tags, "tags_updated_at": meta.get("tags_updated_at")}
 
 @app.get("/health")
 async def health_check():

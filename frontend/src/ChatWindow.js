@@ -138,7 +138,9 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     const byKey = new Map();
     const stableKey = (m) => {
       if (!m) return '';
-      const primary = m.wa_message_id ?? m.id ?? m.temp_id;
+      // IMPORTANT: prefer temp_id first so optimistic bubbles merge with their finalized DB rows.
+      // Otherwise we'd end up with duplicates: one keyed by temp_id (optimistic) and one by wa_message_id (final).
+      const primary = m.temp_id ?? m.wa_message_id ?? m.id;
       if (primary !== undefined && primary !== null && String(primary).trim() !== '') {
         return String(primary);
       }
@@ -377,7 +379,8 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     if (!row) return `row_${indexFallback}`;
     if (row.__separator) return row.key;
     // Never depend on Virtuoso's index (which can be shifted by firstItemIndex) for identity.
-    return String(row.wa_message_id || row.id || row.temp_id || row.client_ts || row.timestamp || `row_${indexFallback}`);
+    // Prefer temp_id first so optimistic bubbles and their final rows don't render as separate items.
+    return String(row.temp_id || row.wa_message_id || row.id || row.client_ts || row.timestamp || `row_${indexFallback}`);
   }, []);
 
   // Helpers for current user's pendingImages queue state
@@ -712,7 +715,8 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
         const byKey = new Set();
         const stableKey = (m) => {
           if (!m) return '';
-          const primary = m.wa_message_id ?? m.id ?? m.temp_id;
+          // Prefer temp_id first so optimistic bubbles de-dupe against finalized DB rows.
+          const primary = m.temp_id ?? m.wa_message_id ?? m.id;
           if (primary !== undefined && primary !== null && String(primary).trim() !== '') return String(primary);
           const ts = m.server_ts || m.timestamp || '';
           const msg = (typeof m.message === 'string' ? m.message : (m.caption || ''));

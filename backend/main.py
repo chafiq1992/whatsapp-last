@@ -6090,6 +6090,9 @@ class MessageProcessor:
                                         "temp_id": temp_id,
                                         "url": gcs_url,
                                         "message": gcs_url if message.get("type") in ("audio", "video", "image") else None,
+                                        # Bump server_ts so /messages/{user_id}?since=... can pick up URL-only upgrades
+                                        # after a chat switch (when the WS event may have been missed).
+                                        "server_ts": datetime.now(timezone.utc).isoformat(),
                                     })
                                 except Exception:
                                     pass
@@ -6271,6 +6274,8 @@ class MessageProcessor:
                                         "temp_id": temp_id,
                                         "url": fallback_url,
                                         "message": fallback_url,
+                                        # Ensure cursor-based history refresh can see this late URL recovery update.
+                                        "server_ts": datetime.now(timezone.utc).isoformat(),
                                     }
                                 )
                             except Exception:

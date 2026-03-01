@@ -219,6 +219,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
 
   // Effective audio URL used for playback
   const audioUrl = useMemo(() => (isAudio ? (effectiveAudioUrl || primaryUrl) : ""), [isAudio, effectiveAudioUrl, primaryUrl]);
+  const audioPending = isAudio && !audioUrl && String(msg?.status || "").toLowerCase() !== "failed";
 
   // Enhanced media type detection
   const isGroupedImages = Array.isArray(msg.message) &&
@@ -687,13 +688,13 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
           disabled={!audioUrl}
           className={`mr-2 rounded-full w-8 h-8 flex items-center justify-center focus:outline-none transition-colors ${
             !audioUrl
-              ? 'bg-red-500 cursor-not-allowed'
+              ? (audioPending ? 'bg-gray-500 cursor-not-allowed' : 'bg-red-500 cursor-not-allowed')
               : 'bg-gray-600 hover:bg-gray-500'
           }`}
           aria-label={isThisActive && isPlaying ? "Pause audio" : "Play audio"}
         >
           {!audioUrl ? (
-            <span className="text-xs">✖</span>
+            audioPending ? <Clock3 size={14} className="text-white" /> : <span className="text-xs">✖</span>
           ) : (isThisActive && isPlaying) ? (
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
               <rect x="3" y="2" width="3" height="12" />

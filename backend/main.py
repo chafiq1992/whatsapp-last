@@ -1677,6 +1677,88 @@ class RedisManager:
             print(f"Redis get error: {e}")
             return []
 
+    async def patch_recent_message_status(
+        self,
+        user_id: str,
+        *,
+        wa_message_id: str | None = None,
+        temp_id: str | None = None,
+        status: str | None = None,
+        status_error: str | None = None,
+        timestamp: str | None = None,
+        workspace: str | None = None,
+    ) -> bool:
+        """Patch status fields on matching cached message(s) in recent_messages list.
+
+        This keeps Redis cache consistent with DB/webhook updates so reopening a chat
+        does not resurrect stale 'sending/sent' statuses from cache.
+        """
+        if not self.redis_client:
+            return False
+        try:
+            ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
+            key = f"recent_messages:{ws}:{user_id}"
+            raw_items = await self.redis_client.lrange(key, 0, 199)
+            if not raw_items:
+                return False
+
+            changed = False
+            patched: list[str] = []
+            wanted_wa = str(wa_message_id or "").strip()
+            wanted_temp = str(temp_id or "").strip()
+            wanted_status = str(status or "").strip().lower()
+
+            for raw in raw_items:
+                try:
+                    s = raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    msg = json.loads(s) if isinstance(s, str) else {}
+                    if not isinstance(msg, dict):
+                        patched.append(s)
+                        continue
+                except Exception:
+                    patched.append(raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else str(raw))
+                    continue
+
+                msg_wa = str(msg.get("wa_message_id") or "").strip()
+                msg_temp = str(msg.get("temp_id") or "").strip()
+                matches = (wanted_wa and msg_wa == wanted_wa) or (wanted_temp and msg_temp == wanted_temp)
+                if matches:
+                    # Fill canonical WA id once known.
+                    if wanted_wa and not msg_wa:
+                        msg["wa_message_id"] = wanted_wa
+                    # Never downgrade cache status if updates arrive out-of-order.
+                    if wanted_status:
+                        current_status = str(msg.get("status") or "").strip().lower()
+                        if _STATUS_RANK.get(wanted_status, 0) >= _STATUS_RANK.get(current_status, 0):
+                            msg["status"] = wanted_status
+                            if wanted_status == "failed":
+                                if status_error:
+                                    msg["status_error"] = status_error
+                            else:
+                                msg["status_error"] = None
+                    if timestamp:
+                        msg["timestamp"] = timestamp
+                    changed = True
+                patched.append(json.dumps(msg, ensure_ascii=False))
+
+            if not changed:
+                return False
+
+            # Preserve order (newest -> oldest) while replacing payloads in-place.
+            ttl = await self.redis_client.ttl(key)
+            pipe = self.redis_client.pipeline()
+            pipe.delete(key)
+            pipe.rpush(key, *patched)
+            if int(ttl or -1) > 0:
+                pipe.expire(key, int(ttl))
+            else:
+                pipe.expire(key, 3600)
+            await pipe.execute()
+            return True
+        except Exception as e:
+            print(f"Redis patch status error: {e}")
+            return False
+
     async def publish_ws_event(self, user_id: str, message: dict, workspace: str | None = None):
         """Publish a WebSocket event so other instances can deliver it."""
         if not self.redis_client:
@@ -6613,6 +6695,19 @@ class MessageProcessor:
                     "timestamp": timestamp,
                 }
             })
+            # Keep Redis recent cache in sync with DB/live WS updates.
+            try:
+                await self.redis_manager.patch_recent_message_status(
+                    user_id,
+                    wa_message_id=wa_id,
+                    temp_id=temp_id,
+                    status=status,
+                    status_error=status_error,
+                    timestamp=timestamp,
+                    workspace=get_current_workspace(),
+                )
+            except Exception:
+                pass
 
 
     async def _handle_incoming_message(self, message: dict):

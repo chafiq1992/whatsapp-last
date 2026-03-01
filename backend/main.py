@@ -5796,6 +5796,7 @@ class MessageProcessor:
         """Background task to send message to WhatsApp and update status"""
         temp_id = message["temp_id"]
         user_id = message["user_id"]
+        media_id_for_fallback: Optional[str] = None
         # Internal channels: user_id starting with "team:", "agent:", or "dm:" are NOT sent to WhatsApp
         if isinstance(user_id, str) and (
             user_id.startswith("team:") or user_id.startswith("agent:") or user_id.startswith("dm:")
@@ -6099,6 +6100,7 @@ class MessageProcessor:
                         media_info = await self._upload_media_to_whatsapp(media_path, message["type"])
                         # Backward-compatible: allow helper to return either dict({"id": ...}) or raw media id string
                         media_id = media_info.get("id") if isinstance(media_info, dict) else media_info
+                        media_id_for_fallback = str(media_id or "").strip() or None
                         mime_type = (media_info.get("mime_type") if isinstance(media_info, dict) else "") or ""
                         if message["type"] == "audio":
                             # Small settle delay after upload to avoid iOS fetching race
@@ -6185,6 +6187,7 @@ class MessageProcessor:
 
                             media_info = await self._upload_media_to_whatsapp(str(local_tmp_path), message["type"])
                             media_id = media_info.get("id") if isinstance(media_info, dict) else media_info
+                            media_id_for_fallback = str(media_id or "").strip() or None
                             mime_type = (media_info.get("mime_type") if isinstance(media_info, dict) else "") or ""
                             if message["type"] == "audio":
                                 await asyncio.sleep(0.5)
@@ -6234,6 +6237,61 @@ class MessageProcessor:
             
             if not wa_message_id:
                 raise Exception(f"No message ID in WhatsApp response: {wa_response}")
+
+            # Recovery path: if media URL is non-playable, rebuild one from Graph media and persist it.
+            try:
+                media_type_lc = str(message.get("type") or "").lower()
+                is_media = media_type_lc in ("audio", "image", "video")
+                raw_url = str(message.get("url") or "").strip()
+                has_playable_url = raw_url.startswith("http://") or raw_url.startswith("https://")
+                if is_media and (not has_playable_url) and media_id_for_fallback:
+                    media_bytes, media_mime = await self.whatsapp_messenger.download_media(media_id_for_fallback)
+                    ext = (mimetypes.guess_extension(media_mime or "") or "").strip()
+                    if not ext:
+                        ext = ".ogg" if media_type_lc == "audio" else (".jpg" if media_type_lc == "image" else ".mp4")
+                    fallback_path = self.media_dir / f"fallback_{media_type_lc}_{uuid.uuid4().hex[:10]}{ext}"
+                    try:
+                        async with aiofiles.open(fallback_path, "wb") as f:
+                            await f.write(media_bytes)
+                        fallback_url = await upload_file_to_gcs(str(fallback_path), content_type=(media_mime or None))
+                        if fallback_url:
+                            message["url"] = fallback_url
+                            message["message"] = fallback_url
+                            try:
+                                await self.connection_manager.send_to_user(
+                                    user_id,
+                                    {"type": "message_status_update", "data": {"temp_id": temp_id, "url": fallback_url}},
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                await self.db_manager.upsert_message(
+                                    {
+                                        "user_id": user_id,
+                                        "temp_id": temp_id,
+                                        "url": fallback_url,
+                                        "message": fallback_url,
+                                    }
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                cache_update = dict(message or {})
+                                cache_update["workspace"] = cache_update.get("workspace") or get_current_workspace()
+                                cache_update["temp_id"] = cache_update.get("temp_id") or temp_id
+                                cache_update["id"] = cache_update.get("id") or temp_id
+                                await self.redis_manager.cache_message(
+                                    user_id, cache_update, workspace=cache_update.get("workspace")
+                                )
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            fallback_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+            except Exception as _recover_exc:
+                print(f"Media URL recovery skipped: {_recover_exc}")
             
             # Update message status to 'sent'
             status_update = {

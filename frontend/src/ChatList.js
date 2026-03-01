@@ -103,6 +103,8 @@ function ChatList({
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
   // Settings modal moved to header; no local settings state here
   const [needsReplyOnly, setNeedsReplyOnly] = useState(false);
+  const [showUnread24hOnly, setShowUnread24hOnly] = useState(false);
+  const [showNeedsReply24hOnly, setShowNeedsReply24hOnly] = useState(false);
   const activeUserRef = useRef(activeUser);
   const containerRef = useRef(null);
   const [listHeight, setListHeight] = useState(0);
@@ -194,6 +196,8 @@ function ChatList({
       if (assignedFilter && assignedFilter !== 'all') params.set('assigned', assignedFilter);
       if (tagFilters.length) params.set('tags', tagFilters.join(','));
       if (needsReplyOnly) params.set('unresponded_only', 'true');
+      if (showUnread24hOnly) params.set('unread_24h_only', 'true');
+      if (showNeedsReply24hOnly) params.set('unresponded_24h_only', 'true');
       if (showArchive) params.set('archived', '1');
       (async () => {
         try {
@@ -248,7 +252,7 @@ function ChatList({
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
     searchDebounceRef.current = setTimeout(run, 350);
     return () => { clearTimeout(searchDebounceRef.current); controller.abort(); };
-  }, [search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showArchive]);
+  }, [search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showUnread24hOnly, showNeedsReply24hOnly, showArchive]);
 
   const isUsingServerFilters = useMemo(() => {
     const qTrim = String(search || '').trim();
@@ -262,6 +266,7 @@ function ChatList({
   /* ─── Derived data (memoised) ─── */
   const filteredConversations = useMemo(() => {
     const list = Array.isArray(conversations) ? conversations : [];
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
     const filtered = list.filter((c) => {
       // Hide internal team and DM conversations from the chat list
       const uid = String(c.user_id || '');
@@ -277,13 +282,35 @@ function ChatList({
         c.assigned_agent === assignedFilter;
       const tagsOK = tagFilters.length === 0 || (c.tags || []).some(t => tagFilters.includes(t));
       const needsReplyOK = !needsReplyOnly || (c.unresponded_count || 0) > 0;
+      const tsMs = toMsNormalized(c.last_message_time);
+      const within24h = tsMs > 0 && tsMs >= cutoffMs;
+      const unread24hOK = !showUnread24hOnly || (within24h && (c.unread_count || 0) > 0);
+      const unresponded24hOK = !showNeedsReply24hOnly || (within24h && (c.unresponded_count || 0) > 0);
       const isDone = (c.tags || []).some(t => String(t || '').toLowerCase() === 'done');
       const archiveOK = showArchive ? isDone : !isDone;
-      return matches && unreadOK && assignedOK && tagsOK && needsReplyOK && archiveOK;
+      return matches && unreadOK && assignedOK && tagsOK && needsReplyOK && unread24hOK && unresponded24hOK && archiveOK;
     });
     // Sort by most recent activity (desc), using normalized parsing
     return filtered.sort((a, b) => toMsNormalized(b.last_message_time) - toMsNormalized(a.last_message_time));
-  }, [conversations, search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showArchive]);
+  }, [conversations, search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showUnread24hOnly, showNeedsReply24hOnly, showArchive]);
+
+  const inbox24hStats = useMemo(() => {
+    const list = Array.isArray(conversations) ? conversations : [];
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+    let unread24hTotal = 0;
+    let unresponded24hTotal = 0;
+    for (const c of list) {
+      const uid = String(c?.user_id || '');
+      if (!uid || uid.startsWith('dm:') || uid.startsWith('team:')) continue;
+      const isDone = (c?.tags || []).some(t => String(t || '').toLowerCase() === 'done');
+      if (showArchive ? !isDone : isDone) continue;
+      const tsMs = toMsNormalized(c?.last_message_time);
+      if (!(tsMs > 0 && tsMs >= cutoffMs)) continue;
+      unread24hTotal += Number(c?.unread_count || 0);
+      unresponded24hTotal += Number(c?.unresponded_count || 0);
+    }
+    return { unread24hTotal, unresponded24hTotal };
+  }, [conversations, showArchive]);
 
 
   /* ─── Helpers ─── */
@@ -506,6 +533,32 @@ function ChatList({
               </div>
             )}
           </div>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            className={`px-2 py-1 rounded-full text-xs border ${
+              showUnread24hOnly
+                ? 'bg-green-600 text-white border-green-500'
+                : 'bg-green-900/30 text-green-300 border-green-700 hover:bg-green-800/40'
+            }`}
+            onClick={() => setShowUnread24hOnly(v => !v)}
+            title="Filter unread in last 24 hours"
+          >
+            Unread 24h: {inbox24hStats.unread24hTotal}
+          </button>
+          <button
+            type="button"
+            className={`px-2 py-1 rounded-full text-xs border ${
+              showNeedsReply24hOnly
+                ? 'bg-yellow-500 text-black border-yellow-400'
+                : 'bg-yellow-900/30 text-yellow-300 border-yellow-700 hover:bg-yellow-800/40'
+            }`}
+            onClick={() => setShowNeedsReply24hOnly(v => !v)}
+            title="Filter unanswered in last 24 hours"
+          >
+            Unanswered 24h: {inbox24hStats.unresponded24hTotal}
+          </button>
         </div>
         {tagFilters.length > 0 && (
           <div className="mt-2 flex gap-2 flex-wrap">

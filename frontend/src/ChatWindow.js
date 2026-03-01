@@ -875,12 +875,17 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
       const first = Array.isArray(res?.data?.messages) ? res.data.messages[0] : null;
       const serverUrl = (first && (first.media_url || first.result?.url)) || res?.data?.url || res?.data?.file_path;
       const waId = first?.result?.wa_message_id || res?.data?.wa_message_id;
+      const hasDurableUrl = typeof serverUrl === 'string' && /^https?:\/\//i.test(serverUrl);
       setMessages(prev => prev.map(m => m.temp_id === temp_id ? (() => {
+        // send-media-async returns "accepted" immediately; keep blob + status until server confirms durable URL/WA id.
+        const canMarkSent = Boolean(hasDurableUrl || waId);
         const isDowngrade = m.status && (STATUS_RANK[m.status] ?? -1) > (STATUS_RANK['sent'] ?? -1);
         const base = { ...m, ...(waId ? { id: waId } : {}), ...(serverUrl ? { url: serverUrl } : {}) };
+        if (!canMarkSent) return base;
         return isDowngrade ? base : { ...base, status: 'sent' };
       })() : m));
-      try { if (optimistic.url && optimistic.url.startsWith('blob:')) URL.revokeObjectURL(optimistic.url); } catch {}
+      // Never revoke early: switching chats remounts from cached state and still needs this blob until backend URL arrives.
+      try { if (hasDurableUrl && optimistic.url && optimistic.url.startsWith('blob:')) URL.revokeObjectURL(optimistic.url); } catch {}
     };
     try {
       try {
@@ -892,6 +897,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     } catch (err) {
       console.error("Audio upload error:", err);
       setMessages(prev => prev.map(m => m.temp_id === temp_id ? { ...m, status: 'failed' } : m));
+      try { if (optimistic.url && optimistic.url.startsWith('blob:')) URL.revokeObjectURL(optimistic.url); } catch {}
       alert("Audio upload failed");
     }
   };

@@ -264,6 +264,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
   const [allowSmoothScroll, setAllowSmoothScroll] = useState(false);
   const hasInitialisedScrollRef = useRef(false);
   const justOpenedRef = useRef(false);
+  const lastPendingAudioRefreshRef = useRef(0);
   const lastVisibleStartIndexRef = useRef(0);
   // Virtuoso requirement: firstItemIndex should be a positive number (use a large base).
   // See react-virtuoso warning: "firstItemIndex prop should not be set to less than zero".
@@ -1033,6 +1034,35 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     if (!activeUser?.user_id) return;
     saveMessages(activeUser.user_id, messages);
   }, [messages, activeUser?.user_id]);
+
+  // If an outbound audio stays pending without a playable URL after chat switches,
+  // force a throttled refresh so we reconcile with finalized DB rows.
+  useEffect(() => {
+    const uid = activeUser?.user_id;
+    if (!uid || !Array.isArray(messages) || messages.length === 0) return;
+    const now = Date.now();
+    const hasStalePendingAudio = messages.some((m) => {
+      try {
+        if (!m || !m.from_me) return false;
+        const t = String(m.type || "").toLowerCase();
+        if (t !== "audio") return false;
+        const st = String(m.status || "").toLowerCase();
+        if (st === "failed" || st === "read" || st === "delivered") return false;
+        const u = String(m.url || "");
+        const msgUrl = typeof m.message === "string" ? m.message : "";
+        const hasPlayable = /^https?:\/\//i.test(u) || /^https?:\/\//i.test(msgUrl);
+        if (hasPlayable) return false;
+        const ts = Date.parse(String(m.server_ts || m.timestamp || ""));
+        return Number.isFinite(ts) ? (now - ts) > 5000 : true;
+      } catch {
+        return false;
+      }
+    });
+    if (!hasStalePendingAudio) return;
+    if ((now - (lastPendingAudioRefreshRef.current || 0)) < 10000) return;
+    lastPendingAudioRefreshRef.current = now;
+    try { fetchMessages({ offset: 0 }, undefined, uid); } catch {}
+  }, [messages, activeUser?.user_id, fetchMessages]);
 
   // Mark incoming messages as read when they appear
   useEffect(() => {

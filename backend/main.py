@@ -16844,6 +16844,8 @@ class CatalogManager:
     _SET_CACHE: dict[str, list[Dict[str, Any]]] = {}
     _SET_CACHE_TS: dict[str, float] = {}
     _SET_CACHE_TTL_SEC: int = 15 * 60
+    _SET_FETCH_TASKS: dict[str, asyncio.Task] = {}
+    _SET_REFRESH_TASKS: dict[str, asyncio.Task] = {}
 
     @staticmethod
     def _set_cache_filename(set_id: str, catalog_id: str | None = None) -> str:
@@ -16882,6 +16884,118 @@ class CatalogManager:
                 await upload_file_to_gcs(filename)
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    @staticmethod
+    def _store_set_cache(cache_key: str, set_id: str, catalog_id: str, products: list[dict]) -> None:
+        try:
+            import time as _time
+            CatalogManager._SET_CACHE[cache_key] = products
+            CatalogManager._SET_CACHE_TS[cache_key] = _time.time()
+            try:
+                asyncio.create_task(CatalogManager._persist_set_async(set_id, products, catalog_id=catalog_id))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _fetch_set_products_live(
+        set_id: str,
+        target_limit: int,
+        catalog_id: str,
+        workspace: str | None = None,
+    ) -> list[dict]:
+        products: List[Dict[str, Any]] = []
+        url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{set_id}/products"
+        params = {
+            "fields": "retailer_id,name,price,images{url},availability,quantity",
+            "limit": 25,
+        }
+        headers = await get_whatsapp_headers(workspace)
+
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            while url:
+                response = await client.get(url, headers=headers, params=params if params else None)
+                data = response.json()
+                for product in data.get("data", []):
+                    if CatalogManager._is_product_available(product):
+                        products.append(CatalogManager._format_product(product))
+                        if len(products) >= target_limit:
+                            url = None
+                            break
+                if not url:
+                    break
+                url = data.get("paging", {}).get("next")
+                params = None
+        return products[:target_limit]
+
+    @staticmethod
+    async def _fetch_set_products_singleflight(
+        cache_key: str,
+        set_id: str,
+        target_limit: int,
+        catalog_id: str,
+        workspace: str | None = None,
+    ) -> list[dict]:
+        task = CatalogManager._SET_FETCH_TASKS.get(cache_key)
+        if task and not task.done():
+            return await task
+
+        async def _runner() -> list[dict]:
+            return await CatalogManager._fetch_set_products_live(
+                set_id=set_id,
+                target_limit=target_limit,
+                catalog_id=catalog_id,
+                workspace=workspace,
+            )
+
+        task = asyncio.create_task(_runner())
+        CatalogManager._SET_FETCH_TASKS[cache_key] = task
+        try:
+            return await task
+        finally:
+            if CatalogManager._SET_FETCH_TASKS.get(cache_key) is task:
+                CatalogManager._SET_FETCH_TASKS.pop(cache_key, None)
+
+    @staticmethod
+    def _schedule_set_refresh(
+        cache_key: str,
+        set_id: str,
+        target_limit: int,
+        catalog_id: str,
+        workspace: str | None = None,
+    ) -> None:
+        # Avoid duplicate background refreshes for the same set.
+        task = CatalogManager._SET_REFRESH_TASKS.get(cache_key)
+        if task and not task.done():
+            return
+
+        refresh_limit = max(
+            target_limit,
+            int(os.getenv("CATALOG_SET_BACKGROUND_REFRESH_LIMIT", "600")),
+        )
+
+        async def _refresh_runner() -> None:
+            try:
+                products = await CatalogManager._fetch_set_products_singleflight(
+                    cache_key=cache_key,
+                    set_id=set_id,
+                    target_limit=refresh_limit,
+                    catalog_id=catalog_id,
+                    workspace=workspace,
+                )
+                CatalogManager._store_set_cache(cache_key, set_id, catalog_id, products)
+            except Exception:
+                pass
+
+        task = asyncio.create_task(_refresh_runner())
+        CatalogManager._SET_REFRESH_TASKS[cache_key] = task
+        try:
+            task.add_done_callback(
+                lambda _t: CatalogManager._SET_REFRESH_TASKS.pop(cache_key, None)
+            )
         except Exception:
             pass
 
@@ -16977,64 +17091,56 @@ class CatalogManager:
                 print(f"Writing local catalog cache failed: {_exc}")
             return products_live[:target_limit]
 
-        # Serve from persisted cache if fresh
-        use_persisted = False
+        import time as _time
+        now = _time.time()
+
+        # Serve from in-memory cache first. If stale, serve stale immediately and refresh in background.
+        mem_cached = CatalogManager._SET_CACHE.get(cache_key, [])
+        mem_ts = CatalogManager._SET_CACHE_TS.get(cache_key)
+        if mem_cached:
+            mem_fresh = bool(mem_ts and (now - mem_ts) < CatalogManager._SET_CACHE_TTL_SEC)
+            if not mem_fresh:
+                CatalogManager._schedule_set_refresh(
+                    cache_key=cache_key,
+                    set_id=set_id,
+                    target_limit=target_limit,
+                    catalog_id=cid,
+                    workspace=workspace,
+                )
+            return mem_cached[:target_limit]
+
+        # Serve from persisted cache. If stale, use stale-while-revalidate.
+        persisted: list[dict] = []
+        persisted_fresh = False
         try:
             filename = CatalogManager._set_cache_filename(set_id, catalog_id=cid)
             if os.path.exists(filename):
-                import time as _time
-                if (_time.time() - os.path.getmtime(filename)) < CatalogManager._SET_CACHE_TTL_SEC:
-                    use_persisted = True
-        except Exception:
-            use_persisted = False
-
-        if use_persisted:
-            persisted = CatalogManager._load_persisted_set(set_id, catalog_id=cid)
-            if persisted:
-                return persisted[:target_limit]
-
-        # Serve from in-memory cache if fresh (warm instance)
-        import time as _time
-        ts = CatalogManager._SET_CACHE_TS.get(cache_key)
-        if ts and (_time.time() - ts) < CatalogManager._SET_CACHE_TTL_SEC:
-            cached_list = CatalogManager._SET_CACHE.get(cache_key, [])
-            if cached_list:
-                return cached_list[:target_limit]
-
-        products: List[Dict[str, Any]] = []
-        url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{set_id}/products"
-        params = {
-            "fields": "retailer_id,name,price,images{url},availability,quantity",
-            "limit": 25,
-        }
-        headers = await get_whatsapp_headers(workspace)
-
-        async with httpx.AsyncClient(timeout=40.0) as client:
-            while url:
-                response = await client.get(url, headers=headers, params=params if params else None)
-                data = response.json()
-                for product in data.get("data", []):
-                    if CatalogManager._is_product_available(product):
-                        products.append(CatalogManager._format_product(product))
-                        # Do not return early here: first request should warm caches.
-                        if len(products) >= target_limit:
-                            url = None
-                            break
-                if not url:
-                    break
-                url = data.get("paging", {}).get("next")
-                params = None
-        # Store in memory and persist for fast subsequent responses across instances
-        try:
-            CatalogManager._SET_CACHE[cache_key] = products
-            CatalogManager._SET_CACHE_TS[cache_key] = _time.time()
-            try:
-                # Persist in background to keep response path fast.
-                asyncio.create_task(CatalogManager._persist_set_async(set_id, products, catalog_id=cid))
-            except Exception:
-                pass
+                persisted_fresh = (now - os.path.getmtime(filename)) < CatalogManager._SET_CACHE_TTL_SEC
+                persisted = CatalogManager._load_persisted_set(set_id, catalog_id=cid)
         except Exception:
             pass
+
+        if persisted:
+            CatalogManager._store_set_cache(cache_key, set_id, cid, persisted)
+            if not persisted_fresh:
+                CatalogManager._schedule_set_refresh(
+                    cache_key=cache_key,
+                    set_id=set_id,
+                    target_limit=target_limit,
+                    catalog_id=cid,
+                    workspace=workspace,
+                )
+            return persisted[:target_limit]
+
+        # No cache available: do one live fetch per set (singleflight).
+        products = await CatalogManager._fetch_set_products_singleflight(
+            cache_key=cache_key,
+            set_id=set_id,
+            target_limit=target_limit,
+            catalog_id=cid,
+            workspace=workspace,
+        )
+        CatalogManager._store_set_cache(cache_key, set_id, cid, products)
         return products[:target_limit]
 
     @staticmethod

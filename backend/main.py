@@ -3096,22 +3096,28 @@ class DatabaseManager:
                 await db.commit()
 
             # Ensure uniqueness is workspace-scoped (older deployments had uniq_msg_user_wa on (user_id, wa_message_id)).
+            # IMPORTANT: avoid rebuilding this large index on every startup (can exceed Cloud Run startup probe window).
             try:
                 if self.use_postgres:
                     await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa_old")
+                    idx = await db.fetchrow(
+                        "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'uniq_msg_user_wa'"
+                    )
+                    if not idx:
+                        await db.execute(
+                            "CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa ON messages (workspace, user_id, wa_message_id)"
+                        )
+                    else:
+                        idxdef = str(idx["indexdef"] or "").lower()
+                        if "workspace" not in idxdef:
+                            logging.getLogger(__name__).warning(
+                                "Legacy uniq_msg_user_wa definition detected; keeping as-is during startup to avoid slow blocking rebuild."
+                            )
                 else:
-                    await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa_old")
-                    await db.commit()
-            except Exception:
-                pass
-            try:
-                # Drop and recreate the canonical index name to include workspace.
-                if self.use_postgres:
                     await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa")
-                    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa ON messages (workspace, user_id, wa_message_id)")
-                else:
-                    await db.execute("DROP INDEX IF EXISTS uniq_msg_user_wa")
-                    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa ON messages (workspace, user_id, wa_message_id)")
+                    await db.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_msg_user_wa ON messages (workspace, user_id, wa_message_id)"
+                    )
                     await db.commit()
             except Exception:
                 pass
@@ -10063,8 +10069,13 @@ async def startup():
     # - If Postgres is configured+required, we fail startup so Cloud Run won't route traffic to a broken revision.
     # - Otherwise (SQLite/dev), we allow startup to continue in "degraded" mode and endpoints will surface 503s as needed.
     try:
+        # Keep startup strict but allow realistic time for one-time DB migrations/index creation.
+        startup_db_timeout = max(
+            15.0,
+            min(85.0, float(os.getenv("STARTUP_DB_INIT_TIMEOUT_SECONDS", "75"))),
+        )
         # 1) Shared auth/settings DB
-        await asyncio.wait_for(auth_db_manager.init_db(), timeout=30.0)
+        await asyncio.wait_for(auth_db_manager.init_db(), timeout=startup_db_timeout)
 
         # Best-effort: load dynamic workspace registry (admin-managed) from shared settings DB.
         # This allows /app-config + request routing to recognize newly added workspaces without redeploy.
@@ -10125,7 +10136,7 @@ async def startup():
                 w = _coerce_workspace(ws)
                 tok = _CURRENT_WORKSPACE.set(w)
                 try:
-                    await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
+                    await asyncio.wait_for(db_manager.init_db(), timeout=startup_db_timeout)
                 except Exception as exc:
                     tenant_errors.append((w, str(exc)))
                     logging.getLogger(__name__).exception(
@@ -10140,7 +10151,7 @@ async def startup():
                     except Exception:
                         pass
         else:
-            await asyncio.wait_for(db_manager.init_db(), timeout=30.0)
+            await asyncio.wait_for(db_manager.init_db(), timeout=startup_db_timeout)
 
         if tenant_errors and BLOCK_STARTUP_ON_DB_FAILURE:
             raise RuntimeError(f"Tenant DB init failures: {tenant_errors}")

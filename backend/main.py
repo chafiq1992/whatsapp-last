@@ -3063,7 +3063,19 @@ class DatabaseManager:
                 # Expression/partial indexes are safe and idempotent.
                 try:
                     await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_msg_ws_user_ts_coalesce ON messages (workspace, user_id, (COALESCE(server_ts, timestamp)) DESC)"
+                    )
+                    await db.execute(
                         "CREATE INDEX IF NOT EXISTS idx_msg_user_ts_coalesce ON messages (user_id, (COALESCE(server_ts, timestamp)) DESC)"
+                    )
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_msg_ws_ts_coalesce ON messages (workspace, (COALESCE(server_ts, timestamp)) DESC)"
+                    )
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_msg_ws_user_fromme_ts ON messages (workspace, user_id, from_me, (COALESCE(server_ts, timestamp)) DESC)"
+                    )
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_msg_ws_unread_user ON messages (workspace, user_id) WHERE from_me = 0 AND status <> 'read'"
                     )
                     await db.execute(
                         "CREATE INDEX IF NOT EXISTS idx_msg_unread_user ON messages (user_id) WHERE from_me = 0 AND status <> 'read'"
@@ -10946,6 +10958,9 @@ async def get_active_users(_: dict = Depends(require_admin)):
 # In-process fallback cache for /conversations (only used when Redis is unavailable and DB is temporarily slow).
 _CONVERSATIONS_FALLBACK_CACHE: dict[str, tuple[float, list]] = {}
 _CONVERSATIONS_FALLBACK_TTL_SECONDS = 60.0
+# Small hot cache to absorb frequent polling bursts even when Redis is slow/unavailable.
+_CONVERSATIONS_HOT_CACHE: dict[str, tuple[float, list]] = {}
+_CONVERSATIONS_HOT_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_HOT_CACHE_TTL_SECONDS", "5"))
 # Prevent stampedes: only allow a small number of expensive inbox queries concurrently per instance.
 _CONVERSATIONS_INFLIGHT_SEM = asyncio.Semaphore(int(os.getenv("CONVERSATIONS_MAX_INFLIGHT", "2")))
 
@@ -10980,8 +10995,14 @@ async def get_conversations(
                 ws,
                 hashlib.sha1(json.dumps(cache_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
             )
+            hot = _CONVERSATIONS_HOT_CACHE.get(cache_key)
+            if hot:
+                ts_hot, data_hot = hot
+                if isinstance(data_hot, list) and (time.time() - float(ts_hot)) <= float(_CONVERSATIONS_HOT_CACHE_TTL_SECONDS):
+                    return data_hot
             cached = await redis_manager.get_json(cache_key)
             if isinstance(cached, list):
+                _CONVERSATIONS_HOT_CACHE[cache_key] = (time.time(), cached)
                 return cached
         except Exception:
             cache_key = None
@@ -11007,6 +11028,7 @@ async def get_conversations(
         try:
             if cache_key and isinstance(conversations, list):
                 await redis_manager.set_json(cache_key, conversations, ttl=5)
+                _CONVERSATIONS_HOT_CACHE[cache_key] = (time.time(), conversations)
                 # Also keep a slightly longer in-process copy as a fallback for transient DB/Redis issues.
                 _CONVERSATIONS_FALLBACK_CACHE[cache_key] = (time.time(), conversations)
         except Exception:

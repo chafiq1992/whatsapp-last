@@ -16924,12 +16924,13 @@ class CatalogManager:
         """
         cid = str(catalog_id or CATALOG_ID or "").strip()
         cache_file = cache_file or CATALOG_CACHE_FILE
+        target_limit = max(1, int(limit))
         cache_key = f"{cid}:{str(set_id or '').strip()}"
         # If requesting the full catalog, serve from on-disk cache instantly
         if not set_id or str(set_id).strip() == cid:
             cached = catalog_manager.get_cached_products(cache_file=cache_file)
             if cached:
-                return cached[: max(1, int(limit))]
+                return cached[:target_limit]
             # Fallback to live fetch if cache empty; also persist to cache for next requests
             products_live = await CatalogManager.get_catalog_products(catalog_id=cid, workspace=workspace)
             try:
@@ -16941,7 +16942,7 @@ class CatalogManager:
                     print(f"GCS upload failed after live fetch: {_exc}")
             except Exception as _exc:
                 print(f"Writing local catalog cache failed: {_exc}")
-            return products_live[: max(1, int(limit))]
+            return products_live[:target_limit]
 
         # Serve from persisted cache if fresh
         use_persisted = False
@@ -16957,7 +16958,7 @@ class CatalogManager:
         if use_persisted:
             persisted = CatalogManager._load_persisted_set(set_id, catalog_id=cid)
             if persisted:
-                return persisted[: max(1, int(limit))]
+                return persisted[:target_limit]
 
         # Serve from in-memory cache if fresh (warm instance)
         import time as _time
@@ -16965,7 +16966,7 @@ class CatalogManager:
         if ts and (_time.time() - ts) < CatalogManager._SET_CACHE_TTL_SEC:
             cached_list = CatalogManager._SET_CACHE.get(cache_key, [])
             if cached_list:
-                return cached_list[: max(1, int(limit))]
+                return cached_list[:target_limit]
 
         products: List[Dict[str, Any]] = []
         url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{set_id}/products"
@@ -16982,8 +16983,12 @@ class CatalogManager:
                 for product in data.get("data", []):
                     if CatalogManager._is_product_available(product):
                         products.append(CatalogManager._format_product(product))
-                        if len(products) >= max(1, int(limit)):
-                            return products
+                        # Do not return early here: first request should warm caches.
+                        if len(products) >= target_limit:
+                            url = None
+                            break
+                if not url:
+                    break
                 url = data.get("paging", {}).get("next")
                 params = None
         # Store in memory and persist for fast subsequent responses across instances
@@ -16991,12 +16996,13 @@ class CatalogManager:
             CatalogManager._SET_CACHE[cache_key] = products
             CatalogManager._SET_CACHE_TS[cache_key] = _time.time()
             try:
-                await CatalogManager._persist_set_async(set_id, products, catalog_id=cid)
+                # Persist in background to keep response path fast.
+                asyncio.create_task(CatalogManager._persist_set_async(set_id, products, catalog_id=cid))
             except Exception:
                 pass
         except Exception:
             pass
-        return products
+        return products[:target_limit]
 
     @staticmethod
     def _is_product_available(product: Dict[str, Any]) -> bool:

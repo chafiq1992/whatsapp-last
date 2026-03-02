@@ -16848,6 +16848,80 @@ class CatalogManager:
     _SET_REFRESH_TASKS: dict[str, asyncio.Task] = {}
 
     @staticmethod
+    def _redis_set_cache_key(catalog_id: str, set_id: str) -> str:
+        return f"catalog:set:{_safe_cache_token(catalog_id)}:{_safe_cache_token(set_id)}"
+
+    @staticmethod
+    def _redis_set_lock_key(catalog_id: str, set_id: str) -> str:
+        return f"catalog:set:lock:{_safe_cache_token(catalog_id)}:{_safe_cache_token(set_id)}"
+
+    @staticmethod
+    async def _redis_get_set_cache(catalog_id: str, set_id: str) -> list[dict]:
+        rds = getattr(redis_manager, "redis_client", None)
+        if not rds:
+            return []
+        try:
+            raw = await rds.get(CatalogManager._redis_set_cache_key(catalog_id, set_id))
+            if not raw:
+                return []
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", "ignore")
+            data = json.loads(raw) if isinstance(raw, str) else []
+            if not isinstance(data, list):
+                return []
+            return [p for p in data if isinstance(p, dict)]
+        except Exception:
+            return []
+
+    @staticmethod
+    async def _redis_set_set_cache(catalog_id: str, set_id: str, products: list[dict]) -> None:
+        rds = getattr(redis_manager, "redis_client", None)
+        if not rds:
+            return
+        try:
+            ttl = max(
+                int(CatalogManager._SET_CACHE_TTL_SEC),
+                int(os.getenv("CATALOG_SET_REDIS_TTL_SECONDS", str(CatalogManager._SET_CACHE_TTL_SEC))),
+            )
+            payload = json.dumps(products, ensure_ascii=False)
+            await rds.setex(CatalogManager._redis_set_cache_key(catalog_id, set_id), ttl, payload)
+        except Exception:
+            return
+
+    @staticmethod
+    async def _redis_acquire_set_lock(catalog_id: str, set_id: str, token: str, ttl_sec: int = 20) -> bool:
+        rds = getattr(redis_manager, "redis_client", None)
+        if not rds:
+            return False
+        try:
+            ok = await rds.set(
+                CatalogManager._redis_set_lock_key(catalog_id, set_id),
+                token,
+                ex=max(5, int(ttl_sec)),
+                nx=True,
+            )
+            return bool(ok)
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _redis_release_set_lock(catalog_id: str, set_id: str, token: str) -> None:
+        rds = getattr(redis_manager, "redis_client", None)
+        if not rds:
+            return
+        key = CatalogManager._redis_set_lock_key(catalog_id, set_id)
+        lua = """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+          return redis.call('DEL', KEYS[1])
+        end
+        return 0
+        """
+        try:
+            await rds.eval(lua, 1, key, token)
+        except Exception:
+            return
+
+    @staticmethod
     def _set_cache_filename(set_id: str, catalog_id: str | None = None) -> str:
         # Include catalog_id to avoid cross-workspace collisions if different catalogs reuse set ids.
         cid = _safe_cache_token(catalog_id or "")
@@ -16895,6 +16969,7 @@ class CatalogManager:
             CatalogManager._SET_CACHE_TS[cache_key] = _time.time()
             try:
                 asyncio.create_task(CatalogManager._persist_set_async(set_id, products, catalog_id=catalog_id))
+                asyncio.create_task(CatalogManager._redis_set_set_cache(catalog_id, set_id, products))
             except Exception:
                 pass
         except Exception:
@@ -16979,13 +17054,25 @@ class CatalogManager:
 
         async def _refresh_runner() -> None:
             try:
-                products = await CatalogManager._fetch_set_products_singleflight(
-                    cache_key=cache_key,
-                    set_id=set_id,
-                    target_limit=refresh_limit,
+                token = f"{time.time_ns()}:{id(asyncio.current_task())}"
+                got_lock = await CatalogManager._redis_acquire_set_lock(
                     catalog_id=catalog_id,
-                    workspace=workspace,
+                    set_id=set_id,
+                    token=token,
+                    ttl_sec=max(15, int(os.getenv("CATALOG_SET_LOCK_TTL_SECONDS", "30"))),
                 )
+                if not got_lock:
+                    return
+                try:
+                    products = await CatalogManager._fetch_set_products_singleflight(
+                        cache_key=cache_key,
+                        set_id=set_id,
+                        target_limit=refresh_limit,
+                        catalog_id=catalog_id,
+                        workspace=workspace,
+                    )
+                finally:
+                    await CatalogManager._redis_release_set_lock(catalog_id, set_id, token)
                 CatalogManager._store_set_cache(cache_key, set_id, catalog_id, products)
             except Exception:
                 pass
@@ -17109,6 +17196,12 @@ class CatalogManager:
                 )
             return mem_cached[:target_limit]
 
+        # Shared cache across Cloud Run instances (Redis).
+        redis_cached = await CatalogManager._redis_get_set_cache(cid, set_id)
+        if redis_cached:
+            CatalogManager._store_set_cache(cache_key, set_id, cid, redis_cached)
+            return redis_cached[:target_limit]
+
         # Serve from persisted cache. If stale, use stale-while-revalidate.
         persisted: list[dict] = []
         persisted_fresh = False
@@ -17132,14 +17225,47 @@ class CatalogManager:
                 )
             return persisted[:target_limit]
 
-        # No cache available: do one live fetch per set (singleflight).
-        products = await CatalogManager._fetch_set_products_singleflight(
-            cache_key=cache_key,
-            set_id=set_id,
-            target_limit=target_limit,
-            catalog_id=cid,
-            workspace=workspace,
-        )
+        # No cache available: acquire distributed lock so one instance fetches while others wait.
+        lock_token = f"{time.time_ns()}:{id(asyncio.current_task())}"
+        lock_ttl = max(15, int(os.getenv("CATALOG_SET_LOCK_TTL_SECONDS", "30")))
+        wait_ms = max(250, int(os.getenv("CATALOG_SET_LOCK_WAIT_MS", "4500")))
+        poll_ms = max(50, int(os.getenv("CATALOG_SET_LOCK_POLL_MS", "150")))
+
+        products: list[dict] = []
+        has_lock = await CatalogManager._redis_acquire_set_lock(cid, set_id, lock_token, ttl_sec=lock_ttl)
+        if has_lock:
+            try:
+                products = await CatalogManager._fetch_set_products_singleflight(
+                    cache_key=cache_key,
+                    set_id=set_id,
+                    target_limit=max(
+                        target_limit,
+                        int(os.getenv("CATALOG_SET_BACKGROUND_REFRESH_LIMIT", "600")),
+                    ),
+                    catalog_id=cid,
+                    workspace=workspace,
+                )
+            finally:
+                await CatalogManager._redis_release_set_lock(cid, set_id, lock_token)
+        else:
+            waited = 0
+            while waited < wait_ms:
+                await asyncio.sleep(poll_ms / 1000.0)
+                waited += poll_ms
+                redis_cached_wait = await CatalogManager._redis_get_set_cache(cid, set_id)
+                if redis_cached_wait:
+                    products = redis_cached_wait
+                    break
+            if not products:
+                # Last resort if lock holder crashed/timeout: fetch now.
+                products = await CatalogManager._fetch_set_products_singleflight(
+                    cache_key=cache_key,
+                    set_id=set_id,
+                    target_limit=target_limit,
+                    catalog_id=cid,
+                    workspace=workspace,
+                )
+
         CatalogManager._store_set_cache(cache_key, set_id, cid, products)
         return products[:target_limit]
 

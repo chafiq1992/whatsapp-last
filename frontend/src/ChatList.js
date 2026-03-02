@@ -297,8 +297,8 @@ function ChatList({
   const inbox24hStats = useMemo(() => {
     const list = Array.isArray(conversations) ? conversations : [];
     const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
-    let unread24hTotal = 0;
-    let unresponded24hTotal = 0;
+    let unread24hConversations = 0;
+    let unresponded24hConversations = 0;
     for (const c of list) {
       const uid = String(c?.user_id || '');
       if (!uid || uid.startsWith('dm:') || uid.startsWith('team:')) continue;
@@ -306,10 +306,10 @@ function ChatList({
       if (showArchive ? !isDone : isDone) continue;
       const tsMs = toMsNormalized(c?.last_message_time);
       if (!(tsMs > 0 && tsMs >= cutoffMs)) continue;
-      unread24hTotal += Number(c?.unread_count || 0);
-      unresponded24hTotal += Number(c?.unresponded_count || 0);
+      if (Number(c?.unread_count || 0) > 0) unread24hConversations += 1;
+      if (Number(c?.unresponded_count || 0) > 0) unresponded24hConversations += 1;
     }
-    return { unread24hTotal, unresponded24hTotal };
+    return { unread24hConversations, unresponded24hConversations };
   }, [conversations, showArchive]);
 
 
@@ -537,27 +537,39 @@ function ChatList({
         <div className="mt-2 flex items-center gap-2">
           <button
             type="button"
-            className={`px-2 py-1 rounded-full text-xs border ${
+            className={`px-2 py-1 rounded-full text-xs border transition-all duration-200 inline-flex items-center gap-1.5 shadow-sm ${
               showUnread24hOnly
-                ? 'bg-green-600 text-white border-green-500'
-                : 'bg-green-900/30 text-green-300 border-green-700 hover:bg-green-800/40'
+                ? 'bg-gradient-to-r from-emerald-600 to-green-500 text-white border-emerald-400/80 ring-1 ring-emerald-300/40'
+                : 'bg-emerald-900/30 text-emerald-200 border-emerald-700/80 hover:bg-emerald-800/45'
             }`}
             onClick={() => setShowUnread24hOnly(v => !v)}
             title="Filter unread in last 24 hours"
           >
-            Unread 24h: {inbox24hStats.unread24hTotal}
+            <FiMail className="opacity-90" />
+            <span>Unread</span>
+            <span className={`min-w-[18px] rounded-full px-1 text-center ${
+              showUnread24hOnly ? 'bg-white/20 text-white' : 'bg-emerald-500/20 text-emerald-100'
+            }`}>
+              {inbox24hStats.unread24hConversations}
+            </span>
           </button>
           <button
             type="button"
-            className={`px-2 py-1 rounded-full text-xs border ${
+            className={`px-2 py-1 rounded-full text-xs border transition-all duration-200 inline-flex items-center gap-1.5 shadow-sm ${
               showNeedsReply24hOnly
-                ? 'bg-yellow-500 text-black border-yellow-400'
-                : 'bg-yellow-900/30 text-yellow-300 border-yellow-700 hover:bg-yellow-800/40'
+                ? 'bg-gradient-to-r from-amber-400 to-yellow-300 text-black border-yellow-200/80 ring-1 ring-yellow-100/50'
+                : 'bg-yellow-900/30 text-yellow-200 border-yellow-700/80 hover:bg-yellow-800/45'
             }`}
             onClick={() => setShowNeedsReply24hOnly(v => !v)}
             title="Filter unanswered in last 24 hours"
           >
-            Unanswered 24h: {inbox24hStats.unresponded24hTotal}
+            <FiMessageSquare className="opacity-90" />
+            <span>Unanswered</span>
+            <span className={`min-w-[18px] rounded-full px-1 text-center ${
+              showNeedsReply24hOnly ? 'bg-black/20 text-black' : 'bg-yellow-400/20 text-yellow-100'
+            }`}>
+              {inbox24hStats.unresponded24hConversations}
+            </span>
           </button>
         </div>
         {tagFilters.length > 0 && (

@@ -147,6 +147,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
   const [market] = useState("Moroccan market");
   const [isCreating, setIsCreating] = useState(false);
   const [isSnipping, setIsSnipping] = useState(false);
+  const [pendingOrderSnips, setPendingOrderSnips] = useState([]);
   const [snipMessage, setSnipMessage] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [lastResult, setLastResult] = useState(null);
@@ -774,6 +775,12 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
     saveCart(activeUser.user_id, selectedItems).catch(() => {});
   }, [selectedItems, activeUser?.user_id]);
 
+  // Keep screenshot queue scoped to this conversation only.
+  useEffect(() => {
+    setPendingOrderSnips([]);
+    setSnipMessage("");
+  }, [activeUser?.user_id]);
+
   const handleCreateOrder = async () => {
     setErrorMsg("");
     setLastResult(null);
@@ -791,8 +798,19 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
       return;
     }
     const safePhone = normalizePhone(orderData.phone);
+    const manualOrderNote = String(orderData.order_note || "").trim();
+    const snipLines = (pendingOrderSnips || [])
+      .map((s) => {
+        const ts = String(s?.timestamp || "").trim();
+        const url = String(s?.url || "").trim();
+        if (!ts || !url) return "";
+        return `[AGENT_SCREENSHOT] ${ts} ${url}`;
+      })
+      .filter(Boolean);
+    const combinedOrderNote = [manualOrderNote, ...snipLines].filter(Boolean).join("\n").trim();
     const orderPayload = {
       ...orderData,
+      order_note: combinedOrderNote,
       phone: safePhone,
       items: selectedItems.map(item => ({
         variant_id: item.variant.id,
@@ -811,6 +829,8 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
     try {
       const res = await api.post(`${API_BASE}/create-shopify-order`, orderPayload);
       setSelectedItems([]);
+      setPendingOrderSnips([]);
+      setSnipMessage("");
       try { if (activeUser?.user_id) await saveCart(activeUser.user_id, []); } catch {}
       setErrorMsg("");
       setLastResult(res?.data || null);
@@ -843,23 +863,10 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
     }
   };
 
-  const resolveCurrentConversationOrderId = () => {
-    try {
-      if (lastResult?.order_id) return String(lastResult.order_id);
-      if (Array.isArray(orders) && orders.length > 0 && orders[0]?.id) return String(orders[0].id);
-    } catch {}
-    return "";
-  };
-
   const handleSnipToOrderNote = async () => {
     if (isSnipping) return;
     setErrorMsg("");
     setSnipMessage("");
-    const orderId = resolveCurrentConversationOrderId();
-    if (!orderId) {
-      setErrorMsg("No Shopify order found for this conversation yet.");
-      return;
-    }
     const captureRoot = document.getElementById("chat-window-capture-root");
     if (!captureRoot) {
       setErrorMsg("Chat window not found. Open a conversation and try again.");
@@ -891,19 +898,8 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
         : `${window.location.origin}${rawUrl.startsWith("/") ? "" : "/"}${rawUrl}`;
 
       const timestampIso = new Date().toISOString();
-      const noteLine = `[AGENT_SCREENSHOT] ${timestampIso} ${imageUrl}`;
-      await api.post(`${API_BASE}/shopify-orders/${encodeURIComponent(orderId)}/note`, { note: noteLine });
-
-      setOrders((prev) => {
-        const next = Array.isArray(prev) ? [...prev] : [];
-        const idx = next.findIndex((o) => String(o?.id || "") === String(orderId));
-        if (idx >= 0) {
-          const oldNote = String(next[idx]?.note || "").trim();
-          next[idx] = { ...next[idx], note: oldNote ? `${oldNote}\n${noteLine}` : noteLine };
-        }
-        return next;
-      });
-      setSnipMessage(`Screenshot added (${new Date(timestampIso).toLocaleString()}).`);
+      setPendingOrderSnips((prev) => ([...(Array.isArray(prev) ? prev : []), { timestamp: timestampIso, url: imageUrl }]));
+      setSnipMessage(`Screenshot queued for new order (${new Date(timestampIso).toLocaleString()}).`);
       try { setTimeout(() => setSnipMessage(""), 2200); } catch {}
     } catch (e) {
       setErrorMsg((e && e.message) ? String(e.message) : "Failed to capture screenshot.");
@@ -1764,11 +1760,14 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                 onClick={handleSnipToOrderNote}
                 disabled={isSnipping || isCreating}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-gray-500 bg-gray-800 hover:bg-gray-700 text-[11px] text-white disabled:opacity-60"
-                title="Capture current chat window and append screenshot link to this order note"
+                title="Capture current chat window and queue screenshot for the new order note"
               >
                 <FaRegImage className="text-xs" />
                 <span>{isSnipping ? "Snipping..." : "Snip screen"}</span>
               </button>
+              {!!pendingOrderSnips.length && (
+                <span className="text-[11px] text-blue-300">{pendingOrderSnips.length} queued</span>
+              )}
               {snipMessage ? <span className="text-[11px] text-emerald-300">{snipMessage}</span> : null}
             </div>
             <button

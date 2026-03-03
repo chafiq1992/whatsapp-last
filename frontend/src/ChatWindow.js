@@ -1312,6 +1312,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
 
   return (
     <div
+      id="chat-window-capture-root"
       className="relative flex flex-col h-full"
       onDrop={handleDrop}
       onDragOver={e => e.preventDefault()}

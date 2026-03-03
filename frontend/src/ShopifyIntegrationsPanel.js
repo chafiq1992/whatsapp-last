@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { FaShopify } from "react-icons/fa";
+import { FaRegImage, FaShopify } from "react-icons/fa";
 import api from "./api";
 import { saveCart, loadCart } from "./chatStorage";
 import html2canvas from "html2canvas";
@@ -146,6 +146,8 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
   const [paymentTerm, setPaymentTerm] = useState("due_on_receipt");
   const [market] = useState("Moroccan market");
   const [isCreating, setIsCreating] = useState(false);
+  const [isSnipping, setIsSnipping] = useState(false);
+  const [snipMessage, setSnipMessage] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [lastResult, setLastResult] = useState(null);
 
@@ -812,6 +814,13 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
       try { if (activeUser?.user_id) await saveCart(activeUser.user_id, []); } catch {}
       setErrorMsg("");
       setLastResult(res?.data || null);
+      try {
+        const customerIdForRefresh = customer?.customer_id || selectedCustomerId || null;
+        if (customerIdForRefresh) {
+          ordersCooldownRef.current = 0;
+          await fetchOrdersWithCooldown(customerIdForRefresh);
+        }
+      } catch {}
       alert("Order created successfully!");
       fireConfettiBurst();
       // Generate the label and send it as image to the customer (best-effort)
@@ -831,6 +840,75 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
       setErrorMsg("Error creating order.");
     } finally {
       setIsCreating(false);
+    }
+  };
+
+  const resolveCurrentConversationOrderId = () => {
+    try {
+      if (lastResult?.order_id) return String(lastResult.order_id);
+      if (Array.isArray(orders) && orders.length > 0 && orders[0]?.id) return String(orders[0].id);
+    } catch {}
+    return "";
+  };
+
+  const handleSnipToOrderNote = async () => {
+    if (isSnipping) return;
+    setErrorMsg("");
+    setSnipMessage("");
+    const orderId = resolveCurrentConversationOrderId();
+    if (!orderId) {
+      setErrorMsg("No Shopify order found for this conversation yet.");
+      return;
+    }
+    const captureRoot = document.getElementById("chat-window-capture-root");
+    if (!captureRoot) {
+      setErrorMsg("Chat window not found. Open a conversation and try again.");
+      return;
+    }
+
+    setIsSnipping(true);
+    try {
+      const scale = Math.min(2, Number(window.devicePixelRatio || 1));
+      const canvas = await html2canvas(captureRoot, {
+        scale: Number.isFinite(scale) && scale > 0 ? scale : 1,
+        backgroundColor: "#111827",
+        useCORS: true,
+        logging: false,
+      });
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png", 1));
+      if (!blob) throw new Error("Failed to capture screenshot.");
+
+      const file = new File([blob], `chat_snip_${Date.now()}.png`, { type: "image/png" });
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      const uploadRes = await api.post(`/notes/upload`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const rawUrl = String(uploadRes?.data?.url || "").trim();
+      if (!rawUrl) throw new Error("Upload did not return a URL.");
+      const imageUrl = rawUrl.startsWith("http")
+        ? rawUrl
+        : `${window.location.origin}${rawUrl.startsWith("/") ? "" : "/"}${rawUrl}`;
+
+      const timestampIso = new Date().toISOString();
+      const noteLine = `[AGENT_SCREENSHOT] ${timestampIso} ${imageUrl}`;
+      await api.post(`${API_BASE}/shopify-orders/${encodeURIComponent(orderId)}/note`, { note: noteLine });
+
+      setOrders((prev) => {
+        const next = Array.isArray(prev) ? [...prev] : [];
+        const idx = next.findIndex((o) => String(o?.id || "") === String(orderId));
+        if (idx >= 0) {
+          const oldNote = String(next[idx]?.note || "").trim();
+          next[idx] = { ...next[idx], note: oldNote ? `${oldNote}\n${noteLine}` : noteLine };
+        }
+        return next;
+      });
+      setSnipMessage(`Screenshot added (${new Date(timestampIso).toLocaleString()}).`);
+      try { setTimeout(() => setSnipMessage(""), 2200); } catch {}
+    } catch (e) {
+      setErrorMsg((e && e.message) ? String(e.message) : "Failed to capture screenshot.");
+    } finally {
+      setIsSnipping(false);
     }
   };
 
@@ -1679,6 +1757,19 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
             {/* Market */}
             <div className="mt-2 text-xs text-gray-400">
               <span>Market: Moroccan default (auto)</span>
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSnipToOrderNote}
+                disabled={isSnipping || isCreating}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-gray-500 bg-gray-800 hover:bg-gray-700 text-[11px] text-white disabled:opacity-60"
+                title="Capture current chat window and append screenshot link to this order note"
+              >
+                <FaRegImage className="text-xs" />
+                <span>{isSnipping ? "Snipping..." : "Snip screen"}</span>
+              </button>
+              {snipMessage ? <span className="text-[11px] text-emerald-300">{snipMessage}</span> : null}
             </div>
             <button
               className={`w-full px-4 py-2 rounded mt-4 font-bold ${

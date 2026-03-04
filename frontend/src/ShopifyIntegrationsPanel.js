@@ -806,7 +806,8 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
         const url = String(s?.url || "").trim();
         if (!ts || !url) return "";
         // Leave vertical spacing so agents can write notes above snips in Shopify note UI.
-        return `\n\nSnip by ${agentName}\nAt: ${ts}\nLink: ${url}`;
+        // Keep URL alone on its own line for best Shopify auto-link behavior.
+        return `\n\nSnip by ${agentName}\nAt: ${ts}\n${url}`;
       })
       .filter(Boolean);
     const combinedOrderNote = [manualOrderNote, ...snipLines].filter(Boolean).join("\n").trim();

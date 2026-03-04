@@ -1996,14 +1996,14 @@ async def create_shopify_order(
         "price": 0.00,
         "code": "STANDARD"
     }]
-    # Optional order note and image URL (stored as note and note_attributes)
+    # Optional order note and image URL.
+    # Keep screenshot links in the main note only; avoid duplicating long text in note_attributes
+    # because Shopify renders those under "Additional details" as flattened non-clickable text.
     order_note = (data.get("order_note") or data.get("note") or "").strip()
     order_image_url = (data.get("order_image_url") or data.get("image_url") or "").strip()
     note_attributes: list[dict] = []
     if order_image_url:
         note_attributes.append({"name": "image_url", "value": order_image_url})
-    if order_note:
-        note_attributes.append({"name": "note_text", "value": order_note})
     # Attach customer to draft order. Shopify expects `customer` object (with id),
     # not `customer_id` at the root of draft_order. Optionally create the customer first.
     order_block = {}

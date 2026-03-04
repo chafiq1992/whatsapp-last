@@ -799,12 +799,14 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
     }
     const safePhone = normalizePhone(orderData.phone);
     const manualOrderNote = String(orderData.order_note || "").trim();
+    const agentName = String(currentAgent || "Agent").trim() || "Agent";
     const snipLines = (pendingOrderSnips || [])
       .map((s) => {
         const ts = String(s?.timestamp || "").trim();
         const url = String(s?.url || "").trim();
         if (!ts || !url) return "";
-        return `[AGENT_SCREENSHOT] ${ts} ${url}`;
+        // Leave vertical spacing so agents can write notes above snips in Shopify note UI.
+        return `\n\nSnip by ${agentName}\nAt: ${ts}\nLink: ${url}`;
       })
       .filter(Boolean);
     const combinedOrderNote = [manualOrderNote, ...snipLines].filter(Boolean).join("\n").trim();

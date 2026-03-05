@@ -440,6 +440,9 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     catalogItemCaption: "",
     catalogSetId: "",
     catalogSetCaption: "",
+    lastOrderSendCatalog: true,
+    lastOrderItemsMax: 10,
+    audioUrl: "",
     // Order confirmation flow (multi-step)
     ocConfirmTitles: "تأكيد الطلب\nتاكيد الطلب",
     ocChangeTitles: "تغيير المعلومات\nتغير المعلومات",
@@ -778,6 +781,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               catalogItemCaption: "",
               catalogSetId: "",
               catalogSetCaption: "",
+              lastOrderSendCatalog: true,
               lastOrderItemsMax: 10,
               audioUrl: "",
               ocEntryGateMode: "tag_or_online_store", // all | tag_or_online_store
@@ -995,6 +999,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               catalogItemCaption: String(aCatalogItem?.caption || aCatalogItem?.text || ""),
               catalogSetId: String(aCatalogSet?.set_id || aCatalogSet?.catalog_set_id || ""),
               catalogSetCaption: String(aCatalogSet?.caption || aCatalogSet?.text || ""),
+              lastOrderSendCatalog: !!aLastOrderItems,
               lastOrderItemsMax: Number(aLastOrderItems?.max_items || 10),
               audioUrl: String(aAudio?.audio_url || aAudio?.url || aAudio?.text || ""),
               ocEntryGateMode: String(aOC?.entry_gate_mode || "all"),
@@ -1332,12 +1337,14 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                     });
                   }
                 } else if (draft.actionMode === "last_order_items_audio") {
-                  actions.push({
-                    type: "send_last_order_catalog_items",
-                    to: String(draft.to || "{{ phone }}"),
-                    max_items: Math.max(1, Number(draft.lastOrderItemsMax || 10)),
-                    ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
-                  });
+                  if (draft.lastOrderSendCatalog !== false) {
+                    actions.push({
+                      type: "send_last_order_catalog_items",
+                      to: String(draft.to || "{{ phone }}"),
+                      max_items: Math.max(1, Number(draft.lastOrderItemsMax || 10)),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                    });
+                  }
                   const audioUrl = String(draft.audioUrl || "").trim();
                   if (audioUrl) {
                     actions.push({
@@ -1491,7 +1498,9 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                     if (retailerId) out.push({ type: "send_catalog_item", to: "{{ phone }}", retailer_id: retailerId, caption });
                   } else if (t === "last_order_items_audio") {
                     const maxItems = Math.max(1, Number(c.lastOrderItemsMax || 10));
-                    out.push({ type: "send_last_order_catalog_items", to: "{{ phone }}", max_items: maxItems });
+                    if (c.sendCatalog !== false) {
+                      out.push({ type: "send_last_order_catalog_items", to: "{{ phone }}", max_items: maxItems });
+                    }
                     const audioUrl = String(c.audioUrl || "").trim();
                     if (audioUrl) out.push({ type: "send_audio_url", to: "{{ phone }}", audio_url: audioUrl });
                   }
@@ -2737,7 +2746,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
       return tagOk || !!String(draft.catalogSetId || "").trim();
     }
     if (draft.actionMode === "last_order_items_audio") {
-      return true;
+      return tagOk || draft.lastOrderSendCatalog !== false || !!String(draft.audioUrl || "").trim();
     }
     // template / order_confirm require a selected template (tag-only rules are allowed, but rarely intended)
     return !!String(draft.templateName || "").trim() || tagOk;
@@ -3432,9 +3441,21 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
               </div>
 
               <div>
-                <div className="text-xs text-slate-500 mb-1">Keywords (comma separated)</div>
-                <input className="w-full border rounded-lg px-3 py-2" value={draft.keywords} onChange={(e) => onChange({ keywords: e.target.value })} placeholder="price, livraison, سومة" />
-                <div className="text-[11px] text-slate-500 mt-1">If empty, it will match all incoming messages.</div>
+                <div className="text-xs text-slate-500 mb-1">Keywords filter (optional)</div>
+                <input
+                  className="w-full border rounded-lg px-3 py-2"
+                  value={draft.keywords}
+                  onChange={(e) => onChange({ keywords: e.target.value })}
+                  placeholder="price, livraison, سومة"
+                  disabled={draft.triggerSource !== "whatsapp" || String(draft.waTriggerMode || "incoming") === "button"}
+                />
+                <div className="text-[11px] text-slate-500 mt-1">
+                  {draft.triggerSource !== "whatsapp" || String(draft.waTriggerMode || "incoming") === "button"
+                    ? "This filter is not used for the selected trigger."
+                    : (String(draft.waTriggerMode || "incoming") === "no_reply"
+                      ? "Optional filter on the customer's message before the no-reply timeout."
+                      : "Extra filter for Incoming message trigger. If empty, all incoming messages match.")}
+                </div>
               </div>
               <div>
                 <div className="text-xs text-slate-500 mb-1">Cooldown (seconds)</div>
@@ -3467,7 +3488,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                     Catalog set
                   </button>
                   <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "last_order_items_audio" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "last_order_items_audio" })}>
-                    Last order items + audio
+                    Last order items + optional audio
                   </button>
                   <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "order_status" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "order_status" })}>
                     Order status lookup
@@ -3664,7 +3685,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                           <option value="list">Reply with list</option>
                                           <option value="catalog_set">Send catalog set</option>
                                           <option value="catalog_item">Send catalog item</option>
-                                          <option value="last_order_items_audio">Last order items + audio</option>
+                                          <option value="last_order_items_audio">Last order items + optional audio</option>
                                         </select>
                                       </div>
 
@@ -3799,6 +3820,14 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
 
                                       {typ === "last_order_items_audio" && (
                                         <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                                          <label className="md:col-span-2 inline-flex items-center gap-2 text-sm text-slate-700">
+                                            <input
+                                              type="checkbox"
+                                              checked={cfg.sendCatalog !== false}
+                                              onChange={(e) => setCfg({ sendCatalog: !!e.target.checked })}
+                                            />
+                                            <span>Send last order catalog items</span>
+                                          </label>
                                           <div>
                                             <div className="text-[11px] text-slate-500 mb-1">Last order items (max)</div>
                                             <input
@@ -3808,6 +3837,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                               className="w-full border rounded-lg px-3 py-2"
                                               value={Number(cfg.lastOrderItemsMax || 10)}
                                               onChange={(e) => setCfg({ lastOrderItemsMax: Number(e.target.value || 10) })}
+                                              disabled={cfg.sendCatalog === false}
                                             />
                                           </div>
                                           <div>
@@ -4009,6 +4039,14 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   </div>
                 ) : (draft.actionMode === "last_order_items_audio" ? (
                   <div className="border rounded-xl p-3 bg-slate-50 space-y-3">
+                    <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={draft.lastOrderSendCatalog !== false}
+                        onChange={(e) => onChange({ lastOrderSendCatalog: !!e.target.checked })}
+                      />
+                      <span>Send last order catalog items</span>
+                    </label>
                     <div>
                       <div className="text-xs text-slate-500 mb-1">Last order items to send</div>
                       <input
@@ -4018,6 +4056,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         className="w-full border rounded-lg px-3 py-2"
                         value={Number(draft.lastOrderItemsMax || 10)}
                         onChange={(e) => onChange({ lastOrderItemsMax: Number(e.target.value || 10) })}
+                        disabled={draft.lastOrderSendCatalog === false}
                       />
                       <div className="text-[11px] text-slate-500 mt-1">
                         Sends interactive catalog items from the customer&rsquo;s latest Shopify order.
@@ -4032,7 +4071,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         placeholder="https://.../voice-note.ogg"
                       />
                       <div className="text-[11px] text-slate-500 mt-1">
-                        If provided, an audio message is sent in the same automation run.
+                        You can send only audio, or audio + catalog items.
                       </div>
                     </div>
                   </div>

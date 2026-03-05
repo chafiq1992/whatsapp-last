@@ -5769,6 +5769,88 @@ class MessageProcessor:
                 "timestamp": datetime.utcnow().isoformat(),
             })
 
+    async def _send_last_order_catalog_items(self, user_id: str, *, max_items: int = 10) -> int:
+        """Send last Shopify order line items as catalog items (best-effort)."""
+        try:
+            import httpx  # type: ignore
+            from .shopify_integration import fetch_customer_by_phone, admin_api_base, _client_args  # type: ignore
+
+            cust = await fetch_customer_by_phone(user_id)
+            if not cust or not isinstance(cust, dict) or not cust.get("customer_id"):
+                return 0
+
+            customer_id = str(cust.get("customer_id") or "").strip()
+            if not customer_id:
+                return 0
+
+            params = {
+                "customer_id": customer_id,
+                "status": "any",
+                "order": "created_at desc",
+                "limit": 1,
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(f"{admin_api_base()}/orders.json", params=params, **_client_args())
+                if resp.status_code >= 400:
+                    return 0
+                orders = (resp.json() or {}).get("orders") or []
+            if not orders:
+                return 0
+
+            order = orders[0] if isinstance(orders[0], dict) else {}
+            line_items = order.get("line_items") if isinstance(order.get("line_items"), list) else []
+            if not line_items:
+                return 0
+
+            limit = max(1, int(max_items or 10))
+            sent = 0
+            for li in line_items:
+                if sent >= limit:
+                    break
+                if not isinstance(li, dict):
+                    continue
+                rid = str(li.get("variant_id") or "").strip()
+                if not rid:
+                    # Fallback for non-variant lines: title -> best catalog match.
+                    try:
+                        title = str(li.get("title") or li.get("name") or "").strip()
+                        hit = await self._best_catalog_match(title) if title else None
+                        rid = str((hit or {}).get("retailer_id") or (hit or {}).get("product_retailer_id") or "").strip()
+                    except Exception:
+                        rid = ""
+                if not rid:
+                    continue
+
+                title = str(li.get("title") or li.get("name") or "").strip()
+                variant_title = str(li.get("variant_title") or "").strip()
+                qty = li.get("quantity")
+                qty_str = ""
+                try:
+                    if qty is not None:
+                        qty_str = str(int(qty))
+                except Exception:
+                    qty_str = str(qty or "").strip()
+                caption_parts = [p for p in [title, variant_title] if p]
+                caption = " - ".join(caption_parts)
+                if qty_str:
+                    caption = f"{caption} x{qty_str}" if caption else f"x{qty_str}"
+
+                await self.process_outgoing_message({
+                    "user_id": user_id,
+                    "type": "catalog_item",
+                    "from_me": True,
+                    "product_retailer_id": rid,
+                    "retailer_id": rid,
+                    "caption": caption,
+                    "message": caption,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent_username": "automation",
+                })
+                sent += 1
+            return sent
+        except Exception:
+            return 0
+
     async def _send_buy_gender_list(self, user_id: str) -> None:
         body = (
             "Veuillez choisir: Fille ou Garçon\n"
@@ -8043,6 +8125,30 @@ class MessageProcessor:
                                     if not set_id:
                                         continue
                                     await self.whatsapp_messenger.send_full_set(to_id, set_id, caption)
+                                elif at in ("send_last_order_catalog_items", "send_last_order_items", "last_order_catalog_items"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    try:
+                                        max_items = int(act.get("max_items") or 10)
+                                    except Exception:
+                                        max_items = 10
+                                    await self._send_last_order_catalog_items(to_id, max_items=max_items)
+                                elif at in ("send_audio", "send_audio_url", "send_whatsapp_audio"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    audio_url = self._render_template(
+                                        str(act.get("audio_url") or act.get("url") or act.get("text") or ""),
+                                        ctx,
+                                    ).strip()
+                                    if not audio_url.startswith(("http://", "https://")):
+                                        continue
+                                    await self.process_outgoing_message({
+                                        "user_id": to_id,
+                                        "type": "audio",
+                                        "from_me": True,
+                                        "message": audio_url,
+                                        "url": audio_url,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                    })
                                 elif at in ("add_tag", "tag"):
                                     tag = str(act.get("tag") or "").strip()
                                     if not tag:
@@ -8567,6 +8673,30 @@ class MessageProcessor:
                                     pass
                             except Exception:
                                 continue
+                        elif at in ("send_last_order_catalog_items", "send_last_order_items", "last_order_catalog_items"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            try:
+                                max_items = int(act.get("max_items") or 10)
+                            except Exception:
+                                max_items = 10
+                            await self._send_last_order_catalog_items(to_id, max_items=max_items)
+                        elif at in ("send_audio", "send_audio_url", "send_whatsapp_audio"):
+                            to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                            audio_url = self._render_template(
+                                str(act.get("audio_url") or act.get("url") or act.get("text") or ""),
+                                ctx,
+                            ).strip()
+                            if not audio_url.startswith(("http://", "https://")):
+                                continue
+                            await self.process_outgoing_message({
+                                "user_id": to_id,
+                                "type": "audio",
+                                "from_me": True,
+                                "message": audio_url,
+                                "url": audio_url,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                            })
                         elif at in ("shopify_order_status", "order_status"):
                             try:
                                 await self._handle_order_status_request(user_id)

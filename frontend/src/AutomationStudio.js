@@ -778,6 +778,8 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               catalogItemCaption: "",
               catalogSetId: "",
               catalogSetCaption: "",
+              lastOrderItemsMax: 10,
+              audioUrl: "",
               ocEntryGateMode: "tag_or_online_store", // all | tag_or_online_store
               ocRequiredTag: "easysell_cod_form",
               ocIncludeOnlineStore: true,
@@ -807,6 +809,8 @@ export default function AutomationStudio({ onClose, embedded = false }) {
             const aList = acts.find((x) => String(x?.type || "").toLowerCase() === "send_list") || null;
             const aCatalogItem = acts.find((x) => ["send_catalog_item", "catalog_item", "send_interactive_product"].includes(String(x?.type || "").toLowerCase())) || null;
             const aCatalogSet = acts.find((x) => ["send_catalog_set", "catalog_set"].includes(String(x?.type || "").toLowerCase())) || null;
+            const aLastOrderItems = acts.find((x) => ["send_last_order_catalog_items", "send_last_order_items", "last_order_catalog_items"].includes(String(x?.type || "").toLowerCase())) || null;
+            const aAudio = acts.find((x) => ["send_audio", "send_audio_url", "send_whatsapp_audio"].includes(String(x?.type || "").toLowerCase())) || null;
             const aStatus = acts.find((x) => String(x?.type || "").toLowerCase() === "shopify_order_status") || null;
             const trig = (r && r.trigger) || {};
             const source = String(trig.source || "whatsapp").toLowerCase();
@@ -927,14 +931,18 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               retargetingBatchEveryMinutes: isRetargeting ? Number(trig?.batch_every_minutes || 30) : 30,
               retargetingShopifyTagOnSent: isRetargeting ? String(trig?.shopify_customer_tag_on_sent || "") : "",
               retargetingIgnoreTags: isRetargeting ? String(trig?.ignore_shopify_customer_tags || "") : "",
-              actionMode: aStatus
-                ? "order_status"
-                : (aCatalogItem
-                  ? "catalog_item"
-                  : (aCatalogSet
-                    ? "catalog_set"
-                    : (aButtons ? "buttons" : (aList ? "list" : (aOC ? "order_confirm" : (aTpl ? "template" : "text")))))),
-              to: String((aText?.to || aTpl?.to || aOC?.to || aButtons?.to || aList?.to || aCatalogItem?.to || aCatalogSet?.to) || "{{ phone }}"),
+              actionMode: (() => {
+                if (aStatus) return "order_status";
+                if (aLastOrderItems) return "last_order_items_audio";
+                if (aCatalogItem) return "catalog_item";
+                if (aCatalogSet) return "catalog_set";
+                if (aButtons) return "buttons";
+                if (aList) return "list";
+                if (aOC) return "order_confirm";
+                if (aTpl) return "template";
+                return "text";
+              })(),
+              to: String((aText?.to || aTpl?.to || aOC?.to || aButtons?.to || aList?.to || aCatalogItem?.to || aCatalogSet?.to || aLastOrderItems?.to || aAudio?.to) || "{{ phone }}"),
               templateName: String(aTpl?.template_name || aOC?.template_name || ""),
               templateLanguage: String(aTpl?.language || aOC?.language || "en"),
               templateVars: tplVars,
@@ -987,6 +995,8 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               catalogItemCaption: String(aCatalogItem?.caption || aCatalogItem?.text || ""),
               catalogSetId: String(aCatalogSet?.set_id || aCatalogSet?.catalog_set_id || ""),
               catalogSetCaption: String(aCatalogSet?.caption || aCatalogSet?.text || ""),
+              lastOrderItemsMax: Number(aLastOrderItems?.max_items || 10),
+              audioUrl: String(aAudio?.audio_url || aAudio?.url || aAudio?.text || ""),
               ocEntryGateMode: String(aOC?.entry_gate_mode || "all"),
               ocRequiredTag: String(aOC?.required_tag || "easysell_cod_form"),
               ocIncludeOnlineStore: aOC?.include_online_store !== undefined ? !!aOC.include_online_store : true,
@@ -1321,6 +1331,21 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
                     });
                   }
+                } else if (draft.actionMode === "last_order_items_audio") {
+                  actions.push({
+                    type: "send_last_order_catalog_items",
+                    to: String(draft.to || "{{ phone }}"),
+                    max_items: Math.max(1, Number(draft.lastOrderItemsMax || 10)),
+                    ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                  });
+                  const audioUrl = String(draft.audioUrl || "").trim();
+                  if (audioUrl) {
+                    actions.push({
+                      type: "send_audio_url",
+                      to: String(draft.to || "{{ phone }}"),
+                      audio_url: audioUrl,
+                    });
+                  }
                 } else if (draft.actionMode === "order_status") {
                   actions.push({ type: "shopify_order_status" });
                 } else {
@@ -1464,6 +1489,11 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                     const retailerId = String(c.catalogItemRetailerId || "").trim();
                     const caption = String(c.catalogItemCaption || "").trim();
                     if (retailerId) out.push({ type: "send_catalog_item", to: "{{ phone }}", retailer_id: retailerId, caption });
+                  } else if (t === "last_order_items_audio") {
+                    const maxItems = Math.max(1, Number(c.lastOrderItemsMax || 10));
+                    out.push({ type: "send_last_order_catalog_items", to: "{{ phone }}", max_items: maxItems });
+                    const audioUrl = String(c.audioUrl || "").trim();
+                    if (audioUrl) out.push({ type: "send_audio_url", to: "{{ phone }}", audio_url: audioUrl });
                   }
                   return out;
                 };
@@ -2706,6 +2736,9 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     if (draft.actionMode === "catalog_set") {
       return tagOk || !!String(draft.catalogSetId || "").trim();
     }
+    if (draft.actionMode === "last_order_items_audio") {
+      return true;
+    }
     // template / order_confirm require a selected template (tag-only rules are allowed, but rarely intended)
     return !!String(draft.templateName || "").trim() || tagOk;
   }, [draft]);
@@ -3433,6 +3466,9 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "catalog_set" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "catalog_set" })}>
                     Catalog set
                   </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "last_order_items_audio" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "last_order_items_audio" })}>
+                    Last order items + audio
+                  </button>
                   <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "order_status" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "order_status" })}>
                     Order status lookup
                   </button>
@@ -3628,6 +3664,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                           <option value="list">Reply with list</option>
                                           <option value="catalog_set">Send catalog set</option>
                                           <option value="catalog_item">Send catalog item</option>
+                                          <option value="last_order_items_audio">Last order items + audio</option>
                                         </select>
                                       </div>
 
@@ -3755,6 +3792,31 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                               value={String(cfg.catalogItemCaption || "")}
                                               onChange={(e) => setCfg({ catalogItemCaption: e.target.value })}
                                               placeholder="Short caption…"
+                                            />
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {typ === "last_order_items_audio" && (
+                                        <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">Last order items (max)</div>
+                                            <input
+                                              type="number"
+                                              min={1}
+                                              max={30}
+                                              className="w-full border rounded-lg px-3 py-2"
+                                              value={Number(cfg.lastOrderItemsMax || 10)}
+                                              onChange={(e) => setCfg({ lastOrderItemsMax: Number(e.target.value || 10) })}
+                                            />
+                                          </div>
+                                          <div>
+                                            <div className="text-[11px] text-slate-500 mb-1">Audio URL (optional)</div>
+                                            <input
+                                              className="w-full border rounded-lg px-3 py-2"
+                                              value={String(cfg.audioUrl || "")}
+                                              onChange={(e) => setCfg({ audioUrl: e.target.value })}
+                                              placeholder="https://.../voice-note.ogg"
                                             />
                                           </div>
                                         </div>
@@ -3945,6 +4007,35 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       />
                     </div>
                   </div>
+                ) : (draft.actionMode === "last_order_items_audio" ? (
+                  <div className="border rounded-xl p-3 bg-slate-50 space-y-3">
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Last order items to send</div>
+                      <input
+                        type="number"
+                        min={1}
+                        max={30}
+                        className="w-full border rounded-lg px-3 py-2"
+                        value={Number(draft.lastOrderItemsMax || 10)}
+                        onChange={(e) => onChange({ lastOrderItemsMax: Number(e.target.value || 10) })}
+                      />
+                      <div className="text-[11px] text-slate-500 mt-1">
+                        Sends interactive catalog items from the customer&rsquo;s latest Shopify order.
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Audio URL (optional)</div>
+                      <input
+                        className="w-full border rounded-lg px-3 py-2"
+                        value={draft.audioUrl || ""}
+                        onChange={(e) => onChange({ audioUrl: e.target.value })}
+                        placeholder="https://.../voice-note.ogg"
+                      />
+                      <div className="text-[11px] text-slate-500 mt-1">
+                        If provided, an audio message is sent in the same automation run.
+                      </div>
+                    </div>
+                  </div>
                 ) : (draft.actionMode === "order_status" ? (
                   <div className="border rounded-xl p-3 bg-slate-50">
                     <div className="text-xs text-slate-500 mb-1">Order status lookup</div>
@@ -3963,7 +4054,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       Variables: <span className="font-mono">{"{{ phone }}"}</span>, <span className="font-mono">{"{{ text }}"}</span>, <span className="font-mono">{"{{ order_number }}"}</span>
                     </div>
                   </div>
-                ))))))}
+                )))))))}
               </div>
 
               <div className="md:col-span-2">
@@ -3987,7 +4078,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   <div className="text-sm text-slate-600 mt-1">
                     To build multi-level branches: create one rule that sends buttons/list, then create additional rules with trigger
                     <span className="font-mono text-xs"> Button/list click</span> and match each button ID. Each branch rule can reply with
-                    text, another buttons/list message, catalog item, or a catalog set.
+                    text, another buttons/list message, catalog item, catalog set, or last-order items + audio.
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button

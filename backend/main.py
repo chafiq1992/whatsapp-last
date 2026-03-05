@@ -738,6 +738,27 @@ def _vlog(*args, **kwargs):
     if LOG_VERBOSE:
         print(*args, **kwargs)
 
+# Sample noisy INFO logs (send loops / websocket churn) to reduce Cloud Logging volume.
+LOG_SAMPLE_SEND_SECONDS = float(os.getenv("LOG_SAMPLE_SEND_SECONDS", "30"))
+LOG_SAMPLE_WS_SECONDS = float(os.getenv("LOG_SAMPLE_WS_SECONDS", "60"))
+_SAMPLED_LOG_LAST_TS: Dict[str, float] = {}
+
+
+def _sampled_info(sample_key: str, every_seconds: float, msg: str, *args) -> None:
+    try:
+        every = float(every_seconds or 0)
+    except Exception:
+        every = 0.0
+    now = time.monotonic()
+    if every <= 0:
+        logging.getLogger(__name__).info(msg, *args)
+        return
+    last = _SAMPLED_LOG_LAST_TS.get(sample_key, 0.0)
+    if (now - last) < every:
+        return
+    _SAMPLED_LOG_LAST_TS[sample_key] = now
+    logging.getLogger(__name__).info(msg, *args)
+
 # Suppress noisy prints in production while preserving error-like messages
 try:
     import builtins as _builtins  # type: ignore
@@ -1376,8 +1397,10 @@ class ConnectionManager:
                     pass
             del self.message_queue[key]
         
-        # Avoid print+emoji which gets promoted to ERROR by the smart_print wrapper.
-        logging.getLogger(__name__).info(
+        # WebSocket connect/disconnect events can be high-frequency; sample them.
+        _sampled_info(
+            f"ws_connect:{key}",
+            LOG_SAMPLE_WS_SECONDS,
             "WS connected user_id=%s connections_for_user=%s",
             key,
             len(self.active_connections.get(key) or []),
@@ -1394,12 +1417,9 @@ class ConnectionManager:
                 del self.active_connections[str(key)]
             
             # Normal disconnects are expected (tab close, network change, idle timeout).
-            # Keep this as INFO to reduce log noise/cost.
-            logging.getLogger(__name__).info("WS disconnected user_id=%s", key)
+            _sampled_info(f"ws_disconnect:{key}", LOG_SAMPLE_WS_SECONDS, "WS disconnected user_id=%s", key)
     
     async def _send_local(self, user_id: str, message: dict, workspace: str | None = None):
-        _vlog(f"📤 Attempting to send to user {user_id}")
-        _vlog("📤 Message content:", json.dumps(message, indent=2))
         """Send message to all connections of a specific user"""
         # Determine workspace for routing:
         # - explicit arg wins
@@ -1416,6 +1436,19 @@ class ConnectionManager:
         except Exception:
             ws = None
         ws = ws or get_current_workspace()
+        # Sampling avoids flooding logs when status updates are sent in bursts.
+        try:
+            mtype = str((message or {}).get("type") or "")
+        except Exception:
+            mtype = ""
+        _sampled_info(
+            f"ws_send:{ws}:{user_id}:{mtype}",
+            LOG_SAMPLE_SEND_SECONDS,
+            "WS send attempt user_id=%s workspace=%s type=%s",
+            user_id,
+            ws,
+            mtype,
+        )
 
         # Always attach workspace to WS payloads so the frontend can safely ignore
         # cross-workspace events (and so we can debug routing issues).
@@ -6248,10 +6281,37 @@ class MessageProcessor:
                                             resp = await client.get(download_url)
                                     except Exception:
                                         pass
-                                if resp.status_code >= 400 or not resp.content:
+                                content = resp.content if (resp.status_code < 400 and resp.content) else b""
+                                ctype = resp.headers.get("Content-Type", "") if content else ""
+
+                                # Last-resort fallback for private GCS objects:
+                                # download with service-account credentials instead of public HTTP.
+                                if not content:
+                                    try:
+                                        bucket, blob_name = _parse_gcs_url(media_url)
+                                    except Exception:
+                                        bucket, blob_name = (None, None)
+                                    if bucket and blob_name:
+                                        try:
+                                            loop = asyncio.get_running_loop()
+
+                                            def _gcs_download():
+                                                client_gcs = _get_client()
+                                                blob = client_gcs.bucket(bucket).blob(blob_name)
+                                                data = blob.download_as_bytes()
+                                                return data, str(blob.content_type or "")
+
+                                            data2, ctype2 = await loop.run_in_executor(None, _gcs_download)
+                                            if data2:
+                                                content = data2
+                                                ctype = ctype2 or ctype
+                                        except Exception:
+                                            pass
+
+                                if not content:
                                     raise Exception(f"download status {resp.status_code}")
+
                                 # Determine extension from content-type or URL
-                                ctype = resp.headers.get("Content-Type", "")
                                 ext = None
                                 if "audio/ogg" in ctype or "opus" in ctype:
                                     ext = ".ogg"
@@ -6274,7 +6334,7 @@ class MessageProcessor:
                                 ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                                 local_tmp_path = self.media_dir / f"{message['type']}_{ts}_{uuid.uuid4().hex[:8]}{ext}"
                                 async with aiofiles.open(local_tmp_path, "wb") as f:
-                                    await f.write(resp.content)
+                                    await f.write(content)
 
                             # Always normalize audio → OGG/Opus 48k mono
                             if message["type"] == "audio":

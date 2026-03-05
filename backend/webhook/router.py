@@ -43,17 +43,23 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
         # POST
         try:
             # Validate signature if we have app secret(s).
+            # Always try BOTH single-secret and multi-secret sources; do not let one override the other.
+            # This prevents false 401s during secret rotation/mixed config.
             secrets = []
             try:
-                secrets = [s.strip() for s in (rt.meta_app_secrets or []) if str(s or "").strip()]
+                collected = []
+                for s in (rt.meta_app_secrets or []):
+                    cleaned = str(s or "").strip()
+                    if cleaned:
+                        collected.append(cleaned)
+                single_secret = str(getattr(rt, "meta_app_secret", "") or "").strip()
+                if single_secret:
+                    collected.append(single_secret)
+                # Preserve order while removing duplicates.
+                seen = set()
+                secrets = [s for s in collected if not (s in seen or seen.add(s))]
             except Exception:
                 secrets = []
-            if not secrets:
-                try:
-                    if str(getattr(rt, "meta_app_secret", "") or "").strip():
-                        secrets = [str(getattr(rt, "meta_app_secret", "") or "").strip()]
-                except Exception:
-                    secrets = []
 
             if secrets:
                 body_bytes = await request.body()

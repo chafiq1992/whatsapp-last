@@ -6580,6 +6580,38 @@ class MessageProcessor:
                 except Exception:
                     return ""
 
+            async def _ws_from_inbox_env(pid: str) -> str:
+                """Map incoming phone_number_id by scanning per-workspace inbox settings.
+
+                Supports both the primary phone_number_id and additional allowed_phone_number_ids,
+                so workspaces using multiple sender numbers don't get dropped as "unknown".
+                """
+                try:
+                    p = str(pid or "").strip()
+                    if not p:
+                        return ""
+                    try:
+                        candidates = sorted(list(_all_workspaces_set()))
+                    except Exception:
+                        candidates = sorted(list(set((WORKSPACES or [DEFAULT_WORKSPACE]))))
+                    for w in candidates:
+                        ww = _coerce_workspace(w)
+                        if not ww:
+                            continue
+                        try:
+                            cfg = await self._get_inbox_env(ww)
+                            pid_primary = str((cfg or {}).get("phone_number_id") or "").strip()
+                            if pid_primary and pid_primary == p:
+                                return ww
+                            allowed_ids = set((cfg or {}).get("allowed_phone_number_ids") or set())
+                            if p in allowed_ids:
+                                return ww
+                        except Exception:
+                            continue
+                    return ""
+                except Exception:
+                    return ""
+
             # Prefer runtime mapping (can be updated from DB settings). Fallback to env-derived mapping.
             ws_from_phone = (RUNTIME_PHONE_ID_TO_WORKSPACE.get(incoming_phone_id) or PHONE_ID_TO_WORKSPACE.get(incoming_phone_id))
             # Workspace hint is best-effort; the authoritative routing key is metadata.phone_number_id.
@@ -6590,6 +6622,10 @@ class MessageProcessor:
                 _vlog(
                     f"⚠️ Webhook workspace hint mismatch: hinted={hinted_ws_norm} phone_map={ws_from_phone_norm} phone_number_id={incoming_phone_id} (using phone_map)"
                 )
+            if not derived_ws:
+                # Last chance: map by persisted per-workspace inbox env (including allowlist).
+                # This prevents dropping valid webhooks when a workspace uses multiple sender numbers.
+                derived_ws = await _ws_from_inbox_env(incoming_phone_id)
             if not derived_ws:
                 # Unknown phone_number_id → do not process into any workspace (prevents leakage).
                 _vlog(f"⏭️ Skipping webhook: unknown phone_number_id={incoming_phone_id}")
@@ -8117,13 +8153,32 @@ class MessageProcessor:
                     "agent_username": "automation",
                 })
 
-            # Optional: after confirm, send ordered items as catalog cards (best-effort title -> catalog match)
+            # Optional: after confirm, send ordered items as catalog cards.
+            # Prefer exact Shopify variant ids captured at template-time, then
+            # fallback to best-effort title -> catalog matching for legacy state.
             if branch == "confirm" and bool(state.get("send_items")):
                 try:
-                    titles = state.get("line_item_titles") if isinstance(state.get("line_item_titles"), list) else []
-                    titles = [str(x or "").strip() for x in titles if str(x or "").strip()]
                     max_items = int(state.get("max_items") or 10)
                     sent = 0
+                    variant_ids = state.get("line_item_variant_ids") if isinstance(state.get("line_item_variant_ids"), list) else []
+                    variant_ids = [str(x or "").strip() for x in variant_ids if str(x or "").strip()]
+                    for rid in variant_ids:
+                        if sent >= max_items:
+                            break
+                        await self.process_outgoing_message({
+                            "user_id": user_id,
+                            "type": "catalog_item",
+                            "from_me": True,
+                            # Keep both ids for transport + UI parity.
+                            "product_retailer_id": rid,
+                            "retailer_id": rid,
+                            "caption": "",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "agent_username": "automation",
+                        })
+                        sent += 1
+                    titles = state.get("line_item_titles") if isinstance(state.get("line_item_titles"), list) else []
+                    titles = [str(x or "").strip() for x in titles if str(x or "").strip()]
                     for t in titles:
                         if sent >= max_items:
                             break
@@ -8449,11 +8504,20 @@ class MessageProcessor:
                             try:
                                 line_items = (ctx.get("line_items") if isinstance(ctx.get("line_items"), list) else []) or []
                                 titles = []
+                                variant_ids = []
                                 for li in line_items:
                                     if isinstance(li, dict):
                                         t = str(li.get("title") or li.get("name") or "").strip()
                                         if t:
                                             titles.append(t)
+                                        rid = str(
+                                            li.get("variant_id")
+                                            or li.get("retailer_id")
+                                            or li.get("product_retailer_id")
+                                            or ""
+                                        ).strip()
+                                        if rid:
+                                            variant_ids.append(rid)
                                 await self._set_order_confirm_pending(
                                     ws=_coerce_workspace(ws),
                                     user_id=to_id,
@@ -8471,6 +8535,7 @@ class MessageProcessor:
                                         "talk_audio_url": str(act.get("talk_audio_url") or ""),
                                         "send_items": bool(act.get("send_items")),
                                         "max_items": int(act.get("max_items") or 10),
+                                        "line_item_variant_ids": variant_ids,
                                         "line_item_titles": titles,
                                         "created_at": datetime.utcnow().isoformat(),
                                     },
@@ -8932,11 +8997,20 @@ class MessageProcessor:
                                 order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
                                 line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
                                 titles = []
+                                variant_ids = []
                                 for li in line_items:
                                     if isinstance(li, dict):
                                         t = str(li.get("title") or li.get("name") or "").strip()
                                         if t:
                                             titles.append(t)
+                                        rid = str(
+                                            li.get("variant_id")
+                                            or li.get("retailer_id")
+                                            or li.get("product_retailer_id")
+                                            or ""
+                                        ).strip()
+                                        if rid:
+                                            variant_ids.append(rid)
                                 await self._set_order_confirm_pending(
                                     ws=_coerce_workspace(ws),
                                     user_id=to_id,
@@ -8954,6 +9028,7 @@ class MessageProcessor:
                                         "talk_audio_url": str(act.get("talk_audio_url") or ""),
                                         "send_items": bool(act.get("send_items")),
                                         "max_items": int(act.get("max_items") or 10),
+                                        "line_item_variant_ids": variant_ids,
                                         "line_item_titles": titles,
                                         "created_at": datetime.utcnow().isoformat(),
                                     },
@@ -9246,6 +9321,7 @@ class MessageProcessor:
                             })
                             try:
                                 titles = []
+                                variant_ids = []
                                 order_obj = ctx.get("order") if isinstance(ctx.get("order"), dict) else {}
                                 line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
                                 for li in line_items:
@@ -9253,6 +9329,14 @@ class MessageProcessor:
                                         t = str(li.get("title") or li.get("name") or "").strip()
                                         if t:
                                             titles.append(t)
+                                        rid = str(
+                                            li.get("variant_id")
+                                            or li.get("retailer_id")
+                                            or li.get("product_retailer_id")
+                                            or ""
+                                        ).strip()
+                                        if rid:
+                                            variant_ids.append(rid)
                                 await self._set_order_confirm_pending(
                                     ws=_coerce_workspace(ws),
                                     user_id=to_id,
@@ -9270,6 +9354,7 @@ class MessageProcessor:
                                         "talk_audio_url": str(act.get("talk_audio_url") or ""),
                                         "send_items": bool(act.get("send_items")),
                                         "max_items": int(act.get("max_items") or 10),
+                                        "line_item_variant_ids": variant_ids,
                                         "line_item_titles": titles,
                                         "created_at": datetime.utcnow().isoformat(),
                                     },

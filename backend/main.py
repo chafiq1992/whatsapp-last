@@ -5178,6 +5178,10 @@ class MessageProcessor:
         self._template_def_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
         self._template_list_cache: dict[str, tuple[float, list[dict]]] = {}
         self._template_cache_ttl_sec = 10 * 60
+        # Cache resolved WhatsApp media ids for template header image links
+        # key: (workspace, image_link) -> (ts, media_id)
+        self._template_header_media_cache: dict[tuple[str, str], tuple[float, str]] = {}
+        self._template_header_media_cache_ttl_sec = 6 * 3600
 
     async def _ensure_automation_rules_v2(self) -> list[dict]:
         """Ensure the global automation rules store exists in the shared auth/settings DB.
@@ -5983,6 +5987,11 @@ class MessageProcessor:
                         comps = message.get("template_components") or []
                         if not isinstance(comps, list):
                             comps = []
+                        comps = await self._ensure_template_components_for_send(
+                            template_name=tname,
+                            language=lang,
+                            components=comps,
+                        )
                         wa_response = await self.whatsapp_messenger.send_template_message(
                             user_id,
                             tname,
@@ -7597,6 +7606,140 @@ class MessageProcessor:
         }
         return snap
 
+    async def _fetch_template_header_image_bytes(self, raw_url: str) -> tuple[bytes, str]:
+        """Best-effort fetch for template header image links.
+
+        Supports private GCS URLs via signed URL and SDK fallback.
+        Returns (bytes, content_type).
+        """
+        src = str(raw_url or "").strip()
+        if not src.startswith(("http://", "https://")):
+            raise Exception("Template header image must be http(s)")
+
+        download_url = src
+        try:
+            signed = maybe_signed_url_for(src, ttl_seconds=3600)
+            if signed:
+                download_url = signed
+        except Exception:
+            download_url = src
+
+        content: bytes = b""
+        ctype = ""
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(download_url)
+            if resp.status_code == 403 and download_url == src:
+                try:
+                    signed2 = maybe_signed_url_for(src, ttl_seconds=3600)
+                    if signed2:
+                        resp = await client.get(signed2)
+                except Exception:
+                    pass
+            if resp.status_code < 400 and resp.content:
+                content = resp.content
+                ctype = str(resp.headers.get("Content-Type") or "")
+
+        if not content:
+            try:
+                bucket, blob_name = _parse_gcs_url(src)
+            except Exception:
+                bucket, blob_name = (None, None)
+            if bucket and blob_name:
+                loop = asyncio.get_running_loop()
+
+                def _gcs_download() -> tuple[bytes, str]:
+                    client_gcs = _get_client()
+                    blob = client_gcs.bucket(bucket).blob(blob_name)
+                    data = blob.download_as_bytes()
+                    return data, str(blob.content_type or "")
+
+                data2, ctype2 = await loop.run_in_executor(None, _gcs_download)
+                if data2:
+                    content = data2
+                    ctype = ctype2 or ctype
+
+        if not content:
+            raise Exception("Unable to download template header image")
+        return content, ctype
+
+    async def _compress_template_header_image(self, image_bytes: bytes, *, max_bytes: int = 5 * 1024 * 1024) -> bytes:
+        """Normalize template header image to JPEG and enforce max size."""
+        max_limit = max(256 * 1024, min(8 * 1024 * 1024, int(max_bytes)))
+
+        def _encode() -> bytes:
+            im = Image.open(io.BytesIO(image_bytes))
+            im = ImageOps.exif_transpose(im).convert("RGB")
+            base_w = int(im.width or 1024)
+            cur_w = max(320, min(base_w, 1280))
+            cur_q = 82
+            best = image_bytes
+            lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+            for _ in range(12):
+                if im.width > cur_w:
+                    new_h = max(1, int(im.height * (cur_w / float(im.width))))
+                    out_im = im.resize((cur_w, new_h), lanczos)
+                else:
+                    out_im = im
+                buf = io.BytesIO()
+                out_im.save(buf, format="JPEG", quality=cur_q, optimize=True, progressive=True)
+                cand = buf.getvalue()
+                best = cand
+                if len(cand) <= max_limit:
+                    return cand
+                if cur_q > 46:
+                    cur_q = max(42, cur_q - 8)
+                else:
+                    cur_w = max(240, int(cur_w * 0.85))
+                    cur_q = 72
+            return best
+
+        try:
+            return await asyncio.to_thread(_encode)
+        except Exception:
+            return image_bytes
+
+    async def _resolve_template_header_image_media_id(self, image_link: str) -> str:
+        """Fetch/compress/upload header image and return WhatsApp media id."""
+        ws = _coerce_workspace(get_current_workspace())
+        link = str(image_link or "").strip()
+        if not link:
+            raise Exception("Missing template header image link")
+
+        cache_key = (ws, link)
+        now = time.time()
+        try:
+            cached = self._template_header_media_cache.get(cache_key)
+            if cached and (now - float(cached[0])) < float(self._template_header_media_cache_ttl_sec):
+                mid = str(cached[1] or "").strip()
+                if mid:
+                    return mid
+        except Exception:
+            pass
+
+        tmp_path: Path | None = None
+        try:
+            image_bytes, _ = await self._fetch_template_header_image_bytes(link)
+            compressed = await self._compress_template_header_image(image_bytes, max_bytes=5 * 1024 * 1024)
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            tmp_path = self.media_dir / f"tpl_hdr_{ts}_{uuid.uuid4().hex[:8]}.jpg"
+            async with aiofiles.open(tmp_path, "wb") as f:
+                await f.write(compressed)
+            media_info = await self._upload_media_to_whatsapp(str(tmp_path), "image")
+            media_id = str((media_info or {}).get("id") or "").strip() if isinstance(media_info, dict) else str(media_info or "").strip()
+            if not media_id:
+                raise Exception("No media id returned for template header image")
+            try:
+                self._template_header_media_cache[cache_key] = (now, media_id)
+            except Exception:
+                pass
+            return media_id
+        finally:
+            if tmp_path and tmp_path.exists():
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     async def _ensure_template_components_for_send(self, *, template_name: str, language: str, components: list[dict] | None) -> list[dict]:
         """Ensure required template components are present before send (best-effort).
 
@@ -7720,7 +7863,9 @@ class MessageProcessor:
                     # Prepend header to avoid ordering issues
                     comps = [header_comp] + [c for c in comps if isinstance(c, dict) and str(c.get("type") or "").lower() != "header"]
 
-        # WhatsApp rejects large IMAGE headers (>5MB). Normalize Shopify CDN links through /proxy-image.
+        # WhatsApp rejects large IMAGE headers (>5MB).
+        # For reliability, resolve header image links to WhatsApp media_id after compression.
+        # This avoids broken public links and guarantees size constraints before send.
         if header_fmt == "IMAGE":
             try:
                 normalized: list[dict] = []
@@ -7738,8 +7883,16 @@ class MessageProcessor:
                             if str(pp.get("type") or "").lower() == "image":
                                 img = dict(pp.get("image") or {}) if isinstance(pp.get("image"), dict) else {}
                                 link = str(img.get("link") or "").strip()
-                                if link:
-                                    img["link"] = _to_proxy_image(link)
+                                mid = str(img.get("id") or "").strip()
+                                if link and not mid:
+                                    try:
+                                        img["id"] = await self._resolve_template_header_image_media_id(link)
+                                        img.pop("link", None)
+                                    except Exception as _exc:
+                                        # Last-resort fallback: keep a deterministic compressed proxy URL.
+                                        # This is still best-effort and requires Meta to fetch the link.
+                                        _vlog(f"template image media-id resolve failed, fallback to proxy link: {_exc}")
+                                        img["link"] = _to_proxy_image(link)
                                 pp["image"] = img
                             new_params.append(pp)
                         cc["parameters"] = new_params
@@ -13453,11 +13606,16 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
                         if digits.startswith("0") and len(digits) >= 9:
                             digits = "212" + digits[1:]
                         try:
+                            rendered_comps = await message_processor._ensure_template_components_for_send(
+                                template_name=template_name,
+                                language=language,
+                                components=components if isinstance(components, list) else [],
+                            )
                             wa_response = await message_processor.whatsapp_messenger.send_template_message(
                                 to=digits,
                                 template_name=template_name,
                                 language=language,
-                                components=components if components else None,
+                                components=rendered_comps if rendered_comps else None,
                             )
                             sent += 1
                             CUSTOMER_CAMPAIGN_JOBS[job_id]["sent"] = sent
@@ -13473,7 +13631,7 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
                                         snap = await message_processor._build_template_snapshot(
                                             template_name=template_name,
                                             language=language,
-                                            components=components if components else [],
+                                            components=rendered_comps if rendered_comps else [],
                                         )
                                     except Exception:
                                         snap = None
@@ -13488,7 +13646,7 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
                                         "agent_username": "automation",
                                         "template_name": template_name,
                                         "template_language": language,
-                                        "template_components": components if components else [],
+                                        "template_components": rendered_comps if rendered_comps else [],
                                         "template_snapshot": snap or None,
                                     }
                                     await db_manager.save_message(msg, str(wa_message_id), "sent")

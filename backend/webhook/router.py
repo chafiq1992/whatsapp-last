@@ -12,6 +12,24 @@ from .db_queue import db_enqueue_webhook, ensure_webhook_events_table
 from .runtime import WebhookRuntime
 
 
+def _extract_meta_sha256_signature(sig_header: str) -> str:
+    """Parse X-Hub-Signature-256 and return normalized hex digest."""
+    raw = str(sig_header or "").strip()
+    if not raw:
+        return ""
+    lower = raw.lower()
+    if lower.startswith("sha256="):
+        raw = raw.split("=", 1)[1].strip()
+    raw = raw.strip().strip('"').strip("'").lower()
+    if len(raw) != 64:
+        return ""
+    try:
+        int(raw, 16)
+    except Exception:
+        return ""
+    return raw
+
+
 def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
     router = APIRouter()
 
@@ -64,8 +82,7 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
             if secrets:
                 body_bytes = await request.body()
                 sig_header = request.headers.get("X-Hub-Signature-256", "")
-                presented = sig_header.split("=", 1)[1] if "=" in sig_header else sig_header
-                presented = (presented or "").strip()
+                presented = _extract_meta_sha256_signature(sig_header)
                 ok = False
                 if presented:
                     for sec in secrets:
@@ -87,7 +104,7 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                     except Exception:
                         pass
                     return PlainTextResponse("Invalid signature", status_code=401)
-                data = json.loads(body_bytes.decode("utf-8") or "{}")
+                data = json.loads(body_bytes or b"{}")
             else:
                 data = await request.json()
         except Exception:

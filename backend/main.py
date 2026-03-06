@@ -5802,39 +5802,12 @@ class MessageProcessor:
                 "timestamp": datetime.utcnow().isoformat(),
             })
 
-    async def _send_last_order_catalog_items(self, user_id: str, *, max_items: int = 10) -> int:
-        """Send last Shopify order line items as catalog items (best-effort)."""
+    async def _send_catalog_items_from_line_items(self, user_id: str, line_items: list[dict], *, max_items: int = 10) -> int:
+        """Send catalog cards from explicit line items with robust fallbacks."""
         try:
-            import httpx  # type: ignore
-            from .shopify_integration import fetch_customer_by_phone, admin_api_base, _client_args  # type: ignore
-
-            cust = await fetch_customer_by_phone(user_id)
-            if not cust or not isinstance(cust, dict) or not cust.get("customer_id"):
+            if not isinstance(line_items, list) or not line_items:
+                _vlog(f"automation catalog send skip: empty line_items for user={user_id}")
                 return 0
-
-            customer_id = str(cust.get("customer_id") or "").strip()
-            if not customer_id:
-                return 0
-
-            params = {
-                "customer_id": customer_id,
-                "status": "any",
-                "order": "created_at desc",
-                "limit": 1,
-            }
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(f"{admin_api_base()}/orders.json", params=params, **_client_args())
-                if resp.status_code >= 400:
-                    return 0
-                orders = (resp.json() or {}).get("orders") or []
-            if not orders:
-                return 0
-
-            order = orders[0] if isinstance(orders[0], dict) else {}
-            line_items = order.get("line_items") if isinstance(order.get("line_items"), list) else []
-            if not line_items:
-                return 0
-
             limit = max(1, int(max_items or 10))
             sent = 0
             for li in line_items:
@@ -5846,8 +5819,8 @@ class MessageProcessor:
                 if not rid:
                     # Fallback for non-variant lines: title -> best catalog match.
                     try:
-                        title = str(li.get("title") or li.get("name") or "").strip()
-                        hit = await self._best_catalog_match(title) if title else None
+                        title0 = str(li.get("title") or li.get("name") or "").strip()
+                        hit = await self._best_catalog_match(title0) if title0 else None
                         rid = str((hit or {}).get("retailer_id") or (hit or {}).get("product_retailer_id") or "").strip()
                     except Exception:
                         rid = ""
@@ -5880,8 +5853,53 @@ class MessageProcessor:
                     "agent_username": "automation",
                 })
                 sent += 1
+            _vlog(f"automation catalog send done: user={user_id} sent={sent} requested_max={max_items}")
             return sent
-        except Exception:
+        except Exception as exc:
+            _vlog(f"automation catalog send failed: user={user_id} error={exc}")
+            return 0
+
+    async def _send_last_order_catalog_items(self, user_id: str, *, max_items: int = 10) -> int:
+        """Send last Shopify order line items as catalog items (best-effort)."""
+        try:
+            import httpx  # type: ignore
+            from .shopify_integration import fetch_customer_by_phone, admin_api_base, _client_args  # type: ignore
+
+            cust = await fetch_customer_by_phone(user_id)
+            if not cust or not isinstance(cust, dict) or not cust.get("customer_id"):
+                _vlog(f"automation last_order catalog skip: no customer for user={user_id}")
+                return 0
+
+            customer_id = str(cust.get("customer_id") or "").strip()
+            if not customer_id:
+                _vlog(f"automation last_order catalog skip: empty customer_id for user={user_id}")
+                return 0
+
+            params = {
+                "customer_id": customer_id,
+                "status": "any",
+                "order": "created_at desc",
+                "limit": 1,
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(f"{admin_api_base()}/orders.json", params=params, **_client_args())
+                if resp.status_code >= 400:
+                    _vlog(f"automation last_order catalog skip: orders fetch status={resp.status_code} user={user_id}")
+                    return 0
+                orders = (resp.json() or {}).get("orders") or []
+            if not orders:
+                _vlog(f"automation last_order catalog skip: no orders for user={user_id}")
+                return 0
+
+            order = orders[0] if isinstance(orders[0], dict) else {}
+            line_items = order.get("line_items") if isinstance(order.get("line_items"), list) else []
+            if not line_items:
+                _vlog(f"automation last_order catalog skip: no line_items for user={user_id}")
+                return 0
+
+            return await self._send_catalog_items_from_line_items(user_id, line_items, max_items=max_items)
+        except Exception as exc:
+            _vlog(f"automation last_order catalog failed: user={user_id} error={exc}")
             return 0
 
     async def _send_buy_gender_list(self, user_id: str) -> None:
@@ -7621,6 +7639,51 @@ class MessageProcessor:
                     continue
             return None
 
+        def _looks_like_shopify_cdn(raw: str) -> bool:
+            try:
+                host = (urlparse(str(raw or "")).hostname or "").lower()
+                return host == "cdn.shopify.com" or host.endswith(".cdn.shopify.com")
+            except Exception:
+                return False
+
+        def _to_proxy_image(raw: str, width: int = 1024, quality: int = 68, max_bytes: int = 5 * 1024 * 1024) -> str:
+            """
+            Convert a Shopify CDN image URL to our proxy endpoint with deterministic resize/limit.
+            Keep non-Shopify hosts unchanged because /proxy-image requires auth for non-whitelisted hosts.
+            """
+            src = str(raw or "").strip()
+            if not src.startswith(("http://", "https://")):
+                return src
+            # If it's already proxied by this backend, ensure sizing params exist.
+            try:
+                p = urlparse(src)
+                base0 = str(BASE_URL or "").strip().rstrip("/")
+                base_host = (urlparse(base0).hostname or "").lower() if base0 else ""
+                is_ours = bool(base_host and (p.hostname or "").lower() == base_host and p.path.startswith("/proxy-image"))
+                if is_ours:
+                    qq = parse_qs(p.query or "")
+                    qq.setdefault("w", [str(int(width))])
+                    qq.setdefault("q", [str(int(quality))])
+                    qq.setdefault("max_bytes", [str(int(max_bytes))])
+                    return f"{p.scheme}://{p.netloc}{p.path}?{urlencode(qq, doseq=True)}"
+            except Exception:
+                pass
+            if not _looks_like_shopify_cdn(src):
+                return src
+            base = str(BASE_URL or "").strip().rstrip("/")
+            if not base:
+                return src
+            try:
+                query = urlencode({
+                    "url": src,
+                    "w": int(width),
+                    "q": int(quality),
+                    "max_bytes": int(max_bytes),
+                })
+                return f"{base}/proxy-image?{query}"
+            except Exception:
+                return src
+
         header_def = next((c for c in comps_def if isinstance(c, dict) and str(c.get("type") or "").upper() == "HEADER"), None) or {}
         header_fmt = str((header_def or {}).get("format") or "").upper()
         if header_fmt in ("IMAGE", "VIDEO", "DOCUMENT"):
@@ -7656,6 +7719,34 @@ class MessageProcessor:
                     header_comp = {"type": "header", "parameters": [{"type": kind, kind: {"link": fb}}]}
                     # Prepend header to avoid ordering issues
                     comps = [header_comp] + [c for c in comps if isinstance(c, dict) and str(c.get("type") or "").lower() != "header"]
+
+        # WhatsApp rejects large IMAGE headers (>5MB). Normalize Shopify CDN links through /proxy-image.
+        if header_fmt == "IMAGE":
+            try:
+                normalized: list[dict] = []
+                for c in (comps or []):
+                    if not isinstance(c, dict):
+                        continue
+                    cc = dict(c)
+                    if str(cc.get("type") or "").lower() == "header":
+                        params = cc.get("parameters") if isinstance(cc.get("parameters"), list) else []
+                        new_params = []
+                        for p in params:
+                            if not isinstance(p, dict):
+                                continue
+                            pp = dict(p)
+                            if str(pp.get("type") or "").lower() == "image":
+                                img = dict(pp.get("image") or {}) if isinstance(pp.get("image"), dict) else {}
+                                link = str(img.get("link") or "").strip()
+                                if link:
+                                    img["link"] = _to_proxy_image(link)
+                                pp["image"] = img
+                            new_params.append(pp)
+                        cc["parameters"] = new_params
+                    normalized.append(cc)
+                comps = normalized
+            except Exception:
+                pass
 
         # Ensure we provide enough BODY params for {{1}}, {{2}}, ... placeholders
         try:
@@ -8286,30 +8377,39 @@ class MessageProcessor:
             # Optional: after confirm, send ordered items as catalog cards (best-effort title -> catalog match)
             if branch == "confirm" and bool(state.get("send_items")):
                 try:
-                    titles = state.get("line_item_titles") if isinstance(state.get("line_item_titles"), list) else []
-                    titles = [str(x or "").strip() for x in titles if str(x or "").strip()]
                     max_items = int(state.get("max_items") or 10)
                     sent = 0
-                    for t in titles:
-                        if sent >= max_items:
-                            break
-                        hit = await self._best_catalog_match(t)
-                        if not hit:
-                            continue
-                        rid = str(hit.get("retailer_id") or hit.get("product_retailer_id") or "").strip()
-                        if not rid:
-                            continue
-                        await self.process_outgoing_message({
-                            "user_id": user_id,
-                            "type": "catalog_item",
-                            "from_me": True,
-                            "retailer_id": rid,
-                            "caption": "",
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "agent_username": "automation",
-                        })
-                        sent += 1
-                except Exception:
+                    items_from_state = state.get("line_items") if isinstance(state.get("line_items"), list) else []
+                    if items_from_state:
+                        sent = await self._send_catalog_items_from_line_items(user_id, items_from_state, max_items=max_items)
+                    titles = state.get("line_item_titles") if isinstance(state.get("line_item_titles"), list) else []
+                    titles = [str(x or "").strip() for x in titles if str(x or "").strip()]
+                    if sent == 0 and titles:
+                        for t in titles:
+                            if sent >= max_items:
+                                break
+                            hit = await self._best_catalog_match(t)
+                            if not hit:
+                                continue
+                            rid = str(hit.get("retailer_id") or hit.get("product_retailer_id") or "").strip()
+                            if not rid:
+                                continue
+                            await self.process_outgoing_message({
+                                "user_id": user_id,
+                                "type": "catalog_item",
+                                "from_me": True,
+                                "retailer_id": rid,
+                                "caption": "",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent_username": "automation",
+                            })
+                            sent += 1
+                    # Final fallback: use customer's last Shopify order lookup.
+                    if sent == 0:
+                        sent = await self._send_last_order_catalog_items(user_id, max_items=max_items)
+                    _vlog(f"order_confirm catalog branch result: user={user_id} sent={sent} max={max_items}")
+                except Exception as exc:
+                    _vlog(f"order_confirm catalog branch failed: user={user_id} error={exc}")
                     pass
 
             # Optional: tag conversation for agent handoff
@@ -8615,11 +8715,20 @@ class MessageProcessor:
                             try:
                                 line_items = (ctx.get("line_items") if isinstance(ctx.get("line_items"), list) else []) or []
                                 titles = []
+                                line_items_compact = []
                                 for li in line_items:
                                     if isinstance(li, dict):
                                         t = str(li.get("title") or li.get("name") or "").strip()
                                         if t:
                                             titles.append(t)
+                                        line_items_compact.append({
+                                            "title": t,
+                                            "name": str(li.get("name") or "").strip(),
+                                            "variant_title": str(li.get("variant_title") or "").strip(),
+                                            "variant_id": str(li.get("variant_id") or "").strip(),
+                                            "product_id": str(li.get("product_id") or "").strip(),
+                                            "quantity": li.get("quantity"),
+                                        })
                                 await self._set_order_confirm_pending(
                                     ws=_coerce_workspace(ws),
                                     user_id=to_id,
@@ -8637,6 +8746,7 @@ class MessageProcessor:
                                         "talk_audio_url": str(act.get("talk_audio_url") or ""),
                                         "send_items": bool(act.get("send_items")),
                                         "max_items": int(act.get("max_items") or 10),
+                                        "line_items": line_items_compact,
                                         "line_item_titles": titles,
                                         "created_at": datetime.utcnow().isoformat(),
                                     },
@@ -16706,7 +16816,7 @@ async def proxy_audio(url: str, request: StarletteRequest):
 
 
 @app.get("/proxy-image")
-async def proxy_image(request: Request, url: str, w: int | None = None, q: int | None = None):
+async def proxy_image(request: Request, url: str, w: int | None = None, q: int | None = None, max_bytes: int | None = None):
     """Proxy/redirect images.
 
     Prefer 302 redirect to signed GCS URL when our bucket; otherwise fetch and
@@ -16730,6 +16840,28 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
         if not agent:
             raise HTTPException(status_code=401, detail="Unauthorized")
     try:
+        def _encode_jpeg_with_limit(image_bytes: bytes, width: int, quality: int, limit_bytes: int | None) -> bytes:
+            # Best-effort iterative reduction to fit WhatsApp template IMAGE limits.
+            im = Image.open(io.BytesIO(image_bytes))
+            im = im.convert("RGB")
+            cur_w = max(64, int(width))
+            cur_q = max(40, min(92, int(quality)))
+            best = image_bytes
+            for _ in range(10):
+                out_im = ImageOps.contain(im, (int(cur_w), int(cur_w) * 10))
+                buf = io.BytesIO()
+                out_im.save(buf, format="JPEG", quality=cur_q, optimize=True)
+                cand = buf.getvalue()
+                best = cand
+                if not limit_bytes or len(cand) <= int(limit_bytes):
+                    return cand
+                if cur_q > 45:
+                    cur_q = max(40, cur_q - 8)
+                else:
+                    cur_w = max(240, int(cur_w * 0.85))
+                    cur_q = 72
+            return best
+
         # Encourage long-lived caching of successful thumbnails, and avoid caching error responses.
         DEFAULT_OK_CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=600, stale-if-error=86400"
         signed = maybe_signed_url_for(url, ttl_seconds=600)
@@ -16761,13 +16893,11 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
                     try:
                         quality = int(q) if q is not None else 72
                         quality = max(40, min(92, quality))
-                        im = Image.open(io.BytesIO(data))
-                        im = im.convert("RGB")
-                        # Contain within width, preserve aspect ratio
-                        im = ImageOps.contain(im, (int(w), int(w) * 10))
-                        buf = io.BytesIO()
-                        im.save(buf, format="JPEG", quality=quality, optimize=True)
-                        thumb_bytes = buf.getvalue()
+                        limit = int(max_bytes) if max_bytes is not None else None
+                        if limit is not None:
+                            # Hard upper bound to avoid accidental huge responses.
+                            limit = max(64 * 1024, min(8 * 1024 * 1024, limit))
+                        thumb_bytes = _encode_jpeg_with_limit(data, int(w), quality, limit)
                         return StarletteResponse(
                             content=thumb_bytes,
                             media_type="image/jpeg",
@@ -16801,6 +16931,13 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
                 q = int(q)
             except Exception:
                 q = None
+        if max_bytes is not None:
+            try:
+                max_bytes = int(max_bytes)
+            except Exception:
+                max_bytes = None
+            if max_bytes is not None:
+                max_bytes = max(64 * 1024, min(8 * 1024 * 1024, max_bytes))
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         media_type = resp.headers.get("Content-Type", "image/jpeg")
@@ -16828,12 +16965,7 @@ async def proxy_image(request: Request, url: str, w: int | None = None, q: int |
             try:
                 quality = int(q) if q is not None else 72
                 quality = max(40, min(92, quality))
-                im = Image.open(io.BytesIO(resp.content))
-                im = im.convert("RGB")
-                im = ImageOps.contain(im, (int(w), int(w) * 10))
-                buf = io.BytesIO()
-                im.save(buf, format="JPEG", quality=quality, optimize=True)
-                thumb_bytes = buf.getvalue()
+                thumb_bytes = _encode_jpeg_with_limit(resp.content, int(w), quality, max_bytes)
                 # Remove upstream length since content length changed
                 passthrough.pop("Content-Length", None)
                 # Resized thumbnails are always JPEG and do not depend on request headers

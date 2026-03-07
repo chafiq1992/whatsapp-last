@@ -4411,6 +4411,10 @@ class DatabaseManager:
             ws = get_current_workspace()
             # Postgres optimized path
             if self.use_postgres:
+                q_norm = (q or "").strip().lower()
+                q_like = f"%{q_norm}%"
+                q_digits = "".join(ch for ch in q_norm if ch.isdigit())
+                q_digits_like = f"%{q_digits}%"
                 # Important: keep this fast on large datasets.
                 # We compute the "page" of conversations first (last message per user),
                 # then compute unread/unresponded stats ONLY for those users.
@@ -4428,9 +4432,27 @@ class DatabaseManager:
                       WHERE workspace = ? AND COALESCE(type, '') <> 'reaction'
                       ORDER BY user_id, COALESCE(server_ts, timestamp) DESC
                     ),
+                    filtered AS (
+                      SELECT
+                        lm.user_id,
+                        lm.message,
+                        lm.type,
+                        lm.from_me,
+                        lm.status,
+                        lm.ts,
+                        u.name,
+                        u.phone
+                      FROM last_msg lm
+                      LEFT JOIN users u ON u.user_id = lm.user_id
+                      WHERE (
+                        ? = ''
+                        OR LOWER(COALESCE(lm.user_id, '') || ' ' || COALESCE(u.phone, '') || ' ' || COALESCE(u.name, '')) LIKE ?
+                        OR (? <> '' AND regexp_replace(COALESCE(lm.user_id, '') || COALESCE(u.phone, ''), '\\D', '', 'g') LIKE ?)
+                      )
+                    ),
                     page AS (
                       SELECT *
-                      FROM last_msg
+                      FROM filtered
                       ORDER BY ts DESC NULLS LAST
                       LIMIT ? OFFSET ?
                     ),
@@ -4459,8 +4481,8 @@ class DatabaseManager:
                     )
                     SELECT
                       p.user_id,
-                      u.name,
-                      u.phone,
+                      p.name,
+                      p.phone,
                       p.message AS last_message,
                       p.type AS last_message_type,
                       p.from_me AS last_message_from_me,
@@ -4474,14 +4496,13 @@ class DatabaseManager:
                       cm.tags_updated_at,
                       cm.avatar_url AS avatar
                     FROM page p
-                    LEFT JOIN users u ON u.user_id = p.user_id
                     LEFT JOIN counts c ON c.user_id = p.user_id
                     LEFT JOIN unresponded ur ON ur.user_id = p.user_id
                     LEFT JOIN conversation_meta cm ON cm.user_id = p.user_id
                     ORDER BY p.ts DESC NULLS LAST
                     """
                 )
-                rows = await db.fetch(base, ws, limit, offset, ws, ws)
+                rows = await db.fetch(base, ws, q_norm, q_like, q_digits, q_digits_like, limit, offset, ws, ws)
                 conversations: List[dict] = []
                 for r in rows:
                     # Normalize tags JSON to list
@@ -4533,7 +4554,10 @@ class DatabaseManager:
                         # IMPORTANT: match against both name and user_id/phone so searching by number works
                         # even when a contact has a name saved.
                         t = f"{conv.get('user_id') or ''} {conv.get('phone') or ''} {conv.get('name') or ''}".lower()
-                        if (q or "").lower() not in t:
+                        qn = (q or "").lower().strip()
+                        qd = "".join(ch for ch in qn if ch.isdigit())
+                        t_digits = "".join(ch for ch in t if ch.isdigit())
+                        if qn not in t and (not qd or qd not in t_digits):
                             continue
                     if unread_only and not (conv.get("unread_count") or 0) > 0:
                         continue
@@ -4621,7 +4645,10 @@ class DatabaseManager:
                     # IMPORTANT: match against both name and user_id/phone so searching by number works
                     # even when a contact has a name saved.
                     t = f"{conv.get('user_id') or ''} {conv.get('phone') or ''} {conv.get('name') or ''}".lower()
-                    if (q or "").lower() not in t:
+                    qn = (q or "").lower().strip()
+                    qd = "".join(ch for ch in qn if ch.isdigit())
+                    t_digits = "".join(ch for ch in t if ch.isdigit())
+                    if qn not in t and (not qd or qd not in t_digits):
                         continue
                 if unread_only and not (conv.get("unread_count") or 0) > 0:
                     continue
@@ -10682,6 +10709,11 @@ async def startup():
                     print(f"⚠️ Token debug request failed: {resp.status_code} {await resp.aread()}\n")
     except Exception as exc:
         print(f"⚠️ Token debug error: {exc}")
+    # Keep optional startup hooks bounded so readiness can complete on Cloud Run.
+    startup_optional_timeout = max(
+        2.0,
+        min(30.0, float(os.getenv("STARTUP_OPTIONAL_STEP_TIMEOUT_SECONDS", "8"))),
+    )
     # Connect to Redis only if configured
     if REDIS_URL:
         await redis_manager.connect()
@@ -10693,25 +10725,31 @@ async def startup():
     if redis_manager.redis_client:
         try:
             if FastAPILimiter is not None:
-                await FastAPILimiter.init(redis_manager.redis_client)  # type: ignore[union-attr]
+                await asyncio.wait_for(
+                    FastAPILimiter.init(redis_manager.redis_client),  # type: ignore[union-attr]
+                    timeout=startup_optional_timeout,
+                )
         except Exception as exc:
             print(f"Rate limiter init failed: {exc}")
     # Ensure conversation_notes table exists for legacy deployments
     try:
-        async with db_manager._conn() as db:
-            if db_manager.use_postgres:
-                await db.execute(
-                    "CREATE TABLE IF NOT EXISTS conversation_notes ("
-                    "id SERIAL PRIMARY KEY, user_id TEXT NOT NULL, agent_username TEXT, type TEXT DEFAULT 'text', text TEXT, url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-                )
-                await db.execute("CREATE INDEX IF NOT EXISTS idx_notes_user_time ON conversation_notes (user_id, created_at)")
-            else:
-                await db.execute(
-                    "CREATE TABLE IF NOT EXISTS conversation_notes ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, agent_username TEXT, type TEXT DEFAULT 'text', text TEXT, url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-                )
-                await db.execute("CREATE INDEX IF NOT EXISTS idx_notes_user_time ON conversation_notes (user_id, datetime(created_at))")
-                await db.commit()
+        async def _ensure_conversation_notes():
+            async with db_manager._conn() as db:
+                if db_manager.use_postgres:
+                    await db.execute(
+                        "CREATE TABLE IF NOT EXISTS conversation_notes ("
+                        "id SERIAL PRIMARY KEY, user_id TEXT NOT NULL, agent_username TEXT, type TEXT DEFAULT 'text', text TEXT, url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                    )
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_notes_user_time ON conversation_notes (user_id, created_at)")
+                else:
+                    await db.execute(
+                        "CREATE TABLE IF NOT EXISTS conversation_notes ("
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, agent_username TEXT, type TEXT DEFAULT 'text', text TEXT, url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                    )
+                    await db.execute("CREATE INDEX IF NOT EXISTS idx_notes_user_time ON conversation_notes (user_id, datetime(created_at))")
+                    await db.commit()
+
+        await asyncio.wait_for(_ensure_conversation_notes(), timeout=startup_optional_timeout)
     except Exception as exc:
         print(f"conversation_notes ensure failed: {exc}")
 
@@ -10719,7 +10757,7 @@ async def startup():
     # In tests (TestClient), starting long-lived workers causes cross-event-loop issues.
     if not os.getenv("PYTEST_CURRENT_TEST"):
         try:
-            await start_webhook_workers(webhook_runtime)
+            await asyncio.wait_for(start_webhook_workers(webhook_runtime), timeout=startup_optional_timeout)
             # Maintenance (retention/trim). Safe no-op when backends are disabled/unavailable.
             try:
                 start_webhook_maintenance(webhook_runtime)

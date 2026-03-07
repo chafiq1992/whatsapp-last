@@ -4353,6 +4353,21 @@ class DatabaseManager:
                 row = await cur.fetchone()
             return row["user_id"] if row else None
 
+    async def get_message_by_wamid(self, user_id: str, wa_message_id: str) -> dict | None:
+        """Check if a message with this wa_message_id already exists for the user."""
+        async with self._conn() as db:
+            ws = get_current_workspace()
+            query = self._convert(
+                "SELECT id, wa_message_id FROM messages WHERE workspace = ? AND user_id = ? AND wa_message_id = ? LIMIT 1"
+            )
+            params = [ws, user_id, wa_message_id]
+            if self.use_postgres:
+                row = await db.fetchrow(query, *params)
+            else:
+                cur = await db.execute(query, tuple(params))
+                row = await cur.fetchone()
+            return dict(row) if row else None
+
     async def get_last_agent_message_time(self, user_id: str) -> Optional[str]:
         """Return ISO timestamp of the last outbound (from_me=1) message for a user."""
         async with self._conn() as db:
@@ -7140,6 +7155,18 @@ class MessageProcessor:
         wa_message_id = message.get("id")
         timestamp = datetime.utcfromtimestamp(int(message.get("timestamp", 0))).isoformat()
         server_now = datetime.now(timezone.utc).isoformat()
+
+        # Dedup: if this wa_message_id already exists in DB, skip all side effects
+        # (auto-unarchive, WS notifications, auto-replies). This prevents Meta webhook
+        # retries from reopening Done conversations and flooding the UI.
+        _is_duplicate = False
+        if wa_message_id and sender:
+            try:
+                existing = await self.db_manager.get_message_by_wamid(sender, wa_message_id)
+                if existing:
+                    _is_duplicate = True
+            except Exception:
+                pass
         
         # Extract contact name from the webhook 'contacts' array (we attach one entry to message['contact_info'])
         contact_name = None
@@ -7152,16 +7179,16 @@ class MessageProcessor:
             contact_name = None
 
         await self.db_manager.upsert_user(sender, contact_name, sender)
-        # Auto-unarchive: if conversation is marked as Done, remove the tag on any new incoming message
-        try:
-            meta = await self.db_manager.get_conversation_meta(sender)
-            tags = list(meta.get("tags") or []) if isinstance(meta, dict) else []
-            if any(str(t).lower() == 'done' for t in tags):
-                new_tags = [t for t in tags if str(t).lower() != 'done']
-                await self.db_manager.set_conversation_tags(sender, new_tags)
-        except Exception as _e:
-            # Non-fatal: do not block message processing
-            pass
+        if not _is_duplicate:
+            # Auto-unarchive: if conversation is marked as Done, remove the tag on any new incoming message
+            try:
+                meta = await self.db_manager.get_conversation_meta(sender)
+                tags = list(meta.get("tags") or []) if isinstance(meta, dict) else []
+                if any(str(t).lower() == 'done' for t in tags):
+                    new_tags = [t for t in tags if str(t).lower() != 'done']
+                    await self.db_manager.set_conversation_tags(sender, new_tags)
+            except Exception as _e:
+                pass
         
         # Reactions: broadcast an update AND store as a bubble so agents can see it in the timeline.
         if msg_type == "reaction":
@@ -7441,6 +7468,10 @@ class MessageProcessor:
         except Exception:
             pass
 
+        if _is_duplicate:
+            print(f"⏭️ Duplicate message {wa_message_id} from {sender}, skipping notifications/automations")
+            return
+
         # Now deliver to UI and admin dashboards
         await self.connection_manager.send_to_user(sender, {
             "type": "message_received",
@@ -7456,25 +7487,19 @@ class MessageProcessor:
             if msg_type == "text":
                 await self._maybe_auto_reply_with_catalog(sender, message_obj.get("message", ""))
             elif msg_type in ("interactive", "button"):
-                # No default acknowledgement for interactive replies (buttons/lists): let automations / flows respond.
                 pass
         except Exception as _exc:
-            # Never break incoming flow due to auto-reply errors
             print(f"Auto-reply failed: {_exc}")
 
         # Workspace-scoped "simple automations" (admin-configured rules).
         # Run async so webhook ingest latency stays low.
         try:
-            # Include interactive replies (button/list) as text too so rules can match on title if desired.
             typ = str(message_obj.get("type") or "")
             txt = str(message_obj.get("message") or "") if typ in ("text",) else ""
             if not txt and str(message_obj.get("interactive_id") or "").strip():
                 txt = str(message_obj.get("interactive_title") or message_obj.get("message") or "")
-            # IMPORTANT: this runs after webhook processing may reset the workspace contextvar,
-            # so bind the current workspace explicitly for the task.
             ws = get_current_workspace()
             asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
-            # Schedule "no reply after X" follow-ups (if any).
             if txt and str(message_obj.get("wa_message_id") or "").strip():
                 asyncio.create_task(self._schedule_no_reply_followups(
                     ws=_coerce_workspace(ws),

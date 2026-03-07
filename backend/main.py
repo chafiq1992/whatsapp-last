@@ -525,7 +525,10 @@ except Exception:
     config = None  # type: ignore
 # Verbose logging flag (minimize noisy logs when off)
 LOG_VERBOSE = os.getenv("LOG_VERBOSE", "0") == "1"
-ENABLE_WEBHOOK_REROUTE = os.getenv("ENABLE_WEBHOOK_REROUTE", "0") == "1"
+ENABLE_WEBHOOK_REROUTE = os.getenv(
+    "ENABLE_WEBHOOK_REROUTE",
+    ("1" if _IS_CLOUD_RUN else "0"),
+) == "1"
 DISABLE_AUTH = os.getenv("DISABLE_AUTH", "0") == "1"
 
 # Backpressure and rate limiting configuration
@@ -6928,7 +6931,14 @@ class MessageProcessor:
                     # Add contact info to message if available
                     if i < len(contacts_info):
                         message["contact_info"] = contacts_info[i]
-                    await self._handle_incoming_message(message)
+                    try:
+                        await self._handle_incoming_message(message)
+                    except Exception as msg_exc:
+                        # Never let a single malformed message poison the whole webhook batch.
+                        # Otherwise Redis Stream retries can delay many healthy messages and
+                        # agents will see "sudden bursts" in the inbox after retries clear.
+                        print(f"Webhook message item failed (skipped): {msg_exc}")
+                        continue
 
         except Exception as e:
             # Critical: re-raise so the durable queue (Redis Streams / Postgres webhook_events)
@@ -7002,8 +7012,18 @@ class MessageProcessor:
         
         sender = message.get("from") or (message.get("contact_info") or {}).get("wa_id")
         if not sender:
-            raise RuntimeError("incoming message missing sender id")
-        msg_type = message["type"]
+            # Skip malformed payloads without retrying forever.
+            print("Skipping incoming message: missing sender id")
+            return
+        msg_type = str(message.get("type") or "").strip().lower()
+        if not msg_type:
+            # Infer a best-effort type to avoid hard failures on unusual payloads.
+            for candidate in ("text", "button", "interactive", "image", "sticker", "audio", "video", "order", "location", "contacts", "reaction"):
+                if isinstance(message.get(candidate), dict) or (candidate == "contacts" and isinstance(message.get(candidate), list)):
+                    msg_type = candidate
+                    break
+            if not msg_type:
+                msg_type = "text"
         wa_message_id = message.get("id")
         timestamp = datetime.utcfromtimestamp(int(message.get("timestamp", 0))).isoformat()
         server_now = datetime.now(timezone.utc).isoformat()
@@ -7109,7 +7129,8 @@ class MessageProcessor:
         
         # Extract message content and generate proper URLs
         if msg_type == "text":
-            body = message["text"]["body"]
+            text_payload = message.get("text") if isinstance(message.get("text"), dict) else {}
+            body = str((text_payload or {}).get("body") or "")
             click_id = None
             try:
                 # Shopify theme tracking marker (we strip it from the visible chat)
@@ -7187,14 +7208,24 @@ class MessageProcessor:
                 message_obj["type"] = "text"
                 message_obj["message"] = "[interactive_reply]"
         elif msg_type == "image":
-            image_path, drive_url = await self._download_media(message["image"]["id"], "image")
-            message_obj["message"] = image_path
-            message_obj["url"] = drive_url
-            message_obj["caption"] = message["image"].get("caption", "")
+            image_payload = message.get("image") if isinstance(message.get("image"), dict) else {}
+            image_id = str((image_payload or {}).get("id") or "").strip()
+            if image_id:
+                image_path, drive_url = await self._download_media(image_id, "image")
+                message_obj["message"] = image_path
+                message_obj["url"] = drive_url
+                message_obj["caption"] = (image_payload or {}).get("caption", "")
+            else:
+                message_obj["type"] = "text"
+                message_obj["message"] = "[image]"
         elif msg_type == "sticker":
             # Treat stickers as images for display purposes
             try:
-                sticker_path, drive_url = await self._download_media(message["sticker"]["id"], "image")
+                sticker_payload = message.get("sticker") if isinstance(message.get("sticker"), dict) else {}
+                sticker_id = str((sticker_payload or {}).get("id") or "").strip()
+                if not sticker_id:
+                    raise ValueError("missing sticker id")
+                sticker_path, drive_url = await self._download_media(sticker_id, "image")
                 message_obj["type"] = "image"
                 message_obj["message"] = sticker_path
                 message_obj["url"] = drive_url
@@ -7204,15 +7235,27 @@ class MessageProcessor:
                 message_obj["type"] = "text"
                 message_obj["message"] = "[sticker]"
         elif msg_type == "audio":
-            audio_path, drive_url = await self._download_media(message["audio"]["id"], "audio")
-            message_obj["message"] = audio_path
-            message_obj["url"] = drive_url
-            message_obj["transcription"] = ""
+            audio_payload = message.get("audio") if isinstance(message.get("audio"), dict) else {}
+            audio_id = str((audio_payload or {}).get("id") or "").strip()
+            if audio_id:
+                audio_path, drive_url = await self._download_media(audio_id, "audio")
+                message_obj["message"] = audio_path
+                message_obj["url"] = drive_url
+                message_obj["transcription"] = ""
+            else:
+                message_obj["type"] = "text"
+                message_obj["message"] = "[audio]"
         elif msg_type == "video":
-            video_path, drive_url = await self._download_media(message["video"]["id"], "video")
-            message_obj["message"] = video_path
-            message_obj["url"] = drive_url
-            message_obj["caption"] = message["video"].get("caption", "")
+            video_payload = message.get("video") if isinstance(message.get("video"), dict) else {}
+            video_id = str((video_payload or {}).get("id") or "").strip()
+            if video_id:
+                video_path, drive_url = await self._download_media(video_id, "video")
+                message_obj["message"] = video_path
+                message_obj["url"] = drive_url
+                message_obj["caption"] = (video_payload or {}).get("caption", "")
+            else:
+                message_obj["type"] = "text"
+                message_obj["message"] = "[video]"
         elif msg_type == "order":
             message_obj["message"] = json.dumps(message.get("order", {}))
         elif msg_type == "location":
@@ -7234,6 +7277,10 @@ class MessageProcessor:
                 message_obj["message"] = json.dumps(contacts, ensure_ascii=False)
             except Exception:
                 message_obj["message"] = json.dumps([], ensure_ascii=False)
+        else:
+            # Unknown/rare WhatsApp message type: still persist a timeline/inbox entry.
+            message_obj["type"] = "text"
+            message_obj["message"] = f"[{msg_type}]"
 
         # Replies: capture quoted message id if present
         try:
@@ -7253,6 +7300,10 @@ class MessageProcessor:
         except Exception:
             pass
         
+        # Ensure a safe fallback body exists to keep conversation previews searchable.
+        if message_obj.get("message") is None:
+            message_obj["message"] = ""
+
         # Persist first, then broadcast to ensure durability even if clients are offline
         # Remove "id" so SQLite doesn't try to insert the text wa_message_id into INTEGER PK
         db_data = {k: v for k, v in message_obj.items() if k != "id"}
@@ -10222,6 +10273,73 @@ message_processor = MessageProcessor(connection_manager, redis_manager, db_manag
 # ────────────────────────────────────────────────────────────
 # Webhook ingress: ACK fast, process async
 # ────────────────────────────────────────────────────────────
+async def _resolve_webhook_secrets_for_phone_id(phone_number_id: str, payload: dict) -> list[str]:
+    """Best-effort resolve additional webhook app secrets.
+
+    Primary use-case: multi-workspace/multi-app setups where each phone_number_id may
+    belong to a different Meta app secret.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(secret_val: Any) -> None:
+        try:
+            s = str(secret_val or "").strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        except Exception:
+            return
+
+    ws_candidates: list[str] = []
+    try:
+        pid = str(phone_number_id or "").strip()
+    except Exception:
+        pid = ""
+
+    try:
+        ws_hint = str((payload or {}).get("_workspace") or "").strip()
+        if ws_hint:
+            ws_candidates.append(_coerce_workspace(ws_hint))
+    except Exception:
+        pass
+
+    if pid:
+        # 1) Redis shared mapping (preferred in multi-instance)
+        try:
+            r = getattr(redis_manager, "redis_client", None)
+            if r:
+                raw = await r.hget("wa:phone_id_to_workspace", pid)
+                if raw is not None:
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode("utf-8", "ignore")
+                    ws = _coerce_workspace(str(raw or "").strip())
+                    if ws:
+                        ws_candidates.append(ws)
+        except Exception:
+            pass
+        # 2) Runtime mapping fallback
+        try:
+            ws2 = _coerce_workspace(RUNTIME_PHONE_ID_TO_WORKSPACE.get(pid) or PHONE_ID_TO_WORKSPACE.get(pid) or "")
+            if ws2:
+                ws_candidates.append(ws2)
+        except Exception:
+            pass
+
+    # Resolve per-workspace override secrets
+    for ws in ws_candidates:
+        if not ws:
+            continue
+        try:
+            cfg = await message_processor._get_inbox_env(ws)
+            ov = (cfg or {}).get("overrides") or {}
+            if isinstance(ov, dict):
+                _add(ov.get("meta_app_secret"))
+                _add(ov.get("webhook_app_secret"))
+        except Exception:
+            continue
+    return out
+
 WEBHOOK_QUEUE: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=max(1, int(WEBHOOK_QUEUE_MAXSIZE)))
 WEBHOOK_STATE = WebhookState(db_ready=False)
 webhook_runtime = WebhookRuntime(
@@ -10235,6 +10353,7 @@ webhook_runtime = WebhookRuntime(
     verify_tokens=RUNTIME_WEBHOOK_VERIFY_TOKENS,
     meta_app_secret=META_APP_SECRET,
     meta_app_secrets=list(META_APP_SECRETS or []),
+    resolve_webhook_secrets=_resolve_webhook_secrets_for_phone_id,
     # Do NOT block ingress by a static env allowlist; routing is enforced later per-workspace.
     allowed_phone_number_ids=set(),
     # Use runtime mapping (DB-driven) so new workspace phone ids work without redeploy.
@@ -10559,9 +10678,10 @@ async def startup():
     # - Otherwise (SQLite/dev), we allow startup to continue in "degraded" mode and endpoints will surface 503s as needed.
     try:
         # Keep startup strict but allow realistic time for one-time DB migrations/index creation.
+        _startup_db_default = "20" if _IS_CLOUD_RUN else "75"
         startup_db_timeout = max(
-            15.0,
-            min(85.0, float(os.getenv("STARTUP_DB_INIT_TIMEOUT_SECONDS", "75"))),
+            10.0,
+            min(85.0, float(os.getenv("STARTUP_DB_INIT_TIMEOUT_SECONDS", _startup_db_default))),
         )
         # 1) Shared auth/settings DB
         await asyncio.wait_for(auth_db_manager.init_db(), timeout=startup_db_timeout)

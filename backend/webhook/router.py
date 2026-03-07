@@ -79,8 +79,9 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
             except Exception:
                 secrets = []
 
+            body_bytes = await request.body()
+            parsed_data: dict | None = None
             if secrets:
-                body_bytes = await request.body()
                 sig_header = request.headers.get("X-Hub-Signature-256", "")
                 presented = _extract_meta_sha256_signature(sig_header)
                 ok = False
@@ -90,6 +91,41 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                         if hmac.compare_digest(presented, expected):
                             ok = True
                             break
+                # Fallback: resolve workspace-specific webhook secret(s) from phone_number_id.
+                # This avoids dropping valid events when multiple Meta apps/secrets are in use.
+                if (not ok) and presented and callable(getattr(rt, "resolve_webhook_secrets", None)):
+                    try:
+                        parsed_data = json.loads(body_bytes or b"{}")
+                    except Exception:
+                        parsed_data = {}
+                    try:
+                        value = (
+                            (parsed_data or {}).get("entry", [{}])[0]
+                            .get("changes", [{}])[0]
+                            .get("value", {})
+                        )
+                        meta = value.get("metadata") or {}
+                        incoming_phone_id = str(meta.get("phone_number_id") or "").strip()
+                    except Exception:
+                        incoming_phone_id = ""
+                    try:
+                        extra = await rt.resolve_webhook_secrets(incoming_phone_id, parsed_data or {})
+                    except Exception:
+                        extra = []
+                    extra_clean: list[str] = []
+                    seen = set(secrets)
+                    for s in extra or []:
+                        ss = str(s or "").strip()
+                        if not ss or ss in seen:
+                            continue
+                        seen.add(ss)
+                        extra_clean.append(ss)
+                    if extra_clean:
+                        for sec in extra_clean:
+                            expected = hmac.new(sec.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
+                            if hmac.compare_digest(presented, expected):
+                                ok = True
+                                break
                 if not ok:
                     rt.vlog("❌ Invalid webhook signature")
                     # High-signal diagnostics without leaking secrets/signatures.
@@ -104,7 +140,7 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                     except Exception:
                         pass
                     return PlainTextResponse("Invalid signature", status_code=401)
-                data = json.loads(body_bytes or b"{}")
+                data = parsed_data if isinstance(parsed_data, dict) else json.loads(body_bytes or b"{}")
             else:
                 data = await request.json()
         except Exception:

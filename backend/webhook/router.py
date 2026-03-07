@@ -85,6 +85,8 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                 sig_header = request.headers.get("X-Hub-Signature-256", "")
                 presented = _extract_meta_sha256_signature(sig_header)
                 ok = False
+                extra_clean: list[str] = []
+                incoming_phone_id = ""
                 if presented:
                     for sec in secrets:
                         expected = hmac.new(sec.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
@@ -112,7 +114,6 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                         extra = await rt.resolve_webhook_secrets(incoming_phone_id, parsed_data or {})
                     except Exception:
                         extra = []
-                    extra_clean: list[str] = []
                     seen = set(secrets)
                     for s in extra or []:
                         ss = str(s or "").strip()
@@ -128,14 +129,17 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                                 break
                 if not ok:
                     rt.vlog("❌ Invalid webhook signature")
-                    # High-signal diagnostics without leaking secrets/signatures.
+                    total_secrets = len(secrets) + len(extra_clean)
                     try:
                         rt.vlog(
                             "webhook_sig_debug "
                             f"body_len={len(body_bytes)} "
                             f"sig_header_len={len(sig_header or '')} "
                             f"sig_prefix={(sig_header or '')[:16]} "
-                            f"secrets_tried={len(secrets)}"
+                            f"secrets_tried={len(secrets)} "
+                            f"fallback_secrets={len(extra_clean)} "
+                            f"total_secrets={total_secrets} "
+                            f"phone_id={incoming_phone_id}"
                         )
                     except Exception:
                         pass

@@ -9274,6 +9274,7 @@ class MessageProcessor:
 
         Rules must have trigger.source == "shopify" and trigger.event == <topic>, e.g. "orders/paid".
         """
+        _log = logging.getLogger(__name__)
         ws_token = None
         try:
             if workspace:
@@ -9283,12 +9284,15 @@ class MessageProcessor:
                     ws_token = None
 
             ws = get_current_workspace()
+            _log.info("shopify_automation ws=%s topic=%s", ws, topic)
             rules = await self._load_automation_rules(ws)
             if not rules:
+                _log.info("shopify_automation ws=%s no rules found", ws)
                 return
 
             topic_norm = str(topic or "").strip()
             if not topic_norm:
+                _log.info("shopify_automation ws=%s empty topic, skipping", ws)
                 return
 
             data = payload if isinstance(payload, dict) else {}
@@ -9311,6 +9315,7 @@ class MessageProcessor:
                 (data.get("billing_address") or {}).get("phone") if isinstance(data.get("billing_address"), dict) else None,
             )
             phone_digits = _digits_only(phone_raw)
+            _log.info("shopify_automation ws=%s phone_raw=%s phone_digits=%s", ws, phone_raw, phone_digits)
 
             # Fulfillment webhooks often don't include customer phone. If we have an order_id, enrich from Shopify.
             if not phone_digits:
@@ -9380,8 +9385,10 @@ class MessageProcessor:
             except Exception:
                 hay = ""
 
+            _log.info("shopify_automation ws=%s evaluating %d rules for topic=%s", ws, len(rules), topic_norm)
             for rule in rules:
                 try:
+                    rule_id = str(rule.get("id") or "?") if isinstance(rule, dict) else "?"
                     if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
                         continue
                     trigger = rule.get("trigger") or {}
@@ -9389,8 +9396,9 @@ class MessageProcessor:
                         trigger = {}
                     if str(trigger.get("source") or "").lower() != "shopify":
                         continue
-                    # Allow exact topic match; Shopify sends topics like "orders/paid", "orders/updated", etc.
-                    if str(trigger.get("event") or "").strip() != topic_norm:
+                    rule_event = str(trigger.get("event") or "").strip()
+                    if rule_event != topic_norm:
+                        _log.info("shopify_automation ws=%s rule=%s event mismatch: rule_event=%s vs topic=%s", ws, rule_id, rule_event, topic_norm)
                         continue
 
                     # Optional testing guard: if configured, only fire when the order/draft-order phone matches.
@@ -9405,6 +9413,7 @@ class MessageProcessor:
                         else:
                             test_set = set()
                         if test_set:
+                            _log.info("shopify_automation ws=%s rule=%s test_phones=%s phone_digits=%s", ws, rule_id, test_set, phone_digits)
                             # Allow testing even if the webhook payload doesn't include a phone number
                             # (e.g. fulfillments/create). If exactly one test number is configured, route to it.
                             if not phone_digits:
@@ -9412,8 +9421,10 @@ class MessageProcessor:
                                     phone_digits = next(iter(test_set))
                                     ctx["phone"] = phone_digits
                                 else:
+                                    _log.info("shopify_automation ws=%s rule=%s skipped: no phone and multiple test numbers", ws, rule_id)
                                     continue
                             if phone_digits not in test_set:
+                                _log.info("shopify_automation ws=%s rule=%s skipped: phone %s not in test_set %s", ws, rule_id, phone_digits, test_set)
                                 continue
                     except Exception:
                         pass
@@ -9456,6 +9467,7 @@ class MessageProcessor:
                     if not isinstance(actions, list):
                         actions = []
 
+                    _log.info("shopify_automation ws=%s rule=%s MATCHED topic=%s, executing %d actions (phone=%s)", ws, rule_id, topic_norm, len(actions), phone_digits)
                     for act in actions:
                         if not isinstance(act, dict):
                             continue
@@ -9464,9 +9476,11 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             msg = self._render_template(str(act.get("text") or ""), ctx).strip()
                             if not (to_id and msg):
+                                _log.info("shopify_automation ws=%s rule=%s send_text skipped: to=%s msg_empty=%s", ws, rule_id, to_id, not bool(msg))
                                 continue
                             shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
                             shopify_order_id = str(ctx.get("order_id") or "").strip()
+                            _log.info("shopify_automation ws=%s rule=%s sending text to=%s", ws, rule_id, to_id)
                             await self.process_outgoing_message({
                                 "user_id": to_id,
                                 "type": "text",
@@ -9490,7 +9504,9 @@ class MessageProcessor:
                             lang = str(act.get("language") or "en").strip() or "en"
                             comps = self._render_template_components(act.get("components") or [], ctx)
                             if not (to_id and tname):
+                                _log.info("shopify_automation ws=%s rule=%s send_template skipped: to=%s tname=%s", ws, rule_id, to_id, tname)
                                 continue
+                            _log.info("shopify_automation ws=%s rule=%s sending template=%s lang=%s to=%s", ws, rule_id, tname, lang, to_id)
                             shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
                             shopify_order_id = str(ctx.get("order_id") or "").strip()
                             preview = str(act.get("preview") or f"[template] {tname}")
@@ -9518,7 +9534,9 @@ class MessageProcessor:
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or phone_digits
                             tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
                             if not (to_id and tname):
+                                _log.info("shopify_automation ws=%s rule=%s order_confirmation_flow skipped: to=%s tname=%s", ws, rule_id, to_id, tname)
                                 continue
+                            _log.info("shopify_automation ws=%s rule=%s order_confirmation_flow template=%s to=%s", ws, rule_id, tname, to_id)
                             # Optional entry gate (per-rule): only proceed when required tag OR online-store order.
                             try:
                                 mode = str(act.get("entry_gate_mode") or "all").strip().lower()
@@ -9619,8 +9637,10 @@ class MessageProcessor:
                             except Exception:
                                 pass
                 except Exception as exc:
-                    print(f"shopify automation failed: {exc}")
+                    _log.exception("shopify_automation ws=%s rule=%s failed: %s", ws, rule_id, exc)
                     continue
+        except Exception as exc:
+            _log.exception("shopify_automation ws=%s topic=%s unhandled error: %s", workspace, topic, exc)
         finally:
             if ws_token is not None:
                 try:

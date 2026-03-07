@@ -1195,6 +1195,9 @@ try:
     ]
 except Exception:
     META_APP_SECRETS = []
+# Set WEBHOOK_SKIP_SIGNATURE=1 to accept all incoming Meta webhooks without HMAC verification
+# while keeping META_APP_SECRET available for OAuth/Embedded Signup flows.
+WEBHOOK_SKIP_SIGNATURE = os.getenv("WEBHOOK_SKIP_SIGNATURE", "").strip().lower() in ("1", "true", "yes", "on")
 
 # Embedded Signup (Facebook Login for Business) configuration.
 # This is NOT a secret; it's the "Configuration ID" (config_id) you create in Meta App Dashboard.
@@ -10519,8 +10522,8 @@ webhook_runtime = WebhookRuntime(
     vlog=_vlog,
     verify_token=VERIFY_TOKEN,
     verify_tokens=RUNTIME_WEBHOOK_VERIFY_TOKENS,
-    meta_app_secret=META_APP_SECRET,
-    meta_app_secrets=list(META_APP_SECRETS or []),
+    meta_app_secret="" if WEBHOOK_SKIP_SIGNATURE else META_APP_SECRET,
+    meta_app_secrets=[] if WEBHOOK_SKIP_SIGNATURE else list(META_APP_SECRETS or []),
     resolve_webhook_secrets=_resolve_webhook_secrets_for_phone_id,
     # Do NOT block ingress by a static env allowlist; routing is enforced later per-workspace.
     allowed_phone_number_ids=set(),
@@ -10841,6 +10844,8 @@ async def no_cache_html(request: StarletteRequest, call_next):
 @app.on_event("startup")
 async def startup():
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    if WEBHOOK_SKIP_SIGNATURE:
+        logging.getLogger(__name__).warning("WEBHOOK_SKIP_SIGNATURE is ON — webhook HMAC verification disabled (OAuth still uses META_APP_SECRET)")
     # DB init strategy:
     # - If Postgres is configured+required, we fail startup so Cloud Run won't route traffic to a broken revision.
     # - Otherwise (SQLite/dev), we allow startup to continue in "degraded" mode and endpoints will surface 503s as needed.

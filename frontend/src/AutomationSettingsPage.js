@@ -16,6 +16,19 @@ function normalizeWorkspaceId(v) {
   }
 }
 
+function getApiErrorMessage(error, fallback) {
+  try {
+    const detail = error?.response?.data?.detail;
+    if (typeof detail === 'string' && detail.trim()) return detail.trim();
+    if (detail && typeof detail === 'object') return JSON.stringify(detail);
+  } catch {}
+  try {
+    const message = String(error?.message || '').trim();
+    if (message) return message;
+  } catch {}
+  return fallback;
+}
+
 function loadFacebookSdk({ appId, version }) {
   return new Promise((resolve, reject) => {
     try {
@@ -91,12 +104,16 @@ export default function AutomationSettingsPage() {
     waba_id: '',
     catalog_id: '',
     phone_number_id: '',
-    meta_app_id: '',
-    webhook_verify_token: '',
     access_token: '',
     access_token_present: false,
     access_token_hint: '',
     access_token_source: '',
+    webhook_app_secret: '',
+    webhook_app_secret_present: false,
+    webhook_app_secret_hint: '',
+    webhook_app_secret_source: 'missing',
+    use_db_webhook_app_secret: false,
+    global_verify_token_present: false,
   });
   const [savingEnv, setSavingEnv] = useState(false);
   const [waConnectBusy, setWaConnectBusy] = useState(false);
@@ -210,6 +227,8 @@ export default function AutomationSettingsPage() {
         label: String(w?.label || '').trim(),
         short: String(w?.short || '').trim(),
         source: String(w?.source || '').trim(),
+        phone_number_id: String(w?.phone_number_id || '').trim(),
+        has_access_token: Boolean(w?.has_access_token),
       }))
       .filter((w) => w.id);
     setWorkspaces(norm);
@@ -233,12 +252,16 @@ export default function AutomationSettingsPage() {
       waba_id: String(d.waba_id || ''),
       catalog_id: String(d.catalog_id || ''),
       phone_number_id: String(d.phone_number_id || ''),
-      meta_app_id: String(d.meta_app_id || ''),
-      webhook_verify_token: '',
       access_token: '',
       access_token_present: Boolean(d.access_token_present),
       access_token_hint: String(d.access_token_hint || ''),
       access_token_source: String(d.access_token_source || ''),
+      webhook_app_secret: '',
+      webhook_app_secret_present: Boolean(d.webhook_app_secret_present),
+      webhook_app_secret_hint: String(d.webhook_app_secret_hint || ''),
+      webhook_app_secret_source: String(d.webhook_app_secret_source || 'missing'),
+      use_db_webhook_app_secret: String(d.webhook_app_secret_source || '') === 'db',
+      global_verify_token_present: Boolean(d.global_verify_token_present),
     });
   };
 
@@ -312,7 +335,7 @@ export default function AutomationSettingsPage() {
       await api.post('/admin/workspaces', { id: ws, label: wsLabelDraft, short: wsShortDraft });
       await loadWorkspaces();
     } catch (e) {
-      setError('Failed to save workspace metadata.');
+      setError(getApiErrorMessage(e, 'Failed to save workspace metadata.'));
     } finally {
       setSavingWorkspace(false);
     }
@@ -326,7 +349,7 @@ export default function AutomationSettingsPage() {
     try {
       await api.post('/admin/catalog-filters', { catalogFilters }, { headers: { 'X-Workspace': ws } });
     } catch (e) {
-      setError('Failed to save catalog filters.');
+      setError(getApiErrorMessage(e, 'Failed to save catalog filters.'));
     } finally {
       setSavingCatalog(false);
     }
@@ -338,20 +361,23 @@ export default function AutomationSettingsPage() {
     setSavingEnv(true);
     setError('');
     try {
-      await api.post('/admin/inbox-env', {
+      const payload = {
         allowed_phone_number_ids: envDraft.allowed_phone_number_ids,
         survey_test_numbers: envDraft.survey_test_numbers,
         auto_reply_test_numbers: envDraft.auto_reply_test_numbers,
         waba_id: envDraft.waba_id,
         catalog_id: envDraft.catalog_id,
         phone_number_id: envDraft.phone_number_id,
-        ...(envDraft.webhook_verify_token ? { webhook_verify_token: envDraft.webhook_verify_token } : {}),
         ...(envDraft.access_token ? { access_token: envDraft.access_token } : {}),
         ...(envDraft.access_token_source === 'env' ? { clear_access_token: true } : {}),
-      }, { headers: { 'X-Workspace': ws } });
+        ...(envDraft.use_db_webhook_app_secret && envDraft.webhook_app_secret ? { webhook_app_secret: envDraft.webhook_app_secret } : {}),
+        ...(!envDraft.use_db_webhook_app_secret && envDraft.webhook_app_secret_source === 'db' ? { clear_webhook_app_secret: true } : {}),
+      };
+      await api.post('/admin/inbox-env', payload, { headers: { 'X-Workspace': ws } });
+      await loadWorkspaces();
       await loadInboxEnv(ws);
     } catch (e) {
-      setError('Failed to save inbox environment settings.');
+      setError(getApiErrorMessage(e, 'Failed to save inbox environment settings.'));
     } finally {
       setSavingEnv(false);
     }
@@ -374,7 +400,7 @@ export default function AutomationSettingsPage() {
       }
       await loadShopifyWebhookAuth(ws);
     } catch (e) {
-      setError('Failed to save Shopify webhook authentication settings.');
+      setError(getApiErrorMessage(e, 'Failed to save Shopify webhook authentication settings.'));
     } finally {
       setSavingShopify(false);
     }
@@ -400,7 +426,7 @@ export default function AutomationSettingsPage() {
       }
       setAddDraft({ id: '', label: '', short: '', copy_from: '' });
     } catch (e) {
-      setError('Failed to add workspace.');
+      setError(getApiErrorMessage(e, 'Failed to add workspace.'));
     } finally {
       setSavingWorkspace(false);
     }
@@ -430,7 +456,7 @@ export default function AutomationSettingsPage() {
       try { localStorage.setItem('workspace', next); } catch {}
       setWorkspace(next);
     } catch (e) {
-      setError('Failed to delete workspace.');
+      setError(getApiErrorMessage(e, 'Failed to delete workspace.'));
     } finally {
       setSavingWorkspace(false);
     }
@@ -719,6 +745,9 @@ export default function AutomationSettingsPage() {
                         <div className="text-xs text-slate-500">{w.source || ''}</div>
                       </div>
                       <div className="text-xs text-slate-500 mt-1">id: <span className="font-mono">{w.id}</span> • short: <span className="font-mono">{w.short || ''}</span></div>
+                      <div className="text-[11px] text-slate-500 mt-1">
+                        phone_number_id: <span className="font-mono">{w.phone_number_id || 'missing'}</span> • token: <span className="font-mono">{w.has_access_token ? 'configured' : 'missing'}</span>
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -781,6 +810,9 @@ export default function AutomationSettingsPage() {
                   <button type="button" className="px-3 py-1.5 rounded bg-gray-800 text-white disabled:opacity-50" disabled={savingWorkspace} onClick={saveWorkspaceMeta}>
                     {savingWorkspace ? 'Saving…' : 'Save workspace'}
                   </button>
+                  <div className="text-[11px] text-slate-500">
+                    Changing label or short updates the current workspace metadata only. It does not create another workspace.
+                  </div>
 
                   <div className="pt-2 border-t">
                     <button
@@ -919,6 +951,13 @@ export default function AutomationSettingsPage() {
                 <div className="px-3 py-2 border-b text-sm font-medium">Inbox environment (per workspace)</div>
                 <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div className="md:col-span-2">
+                    <div className="rounded border border-slate-200 bg-slate-50 p-3 text-[11px] text-slate-600">
+                      <div><span className="font-semibold">Global Meta webhook config</span>: <span className="font-mono">META_APP_ID</span> and <span className="font-mono">WHATSAPP_VERIFY_TOKEN</span> stay in Cloud Run env for every workspace.</div>
+                      <div className="mt-1">Use the same value of <span className="font-mono">WHATSAPP_VERIFY_TOKEN</span> in Meta when you add or edit the webhook URL.</div>
+                      <div className="mt-1">Per-workspace access tokens and webhook app secrets saved here are encrypted in the database.</div>
+                    </div>
+                  </div>
+                  <div className="md:col-span-2">
                     <div className="text-xs text-slate-500 mb-1">WhatsApp Access Token</div>
                     <div className="flex items-center gap-2 mb-2">
                       <label className="text-xs text-slate-600 flex items-center gap-2">
@@ -956,7 +995,7 @@ export default function AutomationSettingsPage() {
                     <div className="text-[11px] text-slate-500 mt-1">
                       {String(envDraft.access_token_source || 'env') === 'env'
                         ? 'Token comes from Cloud Run secret env; not stored in DB.'
-                        : (envDraft.access_token_present ? 'Token is stored in DB. Leave empty to keep it unchanged.' : 'Required for this workspace to send WhatsApp messages.')}
+                        : (envDraft.access_token_present ? 'Token is stored encrypted in DB. Leave empty to keep it unchanged.' : 'Required for this workspace to send WhatsApp messages.')}
                     </div>
                   </div>
                   <div className="md:col-span-2">
@@ -968,23 +1007,44 @@ export default function AutomationSettingsPage() {
                     <input className="w-full border rounded px-2 py-1 font-mono text-xs" value={envDraft.phone_number_id || ''} onChange={(e)=>setEnvDraft((d)=>({ ...d, phone_number_id: e.target.value }))} />
                   </div>
                   <div className="md:col-span-2">
-                    <div className="text-xs text-slate-500 mb-1">Meta App ID (global; from server env)</div>
-                    <input className="w-full border rounded px-2 py-1 font-mono text-xs bg-slate-50" value={envDraft.meta_app_id || ''} readOnly />
-                    <div className="text-[11px] text-slate-500 mt-1">
-                      This should be the same Meta App for all workspaces/clients. Configure it in Cloud Run env (<span className="font-mono">META_APP_ID</span>/<span className="font-mono">META_APP_SECRET</span>).
+                    <div className="text-xs text-slate-500 mb-1">Webhook App Secret</div>
+                    <div className="flex items-center gap-2 mb-2">
+                      <label className="text-xs text-slate-600 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(envDraft.use_db_webhook_app_secret)}
+                          onChange={(e) => {
+                            const useDb = !!e.target.checked;
+                            setEnvDraft((d) => ({
+                              ...d,
+                              use_db_webhook_app_secret: useDb,
+                              webhook_app_secret: '',
+                            }));
+                          }}
+                        />
+                        Use DB secret for this workspace
+                      </label>
+                      <span className="text-[11px] text-slate-500">
+                        Current: <span className="font-mono">{envDraft.webhook_app_secret_source || 'missing'}</span>
+                        {envDraft.webhook_app_secret_hint ? <> • …{envDraft.webhook_app_secret_hint}</> : null}
+                      </span>
                     </div>
-                  </div>
-                  <div className="md:col-span-2">
-                    <div className="text-xs text-slate-500 mb-1">Webhook Verify Token (optional)</div>
                     <input
                       type="password"
                       className="w-full border rounded px-2 py-1 font-mono text-xs"
-                      value={envDraft.webhook_verify_token || ''}
-                      onChange={(e)=>setEnvDraft((d)=>({ ...d, webhook_verify_token: e.target.value }))}
-                      placeholder="Leave empty to keep current"
+                      value={envDraft.webhook_app_secret || ''}
+                      onChange={(e)=>setEnvDraft((d)=>({ ...d, webhook_app_secret: e.target.value }))}
+                      disabled={!envDraft.use_db_webhook_app_secret}
+                      placeholder={
+                        envDraft.use_db_webhook_app_secret
+                          ? (envDraft.webhook_app_secret_present && envDraft.webhook_app_secret_source === 'db' ? 'Saved in DB - leave blank to keep' : 'Paste webhook app secret here')
+                          : 'Using env secret (META_APP_SECRET / WEBHOOK_APP_SECRET)'
+                      }
                     />
                     <div className="text-[11px] text-slate-500 mt-1">
-                      Meta verification uses a single token for the webhook URL. This is optional; you can keep using the Cloud Run env token.
+                      {envDraft.use_db_webhook_app_secret
+                        ? 'DB secret is encrypted at rest and only overrides this workspace. Leave empty to keep the existing DB secret.'
+                        : 'Keep this off when all workspaces share the global Meta app secret from Cloud Run env.'}
                     </div>
                   </div>
                   <div className="md:col-span-2">

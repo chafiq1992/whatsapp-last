@@ -72,6 +72,7 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from PIL import Image, ImageOps  # type: ignore
 import io
+from cryptography.fernet import Fernet, InvalidToken
 
 # Customer campaigns (Shopify segments -> WhatsApp templates)
 CUSTOMER_CAMPAIGN_JOBS: dict[str, dict] = {}
@@ -407,6 +408,127 @@ def _secret_hint(value: str) -> str:
     return (s[-4:] if len(s) >= 4 else "")
 
 
+_WORKSPACE_SECRET_ENC_PREFIX = "enc:v1:"
+_WORKSPACE_SECRET_ENV_NAMES = (
+    "WORKSPACE_SECRET_ENCRYPTION_KEY",
+    "APP_SECRETS_ENCRYPTION_KEY",
+    "AGENT_AUTH_SECRET",
+    "SECRET_KEY",
+)
+
+
+def _workspace_secret_cipher() -> Fernet | None:
+    seed = ""
+    for env_name in _WORKSPACE_SECRET_ENV_NAMES:
+        try:
+            seed = str(os.getenv(env_name, "") or "").strip()
+        except Exception:
+            seed = ""
+        if seed:
+            break
+    if not seed:
+        return None
+    try:
+        key = base64.urlsafe_b64encode(hashlib.sha256(seed.encode("utf-8")).digest())
+        return Fernet(key)
+    except Exception:
+        return None
+
+
+def _encrypt_workspace_secret(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if s.startswith(_WORKSPACE_SECRET_ENC_PREFIX):
+        return s
+    cipher = _workspace_secret_cipher()
+    if not cipher:
+        raise RuntimeError(
+            "Missing workspace secret encryption key. Set WORKSPACE_SECRET_ENCRYPTION_KEY or reuse SECRET_KEY."
+        )
+    token = cipher.encrypt(s.encode("utf-8")).decode("utf-8")
+    return f"{_WORKSPACE_SECRET_ENC_PREFIX}{token}"
+
+
+def _decrypt_workspace_secret(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if not s.startswith(_WORKSPACE_SECRET_ENC_PREFIX):
+        return s
+    cipher = _workspace_secret_cipher()
+    if not cipher:
+        logging.getLogger(__name__).error(
+            "Cannot decrypt workspace secret: missing encryption key (%s)",
+            ", ".join(_WORKSPACE_SECRET_ENV_NAMES),
+        )
+        return ""
+    try:
+        payload = s[len(_WORKSPACE_SECRET_ENC_PREFIX):]
+        return cipher.decrypt(payload.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        logging.getLogger(__name__).error("Cannot decrypt workspace secret: invalid encryption token")
+        return ""
+    except Exception:
+        return ""
+
+
+def _read_secret_from_obj(obj: Any, *keys: str) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    for key in keys:
+        try:
+            value = _decrypt_workspace_secret(obj.get(key))
+        except Exception:
+            value = ""
+        if value:
+            return value
+    return ""
+
+
+def _normalize_inbox_env_overrides(raw_obj: Any) -> dict:
+    if not isinstance(raw_obj, dict):
+        return {}
+    out = dict(raw_obj)
+    access_token = _read_secret_from_obj(raw_obj, "access_token_enc", "access_token")
+    webhook_app_secret = _read_secret_from_obj(
+        raw_obj,
+        "webhook_app_secret_enc",
+        "webhook_app_secret",
+        "meta_app_secret",
+        "app_secret",
+    )
+    for legacy_key in (
+        "access_token",
+        "meta_app_id",
+        "webhook_verify_token",
+        "meta_app_secret",
+        "app_secret",
+    ):
+        out.pop(legacy_key, None)
+    if access_token:
+        out["access_token"] = access_token
+    else:
+        out.pop("access_token", None)
+    if webhook_app_secret:
+        out["webhook_app_secret"] = webhook_app_secret
+    else:
+        out.pop("webhook_app_secret", None)
+    return out
+
+
+async def _load_inbox_env_overrides_raw(workspace: str | None = None) -> dict:
+    ws = _coerce_workspace(workspace or get_current_workspace())
+    try:
+        raw = await db_manager.get_setting(_ws_setting_key("inbox_env", ws))
+        if (not raw) and ws == _coerce_workspace(DEFAULT_WORKSPACE):
+            raw = await db_manager.get_setting("inbox_env")
+        obj = json.loads(raw) if raw else {}
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
 def _shopify_webhook_secret_env(ws: str) -> str:
     """Per-workspace env override -> global env fallback."""
     w = _coerce_workspace(ws)
@@ -431,9 +553,9 @@ async def _shopify_webhook_secret_db(ws: str) -> str:
         except Exception:
             obj = None
         if isinstance(obj, str):
-            return obj.strip()
+            return _decrypt_workspace_secret(obj)
         if isinstance(obj, dict):
-            return str(obj.get("secret") or "").strip()
+            return _read_secret_from_obj(obj, "secret_enc", "secret")
         return ""
     except Exception:
         return ""
@@ -5503,17 +5625,8 @@ class MessageProcessor:
             meta_app_id_default = ""
 
         # Overrides from DB (optional)
-        overrides: dict = {}
-        try:
-            raw = await self.db_manager.get_setting(_ws_setting_key("inbox_env", ws))
-            if (not raw) and ws == _coerce_workspace(DEFAULT_WORKSPACE):
-                # Back-compat: older deployments stored default workspace under the plain key.
-                raw = await self.db_manager.get_setting("inbox_env")
-            overrides = json.loads(raw) if raw else {}
-        except Exception:
-            overrides = {}
-        if not isinstance(overrides, dict):
-            overrides = {}
+        overrides_raw = await _load_inbox_env_overrides_raw(ws)
+        overrides = _normalize_inbox_env_overrides(overrides_raw)
 
         def _as_list(v):
             if isinstance(v, list):
@@ -5536,8 +5649,8 @@ class MessageProcessor:
         catalog_effective = str((overrides or {}).get("catalog_id") or "").strip() or catalog_default or None
         phone_effective = str((overrides or {}).get("phone_number_id") or "").strip() or phone_default or None
         token_effective = str((overrides or {}).get("access_token") or "").strip() or token_default or None
-        meta_app_id_effective = str((overrides or {}).get("meta_app_id") or "").strip() or meta_app_id_default or None
-        webhook_verify_token_effective = str((overrides or {}).get("webhook_verify_token") or "").strip() or (str(VERIFY_TOKEN or "").strip() or None)
+        meta_app_id_effective = meta_app_id_default or None
+        webhook_verify_token_effective = str(VERIFY_TOKEN or "").strip() or None
 
         out = {
             "workspace": ws,
@@ -10330,12 +10443,22 @@ async def _resolve_webhook_secrets_for_phone_id(phone_number_id: str, payload: d
     for ws in ws_candidates:
         if not ws:
             continue
+        # 0) Optional per-workspace env secrets (for setups that keep secrets out of DB)
+        try:
+            ws_key = str(ws or "").strip().upper()
+            if ws_key:
+                _add(os.getenv(f"META_APP_SECRET_{ws_key}", ""))
+                _add(os.getenv(f"FB_APP_SECRET_{ws_key}", ""))
+                _add(os.getenv(f"WEBHOOK_APP_SECRET_{ws_key}", ""))
+        except Exception:
+            pass
         try:
             cfg = await message_processor._get_inbox_env(ws)
             ov = (cfg or {}).get("overrides") or {}
             if isinstance(ov, dict):
                 _add(ov.get("meta_app_secret"))
                 _add(ov.get("webhook_app_secret"))
+                _add(ov.get("app_secret"))
         except Exception:
             continue
     return out
@@ -10725,19 +10848,6 @@ async def startup():
                         RUNTIME_PHONE_ID_TO_WORKSPACE[p] = w
         except Exception:
             pass
-        # Best-effort: accept DB-provided webhook verify tokens (Meta still uses only one token per URL).
-        try:
-            for w in sorted(list(_all_workspaces_set())):
-                try:
-                    cfg = await message_processor._get_inbox_env(w)
-                    vt = str((cfg.get("overrides") or {}).get("webhook_verify_token") or "").strip()
-                    if vt:
-                        RUNTIME_WEBHOOK_VERIFY_TOKENS.add(vt)
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
         # 2) Tenant DB(s) (log per-workspace failures explicitly so we can spot misconfigured NOVA DBs)
         tenant_errors: list[tuple[str, str]] = []
         if ENABLE_MULTI_WORKSPACE:
@@ -12111,19 +12221,35 @@ async def get_automation_rules_stats_endpoint(_: dict = Depends(require_admin)):
 @app.get("/admin/inbox-env")
 async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
     """Return effective inbox env settings (DB overrides layered on env defaults)."""
-    cfg = await message_processor._get_inbox_env(get_current_workspace())
+    ws = get_current_workspace()
+    cfg = await message_processor._get_inbox_env(ws)
     try:
         overrides = cfg.get("overrides") if isinstance(cfg.get("overrides"), dict) else {}
         db_tok = str((overrides or {}).get("access_token") or "").strip()
         eff_tok = str(cfg.get("access_token") or "").strip()
+        db_webhook_secret = str((overrides or {}).get("webhook_app_secret") or "").strip()
+        env_webhook_secret = ""
+        try:
+            ws_key = str(ws or "").strip().upper()
+            if ws_key:
+                env_webhook_secret = (
+                    os.getenv(f"WEBHOOK_APP_SECRET_{ws_key}", "")
+                    or os.getenv(f"META_APP_SECRET_{ws_key}", "")
+                    or os.getenv(f"FB_APP_SECRET_{ws_key}", "")
+                ).strip()
+        except Exception:
+            env_webhook_secret = ""
+        if not env_webhook_secret:
+            env_webhook_secret = str(META_APP_SECRET or "").strip()
 
         db_tok_present = bool(db_tok and not _is_placeholder_token(db_tok))
         env_tok_present = (not db_tok_present) and bool(eff_tok and not _is_placeholder_token(eff_tok))
         tok_present = bool(db_tok_present or env_tok_present)
         tok_source = "db" if db_tok_present else ("env" if env_tok_present else "missing")
         tok_hint = (db_tok[-4:] if db_tok_present and len(db_tok) >= 4 else "")
+        webhook_secret_source = "db" if db_webhook_secret else ("env" if env_webhook_secret else "missing")
         return {
-            "workspace": cfg.get("workspace") or get_current_workspace(),
+            "workspace": cfg.get("workspace") or ws,
             "allowed_phone_number_ids": sorted(list(cfg.get("allowed_phone_number_ids") or [])),
             "survey_test_numbers": sorted(list(cfg.get("survey_test_numbers") or [])),
             "auto_reply_test_numbers": sorted(list(cfg.get("auto_reply_test_numbers") or [])),
@@ -12131,15 +12257,18 @@ async def get_inbox_env_endpoint(_: dict = Depends(require_admin)):
             "catalog_id": cfg.get("catalog_id") or "",
             "phone_number_id": cfg.get("phone_number_id") or "",
             "meta_app_id": cfg.get("meta_app_id") or "",
-            "webhook_verify_token_present": bool(str((cfg.get("overrides") or {}).get("webhook_verify_token") or "").strip()),
+            "global_verify_token_present": bool(str(VERIFY_TOKEN or "").strip()),
             "access_token_present": tok_present,
             "access_token_source": tok_source,
             "access_token_hint": tok_hint,
+            "webhook_app_secret_present": bool(db_webhook_secret or env_webhook_secret),
+            "webhook_app_secret_source": webhook_secret_source,
+            "webhook_app_secret_hint": _secret_hint(db_webhook_secret if db_webhook_secret else env_webhook_secret),
             "overrides": cfg.get("overrides") or {},
         }
     except Exception:
         return {
-            "workspace": get_current_workspace(),
+            "workspace": ws,
             "allowed_phone_number_ids": sorted(list(ALLOWED_PHONE_NUMBER_IDS or set())),
             "survey_test_numbers": sorted(list(SURVEY_TEST_NUMBERS or set())),
             "auto_reply_test_numbers": sorted(list(AUTO_REPLY_TEST_NUMBERS or set())),
@@ -12174,11 +12303,12 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     waba_id = str((payload or {}).get("waba_id") or "").strip()
     catalog_id = str((payload or {}).get("catalog_id") or "").strip()
     phone_number_id = str((payload or {}).get("phone_number_id") or "").strip()
-    # meta_app_id is normally a GLOBAL Meta App ID (server env), not per-workspace.
-    # Preserve existing DB value unless the payload explicitly includes meta_app_id.
-    _meta_app_id_present = isinstance(payload, dict) and ("meta_app_id" in payload)
-    meta_app_id_in = str((payload or {}).get("meta_app_id") or "").strip() if _meta_app_id_present else ""
-    webhook_verify_token = str((payload or {}).get("webhook_verify_token") or "").strip()
+    # Optional per-workspace webhook signing secret(s)
+    # (used when multiple Meta apps are routed to the same backend URL).
+    webhook_app_secret_in = str((payload or {}).get("webhook_app_secret") or "").strip()
+    meta_app_secret_in = str((payload or {}).get("meta_app_secret") or "").strip()
+    app_secret_in = str((payload or {}).get("app_secret") or "").strip()
+    clear_webhook_app_secret = bool((payload or {}).get("clear_webhook_app_secret"))
     access_token_in = str((payload or {}).get("access_token") or "").strip()
     clear_access_token = bool((payload or {}).get("clear_access_token"))
 
@@ -12193,42 +12323,59 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
             out.append(x)
         return out
 
-    # Preserve existing access_token unless explicitly provided or explicitly cleared.
-    existing_token = ""
-    try:
-        raw_prev = await db_manager.get_setting(_ws_setting_key("inbox_env", get_current_workspace()))
-        prev_obj = json.loads(raw_prev) if raw_prev else {}
-        if isinstance(prev_obj, dict):
-            existing_token = str(prev_obj.get("access_token") or "").strip()
-    except Exception:
-        existing_token = ""
-
-    # Preserve existing meta_app_id unless explicitly provided.
-    existing_meta_app_id = ""
-    try:
-        raw_prev = await db_manager.get_setting(_ws_setting_key("inbox_env", get_current_workspace()))
-        prev_obj = json.loads(raw_prev) if raw_prev else {}
-        if isinstance(prev_obj, dict):
-            existing_meta_app_id = str(prev_obj.get("meta_app_id") or "").strip()
-    except Exception:
-        existing_meta_app_id = ""
+    ws_now = get_current_workspace()
+    prev_raw = await _load_inbox_env_overrides_raw(ws_now)
+    prev_norm = _normalize_inbox_env_overrides(prev_raw)
+    previous_phone_number_id = str((prev_norm or {}).get("phone_number_id") or "").strip()
+    token_to_store = ""
+    webhook_secret_to_store = ""
+    if not clear_access_token:
+        token_to_store = access_token_in or str(prev_norm.get("access_token") or "").strip()
+    if not clear_webhook_app_secret:
+        webhook_secret_to_store = (
+            webhook_app_secret_in
+            or meta_app_secret_in
+            or app_secret_in
+            or str(prev_norm.get("webhook_app_secret") or "").strip()
+        )
 
     stored = {
-        "allowed_phone_number_ids": _dedupe(allowed),
-        "survey_test_numbers": _dedupe(survey),
-        "auto_reply_test_numbers": _dedupe(auto_reply),
-        "waba_id": waba_id,
-        "catalog_id": catalog_id,
-        "phone_number_id": phone_number_id,
-        **({"meta_app_id": meta_app_id_in} if _meta_app_id_present else ({"meta_app_id": existing_meta_app_id} if existing_meta_app_id else {})),
-        "webhook_verify_token": webhook_verify_token,
-        **(
-            {}
-            if clear_access_token
-            else ({"access_token": access_token_in} if access_token_in else ({"access_token": existing_token} if existing_token else {}))
-        ),
+        key: value
+        for key, value in prev_raw.items()
+        if key not in {
+            "allowed_phone_number_ids",
+            "survey_test_numbers",
+            "auto_reply_test_numbers",
+            "waba_id",
+            "catalog_id",
+            "phone_number_id",
+            "access_token",
+            "access_token_enc",
+            "meta_app_id",
+            "webhook_verify_token",
+            "webhook_app_secret",
+            "webhook_app_secret_enc",
+            "meta_app_secret",
+            "app_secret",
+        }
     }
-    ws_now = get_current_workspace()
+    stored.update(
+        {
+            "allowed_phone_number_ids": _dedupe(allowed),
+            "survey_test_numbers": _dedupe(survey),
+            "auto_reply_test_numbers": _dedupe(auto_reply),
+            "waba_id": waba_id,
+            "catalog_id": catalog_id,
+            "phone_number_id": phone_number_id,
+        }
+    )
+    try:
+        if token_to_store:
+            stored["access_token_enc"] = _encrypt_workspace_secret(token_to_store)
+        if webhook_secret_to_store:
+            stored["webhook_app_secret_enc"] = _encrypt_workspace_secret(webhook_secret_to_store)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
     # Solid isolation: prevent assigning the same phone_number_id to multiple workspaces.
     # This is the #1 cause of "workspace A receives workspace B messages" after adding a new workspace.
@@ -12260,6 +12407,20 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
                         status_code=409,
                         detail=f"phone_number_id already assigned: {pid_check} -> {existing_ws} (cannot assign to {ws_norm_check})",
                     )
+            for other_ws in sorted(list(_all_workspaces_set())):
+                other_norm = _coerce_workspace(other_ws)
+                if not other_norm or other_norm == ws_norm_check:
+                    continue
+                try:
+                    other_cfg = await message_processor._get_inbox_env(other_norm)
+                except Exception:
+                    continue
+                other_pid = str((other_cfg or {}).get("phone_number_id") or "").strip()
+                if other_pid and other_pid == pid_check:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"phone_number_id already configured in workspace {other_norm}. Remove it there before assigning it to {ws_norm_check}.",
+                    )
     except HTTPException:
         raise
     except Exception:
@@ -12276,12 +12437,16 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     try:
         pid = str(phone_number_id or "").strip()
         ws_norm = _coerce_workspace(ws_now)
-        if pid and ws_norm:
+        old_pid = str(previous_phone_number_id or "").strip()
+        if ws_norm:
             # 1) Redis (preferred for fast lookups by /webhook ingress)
             try:
                 r = getattr(redis_manager, "redis_client", None)
                 if r:
-                    await r.hset("wa:phone_id_to_workspace", pid, ws_norm)
+                    if old_pid and old_pid != pid:
+                        await r.hdel("wa:phone_id_to_workspace", old_pid)
+                    if pid:
+                        await r.hset("wa:phone_id_to_workspace", pid, ws_norm)
             except Exception:
                 pass
             # 2) Auth DB (durable fallback; also helps rebuild mappings on cold start)
@@ -12297,7 +12462,10 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
                             m.pop(k, None)
                 except Exception:
                     pass
-                m[pid] = ws_norm
+                if old_pid and old_pid != pid:
+                    m.pop(old_pid, None)
+                if pid:
+                    m[pid] = ws_norm
                 await auth_db_manager.set_setting("phone_id_to_workspace", m)
             except Exception:
                 pass
@@ -12306,14 +12474,6 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     # Update runtime WhatsApp routing immediately (no redeploy needed).
     try:
         await _sync_whatsapp_runtime_for_workspace(ws_now)
-    except Exception:
-        pass
-    # Update accepted verify tokens for webhook verification (best-effort).
-    try:
-        if webhook_verify_token:
-            RUNTIME_WEBHOOK_VERIFY_TOKENS.add(webhook_verify_token)
-        elif str(VERIFY_TOKEN or "").strip():
-            RUNTIME_WEBHOOK_VERIFY_TOKENS.add(str(VERIFY_TOKEN or "").strip())
     except Exception:
         pass
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}
@@ -12398,10 +12558,13 @@ async def _save_workspace_whatsapp_oauth(
         stored = dict(prev)
         stored["waba_id"] = str(waba_id).strip()
         stored["phone_number_id"] = str(phone_number_id).strip()
-        stored["access_token"] = str(access_token).strip()
-        # Keep meta_app_id synced to the configured app id (best-effort).
-        if str(META_APP_ID or "").strip():
-            stored["meta_app_id"] = str(META_APP_ID or "").strip()
+        stored.pop("access_token", None)
+        stored.pop("meta_app_id", None)
+        stored.pop("webhook_verify_token", None)
+        try:
+            stored["access_token_enc"] = _encrypt_workspace_secret(str(access_token).strip())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
         await db_manager.set_setting(_ws_setting_key("inbox_env", ws), stored)
         # Bust cache for immediate effect
@@ -12418,6 +12581,12 @@ async def _save_workspace_whatsapp_oauth(
                 try:
                     r = getattr(redis_manager, "redis_client", None)
                     if r:
+                        try:
+                            for existing_pid, existing_ws in list((RUNTIME_PHONE_ID_TO_WORKSPACE or {}).items()):
+                                if str(existing_ws or "").strip().lower() == ws_norm and str(existing_pid or "").strip() != pid:
+                                    await r.hdel("wa:phone_id_to_workspace", str(existing_pid or "").strip())
+                        except Exception:
+                            pass
                         await r.hset("wa:phone_id_to_workspace", pid, ws_norm)
                 except Exception:
                     pass
@@ -12445,6 +12614,12 @@ async def _save_workspace_whatsapp_oauth(
                             status_code=409,
                             detail=f"phone_number_id already assigned: {pid} -> {existing_ws} (cannot assign to {ws_norm})",
                         )
+                    try:
+                        for k, v in list(m.items()):
+                            if str(v or "").strip().lower() == ws_norm and str(k or "").strip() != pid:
+                                m.pop(k, None)
+                    except Exception:
+                        pass
                     m[pid] = ws_norm
                     await auth_db_manager.set_setting("phone_id_to_workspace", m)
                 except HTTPException:
@@ -13041,7 +13216,10 @@ async def set_shopify_webhook_auth_endpoint(payload: dict = Body(...), _: dict =
         except Exception:
             pass
     elif secret_in:
-        await db_manager.set_setting(key, secret_in)
+        try:
+            await db_manager.set_setting(key, {"secret_enc": _encrypt_workspace_secret(secret_in)})
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
     # If neither clear_secret nor secret provided, keep existing unchanged.
     return await get_shopify_webhook_auth_endpoint(_={})  # type: ignore[arg-type]
 
@@ -13241,11 +13419,20 @@ async def admin_list_workspaces(_: dict = Depends(require_admin)):
         pass
     items = []
     for w in all_ws:
+        cfg = {}
+        try:
+            cfg = await message_processor._get_inbox_env(w)
+        except Exception:
+            cfg = {}
+        phone_number_id = str((cfg or {}).get("phone_number_id") or "").strip()
+        access_token = str((cfg or {}).get("access_token") or "").strip()
         items.append({
             "id": w,
             "label": meta.get(w, {}).get("label") or w.upper(),
             "short": meta.get(w, {}).get("short") or w.upper()[:4],
             "source": "env" if w in WORKSPACES else "db",
+            "phone_number_id": phone_number_id,
+            "has_access_token": bool(access_token and not _is_placeholder_token(access_token)),
         })
     return {
         "default": DEFAULT_WORKSPACE,
@@ -13260,10 +13447,19 @@ async def admin_upsert_workspace(payload: dict = Body(...), _: dict = Depends(re
     if not ws_id:
         raise HTTPException(status_code=400, detail="Missing workspace id")
     label = str((payload or {}).get("label") or "").strip()
-    short = str((payload or {}).get("short") or "").strip()
+    short = re.sub(r"\s+", " ", str((payload or {}).get("short") or "").strip())
     copy_from = _normalize_workspace_id((payload or {}).get("copy_from") or "")
 
     reg = await _load_workspace_registry()
+    short_lower = short.lower()
+    if short_lower:
+        for item in reg or []:
+            if not isinstance(item, dict):
+                continue
+            other_ws = _normalize_workspace_id(item.get("id") or "")
+            other_short = re.sub(r"\s+", " ", str(item.get("short") or "").strip()).lower()
+            if other_ws != ws_id and other_short and other_short == short_lower:
+                raise HTTPException(status_code=409, detail=f'Workspace short "{short}" is already used by "{other_ws}"')
     # Upsert by id
     next_reg: list[dict] = []
     found = False

@@ -6,6 +6,7 @@ certifi==2025.1.31
 charset-normalizer==3.4.1
 click==8.1.8
 colorama==0.4.6
+cryptography
 fastapi==0.115.12
 google-api-core==2.24.2
 google-api-python-client==2.166.0

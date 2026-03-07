@@ -525,6 +525,7 @@ except Exception:
     config = None  # type: ignore
 # Verbose logging flag (minimize noisy logs when off)
 LOG_VERBOSE = os.getenv("LOG_VERBOSE", "0") == "1"
+ENABLE_WEBHOOK_REROUTE = os.getenv("ENABLE_WEBHOOK_REROUTE", "0") == "1"
 DISABLE_AUTH = os.getenv("DISABLE_AUTH", "0") == "1"
 
 # Backpressure and rate limiting configuration
@@ -6824,6 +6825,14 @@ class MessageProcessor:
                             )
                         except Exception:
                             return ""
+
+                    if not ENABLE_WEBHOOK_REROUTE:
+                        # Do not silently drop mismatch events in strict mode.
+                        # Re-raise so the durable webhook worker can retry and eventually DLQ.
+                        raise RuntimeError(
+                            f"phone_number_id mismatch (reroute disabled): workspace={get_current_workspace()} "
+                            f"incoming={incoming_phone_id} expected={expected_pid}"
+                        )
 
                     target_ws = await _ws_for_pid(incoming_phone_id)
                     if target_ws and target_ws != get_current_workspace():

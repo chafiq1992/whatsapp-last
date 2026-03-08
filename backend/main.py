@@ -5846,10 +5846,12 @@ class MessageProcessor:
 
         Requires the configured Shopify token to have read_orders + write_orders.
         """
+        _log = logging.getLogger(__name__)
         try:
             oid = str(order_id or "").strip()
             t = str(tag or "").strip()
             if not oid or not oid.isdigit() or not t:
+                _log.info("shopify_tag skipped: oid=%r (isdigit=%s) tag=%r", oid, oid.isdigit() if oid else False, t)
                 return
             import httpx  # type: ignore
             from .shopify_integration import admin_api_base, _client_args  # type: ignore
@@ -5858,19 +5860,22 @@ class MessageProcessor:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 get_resp = await client.get(f"{base}/orders/{oid}.json", **_client_args())
                 if get_resp.status_code != 200:
+                    _log.warning("shopify_tag GET order %s failed: status=%s", oid, get_resp.status_code)
                     return
                 order_obj = (get_resp.json() or {}).get("order") or {}
                 current_tags_str = order_obj.get("tags") or ""
                 current_tags = [x.strip() for x in str(current_tags_str).split(",") if x and x.strip()]
-                # case-insensitive avoid duplicates
                 lower = {x.lower() for x in current_tags}
                 if t.lower() not in lower:
                     current_tags.append(t)
                 payload = {"order": {"id": int(oid), "tags": ", ".join(current_tags)}}
                 put_resp = await client.put(f"{base}/orders/{oid}.json", json=payload, **_client_args())
                 if put_resp.status_code != 200:
+                    _log.warning("shopify_tag PUT order %s failed: status=%s body=%s", oid, put_resp.status_code, put_resp.text[:300])
                     return
-        except Exception:
+                _log.info("shopify_tag SUCCESS order=%s tag=%s", oid, t)
+        except Exception as exc:
+            _log.exception("shopify_tag error order=%s tag=%s: %s", order_id, tag, exc)
             return
 
     async def _fetch_shopify_variant(self, variant_id: str) -> Optional[dict]:
@@ -6762,6 +6767,7 @@ class MessageProcessor:
             try:
                 order_id = str(message.get("shopify_order_id") or "").strip()
                 tag = str(message.get("shopify_tag_on_sent") or "").strip()
+                _vlog(f"shopify_tag_on_sent check: order_id={order_id!r} tag={tag!r} user={user_id}")
                 if order_id and tag:
                     asyncio.create_task(self._shopify_add_order_tag_best_effort(order_id, tag))
             except Exception:
@@ -6807,6 +6813,7 @@ class MessageProcessor:
             try:
                 fail_order_id = str(message.get("shopify_order_id") or "").strip()
                 fail_tag = str(message.get("shopify_tag_on_fail") or "").strip()
+                _vlog(f"shopify_tag_on_fail check: order_id={fail_order_id!r} tag={fail_tag!r} user={user_id}")
                 if fail_order_id and fail_tag:
                     asyncio.create_task(self._shopify_add_order_tag_best_effort(fail_order_id, fail_tag))
             except Exception:
@@ -9465,11 +9472,12 @@ class MessageProcessor:
             ctx = {
                 "topic": topic_norm,
                 "phone": phone_digits,
-                "order_id": (
+                "order_id": str(
                     order_obj.get("id")
                     or data.get("id")
                     or data.get("order_id")
-                    or (data.get("order") or {}).get("id") if isinstance(data.get("order"), dict) else ""
+                    or ((data.get("order") or {}).get("id") if isinstance(data.get("order"), dict) else "")
+                    or ""
                 ),
                 "customer": (order_obj.get("customer") if isinstance(order_obj.get("customer"), dict) else (data.get("customer") if isinstance(data.get("customer"), dict) else {})),
                 "order_number": order_obj.get("name") or data.get("name") or data.get("order_number") or "",
@@ -9482,6 +9490,8 @@ class MessageProcessor:
                 # Full raw payload for power users
                 "payload": data,
             }
+
+            _log.info("shopify_automation ws=%s ctx.order_id=%s phone=%s", ws, ctx.get("order_id"), phone_digits)
 
             # Best-effort raw text for keyword matching
             try:

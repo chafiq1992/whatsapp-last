@@ -456,6 +456,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     ocTalkAudioUrl: "",
     ocSendItems: true,
     ocMaxItems: 10,
+    ocSkipButtonReplies: false,
   });
 
   const [templatesLoading, setTemplatesLoading] = useState(false);
@@ -799,6 +800,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               ocTalkAudioUrl: "",
               ocSendItems: true,
               ocMaxItems: 10,
+              ocSkipButtonReplies: false,
             });
             setEditorOpen(true);
           }}
@@ -1028,6 +1030,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               ocTalkAudioUrl: String(aOC?.talk_audio_url || ""),
               ocSendItems: aOC?.send_items === undefined ? true : !!aOC.send_items,
               ocMaxItems: Number(aOC?.max_items || 10),
+              ocSkipButtonReplies: !!aOC?.skip_button_replies,
             });
             setEditorOpen(true);
           }}
@@ -1226,6 +1229,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       talk_audio_url: String(draft.ocTalkAudioUrl || "").trim(),
                       send_items: !!draft.ocSendItems,
                       max_items: Number(draft.ocMaxItems || 10),
+                      skip_button_replies: !!draft.ocSkipButtonReplies,
                     });
                   }
                 } else if (draft.actionMode === "template") {
@@ -4326,6 +4330,14 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         <input type="number" className="w-24 border rounded-lg px-3 py-2" value={draft.ocMaxItems || 10} onChange={(e)=>onChange({ ocMaxItems: Number(e.target.value || 10) })} />
                       </div>
                     </div>
+
+                    <div className="md:col-span-2 flex items-center gap-3 border rounded-xl p-3 bg-amber-50">
+                      <label className="text-sm flex items-center gap-2">
+                        <input type="checkbox" checked={!!draft.ocSkipButtonReplies} onChange={(e)=>onChange({ ocSkipButtonReplies: e.target.checked })} />
+                        Skip built-in button replies (use separate per-button automations instead)
+                      </label>
+                      <div className="text-[11px] text-slate-500">When enabled, the confirmation flow only sends the template. Button click replies are handled by your separate automations.</div>
+                    </div>
                   </div>
                 </div>
               )}
@@ -4630,6 +4642,13 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                           <div className="text-xs text-slate-500">Max items</div>
                           <input type="number" className="w-24 border rounded px-2 py-1" value={draft.ocMaxItems || 10} onChange={(e)=>onChange({ ocMaxItems: Number(e.target.value || 10) })} />
                         </div>
+                      </div>
+
+                      <div className="md:col-span-2 flex items-center gap-3 border rounded p-2 bg-amber-50">
+                        <label className="text-sm flex items-center gap-2">
+                          <input type="checkbox" checked={!!draft.ocSkipButtonReplies} onChange={(e)=>onChange({ ocSkipButtonReplies: e.target.checked })} />
+                          Skip built-in button replies (use separate per-button automations instead)
+                        </label>
                       </div>
                     </div>
                   </div>

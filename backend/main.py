@@ -9176,48 +9176,50 @@ class MessageProcessor:
                                 "template_components": comps,
                             })
                             # Save pending branch config for future button clicks
-                            try:
-                                line_items = (ctx.get("line_items") if isinstance(ctx.get("line_items"), list) else []) or []
-                                titles = []
-                                line_items_compact = []
-                                for li in line_items:
-                                    if isinstance(li, dict):
-                                        t = str(li.get("title") or li.get("name") or "").strip()
-                                        if t:
-                                            titles.append(t)
-                                        line_items_compact.append({
-                                            "title": t,
-                                            "name": str(li.get("name") or "").strip(),
-                                            "variant_title": str(li.get("variant_title") or "").strip(),
-                                            "variant_id": str(li.get("variant_id") or "").strip(),
-                                            "product_id": str(li.get("product_id") or "").strip(),
-                                            "quantity": li.get("quantity"),
-                                        })
-                                await self._set_order_confirm_pending(
-                                    ws=_coerce_workspace(ws),
-                                    user_id=to_id,
-                                    state={
-                                        "rule_id": str(rule.get("id") or ""),
-                                        "template_name": tname,
-                                        "confirm_titles": act.get("confirm_titles") or [],
-                                        "change_titles": act.get("change_titles") or [],
-                                        "talk_titles": act.get("talk_titles") or [],
-                                        "confirm_ids": act.get("confirm_ids") or [],
-                                        "change_ids": act.get("change_ids") or [],
-                                        "talk_ids": act.get("talk_ids") or [],
-                                        "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
-                                        "change_audio_url": str(act.get("change_audio_url") or ""),
-                                        "talk_audio_url": str(act.get("talk_audio_url") or ""),
-                                        "send_items": bool(act.get("send_items")),
-                                        "max_items": int(act.get("max_items") or 10),
-                                        "line_items": line_items_compact,
-                                        "line_item_titles": titles,
-                                        "created_at": datetime.utcnow().isoformat(),
-                                    },
-                                    ttl_sec=24 * 3600,
-                                )
-                            except Exception:
-                                pass
+                            # (skip when separate per-button automations handle replies instead)
+                            if not bool(act.get("skip_button_replies")):
+                                try:
+                                    line_items = (ctx.get("line_items") if isinstance(ctx.get("line_items"), list) else []) or []
+                                    titles = []
+                                    line_items_compact = []
+                                    for li in line_items:
+                                        if isinstance(li, dict):
+                                            t = str(li.get("title") or li.get("name") or "").strip()
+                                            if t:
+                                                titles.append(t)
+                                            line_items_compact.append({
+                                                "title": t,
+                                                "name": str(li.get("name") or "").strip(),
+                                                "variant_title": str(li.get("variant_title") or "").strip(),
+                                                "variant_id": str(li.get("variant_id") or "").strip(),
+                                                "product_id": str(li.get("product_id") or "").strip(),
+                                                "quantity": li.get("quantity"),
+                                            })
+                                    await self._set_order_confirm_pending(
+                                        ws=_coerce_workspace(ws),
+                                        user_id=to_id,
+                                        state={
+                                            "rule_id": str(rule.get("id") or ""),
+                                            "template_name": tname,
+                                            "confirm_titles": act.get("confirm_titles") or [],
+                                            "change_titles": act.get("change_titles") or [],
+                                            "talk_titles": act.get("talk_titles") or [],
+                                            "confirm_ids": act.get("confirm_ids") or [],
+                                            "change_ids": act.get("change_ids") or [],
+                                            "talk_ids": act.get("talk_ids") or [],
+                                            "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
+                                            "change_audio_url": str(act.get("change_audio_url") or ""),
+                                            "talk_audio_url": str(act.get("talk_audio_url") or ""),
+                                            "send_items": bool(act.get("send_items")),
+                                            "max_items": int(act.get("max_items") or 10),
+                                            "line_items": line_items_compact,
+                                            "line_item_titles": titles,
+                                            "created_at": datetime.utcnow().isoformat(),
+                                        },
+                                        ttl_sec=24 * 3600,
+                                    )
+                                except Exception:
+                                    pass
                         elif at in ("send_buttons", "send_interactive_buttons"):
                             to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                             body_text = self._render_template(str(act.get("text") or act.get("message") or ""), ctx).strip()
@@ -9731,40 +9733,41 @@ class MessageProcessor:
                                     else {}
                                 ),
                             })
-                            try:
-                                # Persist branch config for clicks (store line item titles from Shopify order payload)
-                                order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
-                                line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
-                                titles = []
-                                for li in line_items:
-                                    if isinstance(li, dict):
-                                        t = str(li.get("title") or li.get("name") or "").strip()
-                                        if t:
-                                            titles.append(t)
-                                await self._set_order_confirm_pending(
-                                    ws=_coerce_workspace(ws),
-                                    user_id=to_id,
-                                    state={
-                                        "rule_id": str(rule.get("id") or ""),
-                                        "template_name": tname,
-                                        "confirm_titles": act.get("confirm_titles") or [],
-                                        "change_titles": act.get("change_titles") or [],
-                                        "talk_titles": act.get("talk_titles") or [],
-                                        "confirm_ids": act.get("confirm_ids") or [],
-                                        "change_ids": act.get("change_ids") or [],
-                                        "talk_ids": act.get("talk_ids") or [],
-                                        "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
-                                        "change_audio_url": str(act.get("change_audio_url") or ""),
-                                        "talk_audio_url": str(act.get("talk_audio_url") or ""),
-                                        "send_items": bool(act.get("send_items")),
-                                        "max_items": int(act.get("max_items") or 10),
-                                        "line_item_titles": titles,
-                                        "created_at": datetime.utcnow().isoformat(),
-                                    },
-                                    ttl_sec=24 * 3600,
-                                )
-                            except Exception:
-                                pass
+                            # Persist branch config for clicks unless separate automations handle replies
+                            if not bool(act.get("skip_button_replies")):
+                                try:
+                                    order_obj = data.get("_order") if isinstance(data.get("_order"), dict) else data
+                                    line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
+                                    titles = []
+                                    for li in line_items:
+                                        if isinstance(li, dict):
+                                            t = str(li.get("title") or li.get("name") or "").strip()
+                                            if t:
+                                                titles.append(t)
+                                    await self._set_order_confirm_pending(
+                                        ws=_coerce_workspace(ws),
+                                        user_id=to_id,
+                                        state={
+                                            "rule_id": str(rule.get("id") or ""),
+                                            "template_name": tname,
+                                            "confirm_titles": act.get("confirm_titles") or [],
+                                            "change_titles": act.get("change_titles") or [],
+                                            "talk_titles": act.get("talk_titles") or [],
+                                            "confirm_ids": act.get("confirm_ids") or [],
+                                            "change_ids": act.get("change_ids") or [],
+                                            "talk_ids": act.get("talk_ids") or [],
+                                            "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
+                                            "change_audio_url": str(act.get("change_audio_url") or ""),
+                                            "talk_audio_url": str(act.get("talk_audio_url") or ""),
+                                            "send_items": bool(act.get("send_items")),
+                                            "max_items": int(act.get("max_items") or 10),
+                                            "line_item_titles": titles,
+                                            "created_at": datetime.utcnow().isoformat(),
+                                        },
+                                        ttl_sec=24 * 3600,
+                                    )
+                                except Exception:
+                                    pass
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
                             except Exception:
@@ -10173,39 +10176,40 @@ class MessageProcessor:
                                 "template_language": lang,
                                 "template_components": comps,
                             })
-                            try:
-                                titles = []
-                                order_obj = ctx.get("order") if isinstance(ctx.get("order"), dict) else {}
-                                line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
-                                for li in line_items:
-                                    if isinstance(li, dict):
-                                        t = str(li.get("title") or li.get("name") or "").strip()
-                                        if t:
-                                            titles.append(t)
-                                await self._set_order_confirm_pending(
-                                    ws=_coerce_workspace(ws),
-                                    user_id=to_id,
-                                    state={
-                                        "rule_id": str(rule.get("id") or ""),
-                                        "template_name": tname,
-                                        "confirm_titles": act.get("confirm_titles") or [],
-                                        "change_titles": act.get("change_titles") or [],
-                                        "talk_titles": act.get("talk_titles") or [],
-                                        "confirm_ids": act.get("confirm_ids") or [],
-                                        "change_ids": act.get("change_ids") or [],
-                                        "talk_ids": act.get("talk_ids") or [],
-                                        "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
-                                        "change_audio_url": str(act.get("change_audio_url") or ""),
-                                        "talk_audio_url": str(act.get("talk_audio_url") or ""),
-                                        "send_items": bool(act.get("send_items")),
-                                        "max_items": int(act.get("max_items") or 10),
-                                        "line_item_titles": titles,
-                                        "created_at": datetime.utcnow().isoformat(),
-                                    },
-                                    ttl_sec=24 * 3600,
-                                )
-                            except Exception:
-                                pass
+                            if not bool(act.get("skip_button_replies")):
+                                try:
+                                    titles = []
+                                    order_obj = ctx.get("order") if isinstance(ctx.get("order"), dict) else {}
+                                    line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
+                                    for li in line_items:
+                                        if isinstance(li, dict):
+                                            t = str(li.get("title") or li.get("name") or "").strip()
+                                            if t:
+                                                titles.append(t)
+                                    await self._set_order_confirm_pending(
+                                        ws=_coerce_workspace(ws),
+                                        user_id=to_id,
+                                        state={
+                                            "rule_id": str(rule.get("id") or ""),
+                                            "template_name": tname,
+                                            "confirm_titles": act.get("confirm_titles") or [],
+                                            "change_titles": act.get("change_titles") or [],
+                                            "talk_titles": act.get("talk_titles") or [],
+                                            "confirm_ids": act.get("confirm_ids") or [],
+                                            "change_ids": act.get("change_ids") or [],
+                                            "talk_ids": act.get("talk_ids") or [],
+                                            "confirm_audio_url": str(act.get("confirm_audio_url") or ""),
+                                            "change_audio_url": str(act.get("change_audio_url") or ""),
+                                            "talk_audio_url": str(act.get("talk_audio_url") or ""),
+                                            "send_items": bool(act.get("send_items")),
+                                            "max_items": int(act.get("max_items") or 10),
+                                            "line_item_titles": titles,
+                                            "created_at": datetime.utcnow().isoformat(),
+                                        },
+                                        ttl_sec=24 * 3600,
+                                    )
+                                except Exception:
+                                    pass
                             try:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
                             except Exception:

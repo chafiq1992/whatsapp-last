@@ -2470,7 +2470,7 @@ class WorkspaceWhatsAppRouter:
         ws = get_current_workspace()
         cid = await _get_effective_catalog_id(ws)
         cache_file = _catalog_cache_file_for(ws, cid)
-        products = await CatalogManager.get_products_for_set(set_id, limit=60, catalog_id=cid, cache_file=cache_file)
+        products = await CatalogManager.get_products_for_set(set_id, limit=999, catalog_id=cid, cache_file=cache_file)
         product_ids = [p.get("retailer_id") for p in products if p.get("retailer_id")]
 
         if caption:
@@ -17461,7 +17461,7 @@ async def get_catalog_products_endpoint(force_refresh: bool = False, background_
 
 
 @app.get("/catalog-set-products")
-async def get_catalog_set_products(set_id: str, limit: int = 60):
+async def get_catalog_set_products(set_id: str, limit: int = 999):
     """Return products for the requested set (or full catalog)."""
     try:
         ws = get_current_workspace()
@@ -18267,7 +18267,7 @@ class CatalogManager:
     @staticmethod
     async def get_products_for_set(
         set_id: str,
-        limit: int = 60,
+        limit: int = 999,
         catalog_id: str | None = None,
         cache_file: str | None = None,
         workspace: str | None = None,

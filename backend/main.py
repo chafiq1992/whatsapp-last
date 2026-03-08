@@ -3195,8 +3195,9 @@ class DatabaseManager:
             await self._add_column_if_missing(db, "messages", "template_language", "TEXT")
             await self._add_column_if_missing(db, "messages", "template_components", "TEXT")
             await self._add_column_if_missing(db, "messages", "template_snapshot", "TEXT")
-            # Shopify order tagging metadata (fail-tag for non-WhatsApp numbers)
+            # Shopify order tagging metadata
             await self._add_column_if_missing(db, "messages", "shopify_order_id", "TEXT")
+            await self._add_column_if_missing(db, "messages", "shopify_tag_on_sent", "TEXT")
             await self._add_column_if_missing(db, "messages", "shopify_tag_on_fail", "TEXT")
 
             # Ensure conversation attribution columns exist
@@ -4524,6 +4525,7 @@ class DatabaseManager:
             "product_id": message.get("product_id"),
             # Shopify order tagging metadata
             "shopify_order_id": message.get("shopify_order_id"),
+            "shopify_tag_on_sent": message.get("shopify_tag_on_sent"),
             "shopify_tag_on_fail": message.get("shopify_tag_on_fail"),
         }
         # Remove None values so SQL doesn't fail on NOT NULL columns
@@ -5790,6 +5792,10 @@ class MessageProcessor:
             "template_language": message_data.get("template_language"),
             "template_components": message_data.get("template_components"),
             "template_snapshot": message_data.get("template_snapshot"),
+            # Shopify order tagging metadata (automation sets these so _send_to_whatsapp_bg can tag orders)
+            "shopify_order_id": message_data.get("shopify_order_id"),
+            "shopify_tag_on_sent": message_data.get("shopify_tag_on_sent"),
+            "shopify_tag_on_fail": message_data.get("shopify_tag_on_fail"),
         }
         # Attach agent attribution if present
         agent_username = message_data.get("agent_username")

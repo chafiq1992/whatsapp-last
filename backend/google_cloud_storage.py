@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import logging
 from pathlib import Path
 import mimetypes
 from functools import partial
@@ -15,6 +16,7 @@ GCS_CREDENTIALS_FILE = os.getenv("GCS_CREDENTIALS_FILE")
 GCS_CREDENTIALS_JSON = os.getenv("GCS_CREDENTIALS_JSON")
 # Backward-compatible default: uploads are public unless explicitly disabled.
 GCS_PUBLIC_UPLOADS = os.getenv("GCS_PUBLIC_UPLOADS", "1") == "1"
+_LOG = logging.getLogger(__name__)
 
 
 def _get_client():
@@ -75,7 +77,12 @@ def _upload_sync(file_path: str, content_type: str | None = None, bucket_name: s
     blob.upload_from_filename(file_path, content_type=content_type)
     # Make objects public only if explicitly enabled (default true for backward compatibility)
     if GCS_PUBLIC_UPLOADS:
-        blob.make_public()
+        try:
+            blob.make_public()
+        except Exception as exc:
+            # Buckets with uniform bucket-level access reject object ACL changes.
+            # Upload is still successful, so keep processing instead of failing webhooks.
+            _LOG.warning("GCS make_public failed for %s: %s", blob.name, exc)
 
     return blob.public_url
 

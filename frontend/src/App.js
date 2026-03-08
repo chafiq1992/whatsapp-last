@@ -120,6 +120,7 @@ export default function App() {
         const incomingIso = d.last_message_time || nowIso;
         const incomingMs = toMsNormalized(incomingIso);
         if (idx === -1) {
+          const isFromMe = Boolean(d.last_message_from_me);
           const created = {
             user_id: d.user_id,
             name: d.name || d.user_id,
@@ -128,7 +129,8 @@ export default function App() {
             last_message_time: incomingIso,
             last_message_from_me: typeof d.last_message_from_me === 'boolean' ? d.last_message_from_me : undefined,
             last_message_status: d.last_message_status,
-            unread_count: activeUserRef.current?.user_id === d.user_id ? 0 : 1,
+            // Outbound previews must never create unread badges.
+            unread_count: (activeUserRef.current?.user_id === d.user_id || isFromMe) ? 0 : 1,
             tags: [],
           };
           return [created, ...list];
@@ -568,6 +570,8 @@ export default function App() {
                 // If archived as Done, remove the tag on any new incoming message
                 const oldTags = Array.isArray(current.tags) ? current.tags : [];
                 const newTags = (msg.from_me ? oldTags : oldTags.filter(t => String(t || '').toLowerCase() !== 'done'));
+                const isActiveConv = activeUserRef.current?.user_id === userId;
+                const shouldIncrementUnread = !msg.from_me && !isActiveConv;
                 const updated = {
                   ...current,
                   last_message: text,
@@ -586,10 +590,10 @@ export default function App() {
                   // Always treat an incoming message as latest activity for ordering purposes
                   last_message_time: nowIso,
                   _flash_ts: (!msg.from_me ? Date.now() : (current._flash_ts || 0)),
-                  unread_count:
-                    activeUserRef.current?.user_id === userId
-                      ? current.unread_count
-                      : (current.unread_count || 0) + 1,
+                  // Only inbound messages should increase unread counters.
+                  unread_count: shouldIncrementUnread
+                    ? (current.unread_count || 0) + 1
+                    : (isActiveConv ? 0 : (current.unread_count || 0)),
                   tags: newTags,
                 };
                 return [
@@ -607,8 +611,7 @@ export default function App() {
                 last_message_status: msg.from_me ? (msg.status || undefined) : undefined,
                 last_message_time: nowIso,
                 _flash_ts: (!msg.from_me ? Date.now() : 0),
-                unread_count:
-                  activeUserRef.current?.user_id === userId ? 0 : 1,
+                unread_count: (activeUserRef.current?.user_id === userId || msg.from_me) ? 0 : 1,
                 tags: [],
               };
               return [newConv, ...prev];

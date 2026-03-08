@@ -408,6 +408,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     shopifyTaggedWith: "",
     shopifyTestPhones: "",
     shopifyTagOnSent: "",
+    shopifyTagOnFail: "",
     deliveryStatuses: "",
     deliveryTestPhones: "",
     // Retargeting (batch campaigns)
@@ -886,9 +887,15 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               cooldownSeconds: Number(r.cooldown_seconds || 0),
               triggerSource: source === "shopify" ? "shopify" : (source === "delivery" ? "delivery" : "whatsapp"),
               ...(isRetargeting ? { triggerSource: "retargeting" } : {}),
-              waTriggerMode: (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "no_reply")
-                ? "no_reply"
-                : (source !== "shopify" && source !== "delivery" && String(trig?.event || "").toLowerCase() === "interactive" ? "button" : "incoming"),
+              waTriggerMode: (() => {
+                if (source === "shopify" || source === "delivery") return "incoming";
+                const evt = String(trig?.event || "").toLowerCase();
+                if (evt === "no_reply") return "no_reply";
+                if (evt === "confirmation_wtp2") return "confirmation_wtp2";
+                if (evt === "confirmation_wtp3") return "confirmation_wtp3";
+                if (evt === "interactive") return "button";
+                return "incoming";
+              })(),
               noReplyMinutes: (() => {
                 try {
                   const c = (r?.condition && typeof r.condition === "object") ? r.condition : {};
@@ -926,6 +933,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               shopifyTaggedWith: taggedWith,
               shopifyTestPhones: testPhonesStr,
               shopifyTagOnSent: String((aText?.shopify_tag_on_sent || aTpl?.shopify_tag_on_sent || aOC?.shopify_tag_on_sent) || ""),
+              shopifyTagOnFail: String((aText?.shopify_tag_on_fail || aTpl?.shopify_tag_on_fail || aOC?.shopify_tag_on_fail) || ""),
               deliveryStatuses: isDelivery ? statusesStr : "",
               deliveryTestPhones: isDelivery ? testPhonesStr : "",
               retargetingMode: isRetargeting ? (String(trig?.event || "customer_segments").toLowerCase().includes("order") ? "orders" : (String(trig?.event || "customer_segments").toLowerCase().includes("conversation") ? "conversation_tag" : "segments")) : "segments",
@@ -943,7 +951,11 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                 if (aButtons) return "buttons";
                 if (aList) return "list";
                 if (aOC) return "order_confirm";
-                if (aTpl) return "template";
+                if (aTpl) {
+                  const evt = String(trig?.event || "").toLowerCase();
+                  if (evt === "confirmation_wtp2" || evt === "confirmation_wtp3") return "no_reply_workflow";
+                  return "template";
+                }
                 return "text";
               })(),
               to: String((aText?.to || aTpl?.to || aOC?.to || aButtons?.to || aList?.to || aCatalogItem?.to || aCatalogSet?.to || aLastOrderItems?.to || aAudio?.to) || "{{ phone }}"),
@@ -1157,6 +1169,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                 })();
 
                 const shopifyTagOnSent = String(draft.shopifyTagOnSent || "").trim();
+                const shopifyTagOnFail = String(draft.shopifyTagOnFail || "").trim();
 
                 if (draft.actionMode === "order_confirm") {
                   const tn = String(draft.templateName || "").trim();
@@ -1198,6 +1211,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       components: comps,
                       preview: `[template] ${tn}`,
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                       entry_gate_mode: String(draft.ocEntryGateMode || "all"),
                       required_tag: String(draft.ocRequiredTag || "").trim(),
                       include_online_store: !!draft.ocIncludeOnlineStore,
@@ -1259,6 +1273,50 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       components: comps,
                       preview: `[template] ${tn}`,
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
+                    });
+                  }
+                } else if (draft.actionMode === "no_reply_workflow") {
+                  const tn = String(draft.templateName || "").trim();
+                  if (tn) {
+                    const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
+                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
+                    const tplAll = Array.isArray(templates) ? templates : [];
+                    const tpl =
+                      tplAll.find((t) => t && t.name === tn && String(t.status || "").toLowerCase() === "approved") ||
+                      tplAll.find((t) => t && t.name === tn) ||
+                      null;
+                    const headerMeta = (() => {
+                      try {
+                        const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+                        const h = comps.find((c) => String(c?.type || "").toUpperCase() === "HEADER") || null;
+                        return String(h?.format || "").toUpperCase();
+                      } catch {
+                        return "";
+                      }
+                    })();
+                    const headerUrl = String(draft.templateHeaderUrl || "").trim();
+                    const headerComp = (() => {
+                      if (!headerUrl) return null;
+                      const fmt = String(headerMeta || "").toUpperCase();
+                      if (fmt === "IMAGE") return { type: "header", parameters: [{ type: "image", image: { link: headerUrl } }] };
+                      if (fmt === "VIDEO") return { type: "header", parameters: [{ type: "video", video: { link: headerUrl } }] };
+                      if (fmt === "DOCUMENT") return { type: "header", parameters: [{ type: "document", document: { link: headerUrl } }] };
+                      return null;
+                    })();
+                    const comps = [
+                      ...(headerComp ? [headerComp] : []),
+                      ...(bodyParams.length ? [{ type: "body", parameters: bodyParams }] : []),
+                    ];
+                    actions.push({
+                      type: "send_whatsapp_template",
+                      to: String(draft.to || "{{ phone }}"),
+                      template_name: tn,
+                      language: String(draft.templateLanguage || "en"),
+                      components: comps,
+                      preview: `[no-reply workflow] ${tn}`,
+                      ...(shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                     });
                   }
                 } else if (draft.actionMode === "buttons") {
@@ -1281,6 +1339,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       text: body,
                       buttons: btns,
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                     });
                   }
                 } else if (draft.actionMode === "list") {
@@ -1310,6 +1369,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       button_text: buttonText,
                       sections: [{ ...(sectionTitle ? { title: sectionTitle } : {}), rows }],
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                     });
                   }
                 } else if (draft.actionMode === "catalog_item") {
@@ -1322,6 +1382,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       retailer_id: retailerId,
                       caption,
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                     });
                   }
                 } else if (draft.actionMode === "catalog_set") {
@@ -1334,6 +1395,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       set_id: setId,
                       caption,
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                     });
                   }
                 } else if (draft.actionMode === "last_order_items_audio") {
@@ -1343,6 +1405,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       to: String(draft.to || "{{ phone }}"),
                       max_items: Math.max(1, Number(draft.lastOrderItemsMax || 10)),
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                     });
                   }
                   const audioUrl = String(draft.audioUrl || "").trim();
@@ -1362,6 +1425,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       to: String(draft.to || "{{ phone }}"),
                       text: String(draft.replyText || ""),
                       ...(draft.triggerSource === "shopify" && shopifyTagOnSent ? { shopify_tag_on_sent: shopifyTagOnSent } : {}),
+                      ...(draft.triggerSource === "shopify" && shopifyTagOnFail ? { shopify_tag_on_fail: shopifyTagOnFail } : {}),
                     });
                   }
                 }
@@ -1375,7 +1439,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       ? (deliveryStatuses.length ? { match: "status_in", statuses: deliveryStatuses } : { match: "any" })
                       : draft.triggerSource === "retargeting"
                         ? { match: "any" }
-                      : (String(draft.waTriggerMode || "incoming") === "no_reply"
+                      : (["no_reply", "confirmation_wtp2", "confirmation_wtp3"].includes(String(draft.waTriggerMode || "incoming"))
                         ? { match: "no_reply_for", seconds: Math.max(60, Number(draft.noReplyMinutes || 30) * 60), keywords: kws }
                         : (String(draft.waTriggerMode || "incoming") === "button"
                           ? { match: "button_id", ids: buttonIds }
@@ -1413,11 +1477,14 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                           }
                         : {
                           source: "whatsapp",
-                          event: (
-                            String(draft.waTriggerMode || "incoming") === "no_reply"
-                              ? "no_reply"
-                              : (String(draft.waTriggerMode || "incoming") === "button" ? "interactive" : "incoming_message")
-                          ),
+                          event: (() => {
+                            const m = String(draft.waTriggerMode || "incoming");
+                            if (m === "no_reply") return "no_reply";
+                            if (m === "confirmation_wtp2") return "confirmation_wtp2";
+                            if (m === "confirmation_wtp3") return "confirmation_wtp3";
+                            if (m === "button") return "interactive";
+                            return "incoming_message";
+                          })(),
                         },
                   condition,
                   ...(draft.triggerSource === "shopify"
@@ -2907,9 +2974,11 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                           <option value="incoming">Incoming message</option>
                           <option value="button">Button/list click</option>
                           <option value="no_reply">No reply after time</option>
+                          <option value="confirmation_wtp2">Confirmation WTP2 (no reply follow-up)</option>
+                          <option value="confirmation_wtp3">Confirmation WTP3 (2nd follow-up)</option>
                         </select>
                         <div className="text-[11px] text-slate-500 mt-1">
-                          Use <span className="font-mono">Incoming message</span> for keyword auto-replies, <span className="font-mono">Button click</span> for interactive flows, or <span className="font-mono">No reply</span> to follow up when the customer is waiting.
+                          Use <span className="font-mono">Incoming message</span> for keyword auto-replies, <span className="font-mono">Button click</span> for interactive flows, <span className="font-mono">No reply</span> to follow up when the customer is waiting, or <span className="font-mono">Confirmation WTP2/WTP3</span> to send follow-up templates if the customer doesn't reply to the order confirmation.
                         </div>
                       </div>
 
@@ -2929,7 +2998,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                         </div>
                       )}
 
-                      {String(draft.waTriggerMode || "incoming") === "no_reply" && (
+                      {["no_reply", "confirmation_wtp2", "confirmation_wtp3"].includes(String(draft.waTriggerMode || "incoming")) && (
                         <div>
                           <div className="text-xs text-slate-500 mb-1">Wait (minutes)</div>
                           <input
@@ -2940,7 +3009,9 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                             onChange={(e) => onChange({ noReplyMinutes: Number(e.target.value || 0) })}
                           />
                           <div className="text-[11px] text-slate-500 mt-1">
-                            After a customer message, if nobody replies within this time, the rule will run once.
+                            {String(draft.waTriggerMode || "incoming") === "no_reply"
+                              ? "After a customer message, if nobody replies within this time, the rule will run once."
+                              : "After the order confirmation template is sent, if the customer doesn't reply within this time, the follow-up template will be sent."}
                           </div>
                         </div>
                       )}
@@ -3066,6 +3137,18 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       />
                       <div className="text-[11px] text-slate-500 mt-1">
                         If set, the app will add this tag to the Shopify order after the WhatsApp message is sent successfully.
+                      </div>
+                    </div>
+                    <div className="mt-3">
+                      <div className="text-xs text-slate-500 mb-1">Add tag if WhatsApp send fails / no WhatsApp account (optional)</div>
+                      <input
+                        className="w-full border rounded-lg px-3 py-2"
+                        value={draft.shopifyTagOnFail || ""}
+                        onChange={(e) => onChange({ shopifyTagOnFail: e.target.value })}
+                        placeholder="e.g. no_whatsapp"
+                      />
+                      <div className="text-[11px] text-slate-500 mt-1">
+                        If set, the app will add this tag to the Shopify order when the WhatsApp message fails (e.g. phone number has no WhatsApp account).
                       </div>
                     </div>
                   </div>
@@ -3447,10 +3530,10 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   value={draft.keywords}
                   onChange={(e) => onChange({ keywords: e.target.value })}
                   placeholder="price, livraison, سومة"
-                  disabled={draft.triggerSource !== "whatsapp" || String(draft.waTriggerMode || "incoming") === "button"}
+                  disabled={draft.triggerSource !== "whatsapp" || ["button", "confirmation_wtp2", "confirmation_wtp3"].includes(String(draft.waTriggerMode || "incoming"))}
                 />
                 <div className="text-[11px] text-slate-500 mt-1">
-                  {draft.triggerSource !== "whatsapp" || String(draft.waTriggerMode || "incoming") === "button"
+                  {draft.triggerSource !== "whatsapp" || ["button", "confirmation_wtp2", "confirmation_wtp3"].includes(String(draft.waTriggerMode || "incoming"))
                     ? "This filter is not used for the selected trigger."
                     : (String(draft.waTriggerMode || "incoming") === "no_reply"
                       ? "Optional filter on the customer's message before the no-reply timeout."
@@ -3493,10 +3576,19 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                   <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "order_status" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "order_status" })}>
                     Order status lookup
                   </button>
+                  <button className={`px-3 py-2 border rounded-lg text-sm ${draft.actionMode === "no_reply_workflow" ? "bg-indigo-50 border-indigo-200" : "hover:bg-slate-50"}`} onClick={() => onChange({ actionMode: "no_reply_workflow" })}>
+                    No reply workflow
+                  </button>
                 </div>
 
-                {(draft.actionMode === "template" || draft.actionMode === "order_confirm") ? (
+                {(draft.actionMode === "template" || draft.actionMode === "order_confirm" || draft.actionMode === "no_reply_workflow") ? (
                   <div className="border rounded-xl p-3 bg-slate-50">
+                    {draft.actionMode === "no_reply_workflow" && (
+                      <div className="mb-3 p-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+                        This template will be sent automatically if the customer doesn't reply to the initial order confirmation within the configured delay.
+                        Make sure to use Confirmation WTP2/WTP3 trigger types and set the wait time in the trigger settings.
+                      </div>
+                    )}
                     {templatesError && <div className="p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{templatesError}</div>}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                       <div>

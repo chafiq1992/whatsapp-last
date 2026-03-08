@@ -191,6 +191,11 @@ function ChatList({
     const run = () => {
       const params = new URLSearchParams();
       if (qTrim) params.set('q', qTrim);
+      // When searching, request a wider window so old conversations are discoverable.
+      if (qTrim) {
+        params.set('limit', '1000');
+        params.set('offset', '0');
+      }
       // Preserve other active filters when searching (expected behavior)
       if (showUnreadOnly) params.set('unread_only', 'true');
       if (assignedFilter && assignedFilter !== 'all') params.set('assigned', assignedFilter);

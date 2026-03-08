@@ -2681,6 +2681,9 @@ class DatabaseManager:
             "template_language",
             "template_components",
             "template_snapshot",
+            # Shopify order tagging metadata (for fail-tag on non-WhatsApp numbers)
+            "shopify_order_id",
+            "shopify_tag_on_fail",
         }
         # Columns allowed in the conversation_notes table (except auto-increment id)
         self.note_columns = {
@@ -3192,6 +3195,9 @@ class DatabaseManager:
             await self._add_column_if_missing(db, "messages", "template_language", "TEXT")
             await self._add_column_if_missing(db, "messages", "template_components", "TEXT")
             await self._add_column_if_missing(db, "messages", "template_snapshot", "TEXT")
+            # Shopify order tagging metadata (fail-tag for non-WhatsApp numbers)
+            await self._add_column_if_missing(db, "messages", "shopify_order_id", "TEXT")
+            await self._add_column_if_missing(db, "messages", "shopify_tag_on_fail", "TEXT")
 
             # Ensure conversation attribution columns exist
             await self._add_column_if_missing(db, "conversation_meta", "source", "TEXT")
@@ -3632,6 +3638,25 @@ class DatabaseManager:
                 "SELECT 1 AS ok FROM inbound_replies WHERE user_id = ? AND inbound_wa_message_id = ? LIMIT 1"
             )
             params = (uid, mid)
+            if self.use_postgres:
+                row = await db.fetchrow(q, *params)
+            else:
+                cur = await db.execute(q, params)
+                row = await cur.fetchone()
+            return bool(row)
+
+    async def has_recent_inbound(self, *, user_id: str, within_seconds: int) -> bool:
+        """Return True if any inbound (from_me=0) message from user_id exists within the last N seconds."""
+        uid = str(user_id or "").strip()
+        if not uid or within_seconds <= 0:
+            return False
+        async with self._conn() as db:
+            ws = get_current_workspace()
+            cutoff = (datetime.utcnow() - timedelta(seconds=within_seconds)).isoformat()
+            q = self._convert(
+                "SELECT 1 AS ok FROM messages WHERE workspace = ? AND user_id = ? AND from_me = 0 AND timestamp >= ? LIMIT 1"
+            )
+            params = (ws, uid, cutoff)
             if self.use_postgres:
                 row = await db.fetchrow(q, *params)
             else:
@@ -4371,6 +4396,26 @@ class DatabaseManager:
                 row = await cur.fetchone()
             return dict(row) if row else None
 
+    async def get_shopify_fail_tag_meta(self, wa_message_id: str) -> dict | None:
+        """Look up Shopify order ID and fail-tag for a message (used on status callback failure)."""
+        async with self._conn() as db:
+            ws = get_current_workspace()
+            query = self._convert(
+                "SELECT shopify_order_id, shopify_tag_on_fail FROM messages WHERE workspace = ? AND wa_message_id = ? LIMIT 1"
+            )
+            params = [ws, wa_message_id]
+            if self.use_postgres:
+                row = await db.fetchrow(query, *params)
+            else:
+                cur = await db.execute(query, tuple(params))
+                row = await cur.fetchone()
+            if row:
+                oid = str(row["shopify_order_id"] or "").strip()
+                tag = str(row["shopify_tag_on_fail"] or "").strip()
+                if oid and tag:
+                    return {"shopify_order_id": oid, "shopify_tag_on_fail": tag}
+            return None
+
     async def get_last_agent_message_time(self, user_id: str) -> Optional[str]:
         """Return ISO timestamp of the last outbound (from_me=1) message for a user."""
         async with self._conn() as db:
@@ -4477,6 +4522,9 @@ class DatabaseManager:
             ),
             "retailer_id": message.get("retailer_id"),
             "product_id": message.get("product_id"),
+            # Shopify order tagging metadata
+            "shopify_order_id": message.get("shopify_order_id"),
+            "shopify_tag_on_fail": message.get("shopify_tag_on_fail"),
         }
         # Remove None values so SQL doesn't fail on NOT NULL columns
         clean = {k: v for k, v in data.items() if v is not None}
@@ -6749,6 +6797,14 @@ class MessageProcessor:
                 }
             }
             await self.connection_manager.send_to_user(user_id, error_update)
+            # Tag Shopify order on WhatsApp send failure (e.g. number not on WhatsApp)
+            try:
+                fail_order_id = str(message.get("shopify_order_id") or "").strip()
+                fail_tag = str(message.get("shopify_tag_on_fail") or "").strip()
+                if fail_order_id and fail_tag:
+                    asyncio.create_task(self._shopify_add_order_tag_best_effort(fail_order_id, fail_tag))
+            except Exception:
+                pass
         finally:
             media_path = message.get("media_path")
             if media_path and Path(media_path).exists():
@@ -7135,6 +7191,19 @@ class MessageProcessor:
                 )
             except Exception:
                 pass
+
+            # Tag Shopify order when WhatsApp delivery fails (e.g. number not on WhatsApp)
+            if str(status).lower() == "failed":
+                try:
+                    meta = await self.db_manager.get_shopify_fail_tag_meta(wa_id)
+                    if meta:
+                        asyncio.create_task(
+                            self._shopify_add_order_tag_best_effort(
+                                meta["shopify_order_id"], meta["shopify_tag_on_fail"]
+                            )
+                        )
+                except Exception:
+                    pass
 
 
     async def _handle_incoming_message(self, message: dict):
@@ -8529,7 +8598,7 @@ class MessageProcessor:
             return ""
 
     async def _schedule_no_reply_followups(self, *, ws: str, user_id: str, inbound_wa_message_id: str, incoming_text: str) -> None:
-        """Schedule all whatsapp:no_reply rules that match this inbound message."""
+        """Schedule all whatsapp:no_reply / confirmation_wtp2 / confirmation_wtp3 rules that match this inbound message."""
         try:
             if not inbound_wa_message_id:
                 return
@@ -8538,6 +8607,7 @@ class MessageProcessor:
                 return
             text = str(incoming_text or "")
             text_lc = text.lower()
+            _NO_REPLY_EVENTS = {"no_reply", "confirmation_wtp2", "confirmation_wtp3"}
             for rule in rules:
                 try:
                     if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
@@ -8547,7 +8617,7 @@ class MessageProcessor:
                         continue
                     if str(trigger.get("source") or "").lower() != "whatsapp":
                         continue
-                    if str(trigger.get("event") or "").lower() != "no_reply":
+                    if str(trigger.get("event") or "").lower() not in _NO_REPLY_EVENTS:
                         continue
                     cond = rule.get("condition") or {}
                     if not isinstance(cond, dict):
@@ -9496,6 +9566,7 @@ class MessageProcessor:
                         actions = []
 
                     _log.info("shopify_automation ws=%s rule=%s MATCHED topic=%s, executing %d actions (phone=%s)", ws, rule_id, topic_norm, len(actions), phone_digits)
+                    to_id = None
                     for act in actions:
                         if not isinstance(act, dict):
                             continue
@@ -9507,6 +9578,7 @@ class MessageProcessor:
                                 _log.info("shopify_automation ws=%s rule=%s send_text skipped: to=%s msg_empty=%s", ws, rule_id, to_id, not bool(msg))
                                 continue
                             shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
+                            shopify_tag_on_fail = str(act.get("shopify_tag_on_fail") or "").strip()
                             shopify_order_id = str(ctx.get("order_id") or "").strip()
                             _log.info("shopify_automation ws=%s rule=%s sending text to=%s", ws, rule_id, to_id)
                             await self.process_outgoing_message({
@@ -9519,6 +9591,11 @@ class MessageProcessor:
                                 **(
                                     {"shopify_order_id": shopify_order_id, "shopify_tag_on_sent": shopify_tag_on_sent}
                                     if (shopify_order_id and shopify_tag_on_sent)
+                                    else {}
+                                ),
+                                **(
+                                    {"shopify_order_id": shopify_order_id, "shopify_tag_on_fail": shopify_tag_on_fail}
+                                    if (shopify_order_id and shopify_tag_on_fail)
                                     else {}
                                 ),
                             })
@@ -9536,6 +9613,7 @@ class MessageProcessor:
                                 continue
                             _log.info("shopify_automation ws=%s rule=%s sending template=%s lang=%s to=%s", ws, rule_id, tname, lang, to_id)
                             shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
+                            shopify_tag_on_fail = str(act.get("shopify_tag_on_fail") or "").strip()
                             shopify_order_id = str(ctx.get("order_id") or "").strip()
                             preview = str(act.get("preview") or f"[template] {tname}")
                             await self.process_outgoing_message({
@@ -9551,6 +9629,11 @@ class MessageProcessor:
                                 **(
                                     {"shopify_order_id": shopify_order_id, "shopify_tag_on_sent": shopify_tag_on_sent}
                                     if (shopify_order_id and shopify_tag_on_sent)
+                                    else {}
+                                ),
+                                **(
+                                    {"shopify_order_id": shopify_order_id, "shopify_tag_on_fail": shopify_tag_on_fail}
+                                    if (shopify_order_id and shopify_tag_on_fail)
                                     else {}
                                 ),
                             })
@@ -9608,6 +9691,7 @@ class MessageProcessor:
                             lang = str(act.get("language") or "en").strip() or "en"
                             comps = self._render_template_components(act.get("components") or [], ctx)
                             shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
+                            shopify_tag_on_fail = str(act.get("shopify_tag_on_fail") or "").strip()
                             shopify_order_id = str(ctx.get("order_id") or "").strip()
                             preview = str(act.get("preview") or f"[template] {tname}")
                             await self.process_outgoing_message({
@@ -9623,6 +9707,11 @@ class MessageProcessor:
                                 **(
                                     {"shopify_order_id": shopify_order_id, "shopify_tag_on_sent": shopify_tag_on_sent}
                                     if (shopify_order_id and shopify_tag_on_sent)
+                                    else {}
+                                ),
+                                **(
+                                    {"shopify_order_id": shopify_order_id, "shopify_tag_on_fail": shopify_tag_on_fail}
+                                    if (shopify_order_id and shopify_tag_on_fail)
                                     else {}
                                 ),
                             })
@@ -9664,6 +9753,19 @@ class MessageProcessor:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
                             except Exception:
                                 pass
+
+                        # After any Shopify send action, schedule confirmation_wtp2/wtp3 follow-up rules
+                        if to_id and at in ("send_template", "send_whatsapp_template", "order_confirmation_flow"):
+                            try:
+                                asyncio.create_task(self._schedule_shopify_confirmation_followups(
+                                    ws=_coerce_workspace(ws),
+                                    user_id=to_id,
+                                    shopify_order_id=str(ctx.get("order_id") or "").strip(),
+                                    ctx=ctx,
+                                ))
+                            except Exception:
+                                pass
+
                 except Exception as exc:
                     _log.exception("shopify_automation ws=%s rule=%s failed: %s", ws, rule_id, exc)
                     continue
@@ -9675,6 +9777,116 @@ class MessageProcessor:
                     _CURRENT_WORKSPACE.reset(ws_token)
                 except Exception:
                     pass
+
+    async def _schedule_shopify_confirmation_followups(
+        self, *, ws: str, user_id: str, shopify_order_id: str, ctx: dict
+    ) -> None:
+        """Schedule confirmation_wtp2 / confirmation_wtp3 follow-up rules after a Shopify template send."""
+        _log = logging.getLogger(__name__)
+        try:
+            rules = await self._load_automation_rules(ws)
+            if not rules:
+                return
+            _CONFIRMATION_EVENTS = {"confirmation_wtp2", "confirmation_wtp3"}
+            for rule in rules:
+                try:
+                    if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
+                        continue
+                    trigger = rule.get("trigger") or {}
+                    if not isinstance(trigger, dict):
+                        continue
+                    if str(trigger.get("source") or "").lower() != "whatsapp":
+                        continue
+                    event = str(trigger.get("event") or "").lower()
+                    if event not in _CONFIRMATION_EVENTS:
+                        continue
+                    cond = rule.get("condition") or {}
+                    if not isinstance(cond, dict):
+                        cond = {}
+                    seconds = int(cond.get("seconds") or 0)
+                    if seconds <= 0:
+                        seconds = 60 * 60  # default 1 hour
+
+                    rid = str(rule.get("id") or "")
+
+                    async def _job(_rule: dict, _rid: str, _sec: int, _event: str):
+                        try:
+                            await asyncio.sleep(max(1, int(_sec)))
+                            # Check if customer replied (any inbound message from this user after the template was sent)
+                            if await self.db_manager.has_recent_inbound(user_id=user_id, within_seconds=_sec):
+                                _log.info("confirmation_followup ws=%s rule=%s user=%s skipped: customer replied", ws, _rid, user_id)
+                                return
+                            _log.info("confirmation_followup ws=%s rule=%s user=%s event=%s firing after %ds", ws, _rid, user_id, _event, _sec)
+                            actions = _rule.get("actions") or []
+                            if isinstance(actions, dict):
+                                actions = [actions]
+                            if not isinstance(actions, list):
+                                actions = []
+                            for act in actions:
+                                if not isinstance(act, dict):
+                                    continue
+                                at = str(act.get("type") or "").strip().lower()
+                                if at in ("send_template", "send_whatsapp_template", "order_confirmation_flow"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
+                                    if not tname:
+                                        continue
+                                    lang = str(act.get("language") or "en").strip() or "en"
+                                    comps = self._render_template_components(act.get("components") or [], ctx)
+                                    preview = str(act.get("preview") or f"[template] {tname}")
+                                    shopify_tag_on_sent = str(act.get("shopify_tag_on_sent") or "").strip()
+                                    shopify_tag_on_fail = str(act.get("shopify_tag_on_fail") or "").strip()
+                                    await self.process_outgoing_message({
+                                        "user_id": to_id,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "message": preview,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                        "template_name": tname,
+                                        "template_language": lang,
+                                        "template_components": comps,
+                                        **({"shopify_order_id": shopify_order_id, "shopify_tag_on_sent": shopify_tag_on_sent} if shopify_order_id and shopify_tag_on_sent else {}),
+                                        **({"shopify_order_id": shopify_order_id, "shopify_tag_on_fail": shopify_tag_on_fail} if shopify_order_id and shopify_tag_on_fail else {}),
+                                    })
+                                elif at in ("send_text", "send_whatsapp_text"):
+                                    msg = self._render_template(str(act.get("text") or ""), ctx).strip()
+                                    if not msg:
+                                        continue
+                                    await self.process_outgoing_message({
+                                        "user_id": self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id,
+                                        "type": "text",
+                                        "from_me": True,
+                                        "message": msg,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "agent_username": "automation",
+                                    })
+                                elif at in ("send_buttons",):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    text = self._render_template(str(act.get("text") or ""), ctx).strip()
+                                    buttons = act.get("buttons") or []
+                                    if text and buttons:
+                                        await self.process_outgoing_message({
+                                            "user_id": to_id,
+                                            "type": "buttons",
+                                            "from_me": True,
+                                            "message": text,
+                                            "buttons": buttons,
+                                            "timestamp": datetime.utcnow().isoformat(),
+                                            "agent_username": "automation",
+                                        })
+                            try:
+                                await self.db_manager.inc_automation_rule_stat(_rid, "messages_sent", 1)
+                            except Exception:
+                                pass
+                        except Exception as exc:
+                            _log.exception("confirmation_followup ws=%s rule=%s failed: %s", ws, _rid, exc)
+
+                    asyncio.create_task(_job(rule, rid, seconds, event))
+                except Exception:
+                    continue
+        except Exception as exc:
+            _log.exception("schedule_confirmation_followups ws=%s error: %s", ws, exc)
 
     async def _run_delivery_automations(self, event: str, payload: dict, workspace: str | None = None) -> None:
         """Execute automations for a Delivery App webhook event (e.g. order status changed).

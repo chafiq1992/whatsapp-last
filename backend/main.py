@@ -8628,7 +8628,13 @@ class MessageProcessor:
             return ""
 
     async def _schedule_no_reply_followups(self, *, ws: str, user_id: str, inbound_wa_message_id: str, incoming_text: str) -> None:
-        """Schedule all whatsapp:no_reply / confirmation_wtp2 / confirmation_wtp3 rules that match this inbound message."""
+        """Schedule whatsapp:no_reply rules that match this inbound message.
+
+        NOTE: confirmation_wtp2 / confirmation_wtp3 are intentionally excluded here.
+        Those are only scheduled by _schedule_shopify_confirmation_followups after a
+        Shopify order-confirmation template is sent.  Scheduling them on every inbound
+        message caused false-positive follow-ups to customers who had already replied.
+        """
         try:
             if not inbound_wa_message_id:
                 return
@@ -8637,7 +8643,7 @@ class MessageProcessor:
                 return
             text = str(incoming_text or "")
             text_lc = text.lower()
-            _NO_REPLY_EVENTS = {"no_reply", "confirmation_wtp2", "confirmation_wtp3"}
+            _NO_REPLY_EVENTS = {"no_reply"}
             for rule in rules:
                 try:
                     if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
@@ -9868,7 +9874,9 @@ class MessageProcessor:
                     rid = str(rule.get("id") or "")
 
                     async def _job(_rule: dict, _rid: str, _sec: int, _event: str):
+                        _ws_token = None
                         try:
+                            _ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(ws))
                             await asyncio.sleep(max(1, int(_sec)))
                             # Check if customer replied (any inbound message from this user after the template was sent)
                             if await self.db_manager.has_recent_inbound(user_id=user_id, within_seconds=_sec):
@@ -9939,6 +9947,12 @@ class MessageProcessor:
                                 pass
                         except Exception as exc:
                             _log.exception("confirmation_followup ws=%s rule=%s failed: %s", ws, _rid, exc)
+                        finally:
+                            if _ws_token is not None:
+                                try:
+                                    _CURRENT_WORKSPACE.reset(_ws_token)
+                                except Exception:
+                                    pass
 
                     asyncio.create_task(_job(rule, rid, seconds, event))
                 except Exception:
@@ -12342,6 +12356,7 @@ async def set_automation_rules_endpoint(request: Request, payload: dict = Body(.
         # cap sizes for safety
         if len(actions) > 10:
             actions = actions[:10]
+        meta = r.get("meta") if isinstance(r.get("meta"), dict) else {}
         out_rule = {
             "id": rid,
             "name": name[:120],
@@ -12357,12 +12372,15 @@ async def set_automation_rules_endpoint(request: Request, payload: dict = Body(.
                         "batch_size": max(1, min(500, int((trigger or {}).get("batch_size") or 10))),
                         "batch_every_minutes": max(1, min(24 * 60, int(float((trigger or {}).get("batch_every_minutes") or 30)))),
                         "shopify_customer_tag_on_sent": str((trigger or {}).get("shopify_customer_tag_on_sent") or "").strip(),
+                        "ignore_shopify_customer_tags": str((trigger or {}).get("ignore_shopify_customer_tags") or "").strip(),
                     }) if str((trigger or {}).get("source") or "").lower() == "retargeting" else {}
                 ),
             }),
             "condition": cond,
             "actions": actions,
         }
+        if meta:
+            out_rule["meta"] = meta
         # Workspace scope
         ws_scope = r.get("workspaces")
         scopes: list[str] = []

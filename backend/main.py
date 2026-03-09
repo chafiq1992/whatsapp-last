@@ -9819,6 +9819,24 @@ class MessageProcessor:
                     event = str(trigger.get("event") or "").lower()
                     if event not in _CONFIRMATION_EVENTS:
                         continue
+                    # Respect test_phone_numbers filter on the follow-up rule
+                    try:
+                        test_phones = rule.get("test_phone_numbers") or rule.get("test_numbers") or []
+                        if isinstance(test_phones, str):
+                            test_phones = [x.strip() for x in re.split(r"[,\n\r]+", test_phones) if x and x.strip()]
+                        if isinstance(test_phones, list):
+                            test_set = {_digits_only(str(x or "")) for x in test_phones}
+                            test_set = {x for x in test_set if x}
+                        else:
+                            test_set = set()
+                        if test_set:
+                            user_digits = _digits_only(user_id)
+                            if user_digits not in test_set:
+                                _log.info("confirmation_followup ws=%s rule=%s user=%s skipped: not in test_set %s", ws, rule.get("id"), user_id, test_set)
+                                continue
+                    except Exception:
+                        pass
+
                     cond = rule.get("condition") or {}
                     if not isinstance(cond, dict):
                         cond = {}

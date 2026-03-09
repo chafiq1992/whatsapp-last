@@ -8211,26 +8211,43 @@ class MessageProcessor:
             except Exception:
                 pass
 
-        # Ensure we provide enough BODY params for {{1}}, {{2}}, ... placeholders
+        # Ensure we provide enough BODY params for placeholders
         try:
             body_def = _find_def("BODY") or {}
             body_text = str(body_def.get("text") or "")
             need_body = _max_placeholder_index(body_text)
-            if need_body > 0:
+
+            # Also detect named placeholders like {{customer_name}}
+            named_placeholders: list[str] = []
+            try:
+                all_ph = re.findall(r"\{\{\s*([^}]+?)\s*\}\}", body_text)
+                named_placeholders = [n.strip() for n in all_ph if n.strip() and not n.strip().isdigit()]
+            except Exception:
+                pass
+
+            total_needed = max(need_body, len(named_placeholders)) if named_placeholders else need_body
+
+            if total_needed > 0:
                 send_body = _find_send("body")
                 if not isinstance(send_body, dict):
                     send_body = {"type": "body", "parameters": []}
                     comps = [send_body] + comps
                 params = send_body.get("parameters") if isinstance(send_body.get("parameters"), list) else []
-                # count text params
-                have = 0
-                for p in params:
-                    if isinstance(p, dict) and str(p.get("type") or "").lower() == "text":
-                        have += 1
-                if have < need_body:
-                    # append missing params with safe placeholder '-'
-                    for _ in range(need_body - have):
-                        params.append({"type": "text", "text": "-"})
+
+                # For named parameters, ensure parameter_name is set
+                if named_placeholders:
+                    for i, p in enumerate(params):
+                        if isinstance(p, dict) and str(p.get("type") or "").lower() == "text":
+                            if i < len(named_placeholders) and not p.get("parameter_name"):
+                                p["parameter_name"] = named_placeholders[i]
+
+                have = sum(1 for p in params if isinstance(p, dict) and str(p.get("type") or "").lower() == "text")
+                if have < total_needed:
+                    for idx in range(have, total_needed):
+                        param: dict = {"type": "text", "text": "-"}
+                        if idx < len(named_placeholders):
+                            param["parameter_name"] = named_placeholders[idx]
+                        params.append(param)
                     send_body["parameters"] = params
         except Exception:
             pass

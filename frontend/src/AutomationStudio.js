@@ -1178,7 +1178,14 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   const tn = String(draft.templateName || "").trim();
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
-                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
+                    const tplForNames = (Array.isArray(templates) ? templates : []).find((t) => t && t.name === tn) || null;
+                    const varNames = inferBodyVarNames(tplForNames);
+                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v, i) => {
+                      const param = { type: "text", text: String(v) };
+                      const name = varNames[i];
+                      if (name && !/^\d+$/.test(name)) param.parameter_name = name;
+                      return param;
+                    });
                     const tplAll = Array.isArray(templates) ? templates : [];
                     const tpl =
                       tplAll.find((t) => t && t.name === tn && String(t.status || "").toLowerCase() === "approved") ||
@@ -1236,7 +1243,14 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   const tn = String(draft.templateName || "").trim();
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
-                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
+                    const tplForNames2 = (Array.isArray(templates) ? templates : []).find((t) => t && t.name === tn) || null;
+                    const varNames2 = inferBodyVarNames(tplForNames2);
+                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v, i) => {
+                      const param = { type: "text", text: String(v) };
+                      const name = varNames2[i];
+                      if (name && !/^\d+$/.test(name)) param.parameter_name = name;
+                      return param;
+                    });
                     // NOTE: this onSave handler runs in the parent component scope.
                     // Use the in-scope `templates` list (not RuleEditor-scoped `approvedTemplates`).
                     const tplAll = Array.isArray(templates) ? templates : [];
@@ -1284,7 +1298,14 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   const tn = String(draft.templateName || "").trim();
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
-                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v) => ({ type: "text", text: String(v) }));
+                    const tplForNames3 = (Array.isArray(templates) ? templates : []).find((t) => t && t.name === tn) || null;
+                    const varNames3 = inferBodyVarNames(tplForNames3);
+                    const bodyParams = vars.filter((x) => String(x || "").trim()).map((v, i) => {
+                      const param = { type: "text", text: String(v) };
+                      const name = varNames3[i];
+                      if (name && !/^\d+$/.test(name)) param.parameter_name = name;
+                      return param;
+                    });
                     const tplAll = Array.isArray(templates) ? templates : [];
                     const tpl =
                       tplAll.find((t) => t && t.name === tn && String(t.status || "").toLowerCase() === "approved") ||

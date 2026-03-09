@@ -2629,15 +2629,31 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
       const ex = body?.example;
       const bodyText = ex?.body_text;
       if (Array.isArray(bodyText) && Array.isArray(bodyText[0]) && bodyText[0].length > 0) return bodyText[0].length;
-      // 2) Fallback: count {{N}} placeholders in the body text
+      // 2) Fallback: count placeholders in the body text
       const text = String(body?.text || "");
-      const matches = text.match(/\{\{\d+\}\}/g);
-      if (matches) {
-        const nums = matches.map((m) => parseInt(m.replace(/[{}]/g, ""), 10));
-        return Math.max(...nums);
+      // Match numbered {{1}} or named {{customer_name}} placeholders
+      const allMatches = text.match(/\{\{[^}]+\}\}/g);
+      if (allMatches && allMatches.length > 0) {
+        // Deduplicate (same placeholder used twice should count as one variable)
+        const unique = [...new Set(allMatches)];
+        return unique.length;
       }
     } catch {}
     return 0;
+  };
+
+  const inferBodyVarNames = (tpl) => {
+    try {
+      const comps = tpl?.components || [];
+      const body = (Array.isArray(comps) ? comps : []).find((c) => String(c?.type || "").toUpperCase() === "BODY");
+      if (!body) return [];
+      const text = String(body?.text || "");
+      const allMatches = text.match(/\{\{([^}]+)\}\}/g);
+      if (!allMatches) return [];
+      const unique = [...new Set(allMatches)];
+      return unique.map((m) => m.replace(/^\{\{/, "").replace(/\}\}$/, "").trim());
+    } catch {}
+    return [];
   };
 
   const shopifyVarsByTopic = (topic) => {
@@ -4033,11 +4049,15 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                           );
                         })()}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                          {draft.templateVars.map((v, idx) => (
+                          {draft.templateVars.map((v, idx) => {
+                            const tplVarNames = inferBodyVarNames(selectedTemplate);
+                            const varLabel = tplVarNames[idx] || String(idx + 1);
+                            return (
                             <div key={`tplvarwrap:${idx}`} className="grid grid-cols-1 gap-2">
+                              <div className="text-xs font-medium text-slate-600">{`{{${varLabel}}}`}</div>
                               <input
                                 className="w-full border rounded-lg px-3 py-2"
-                                placeholder={`Var ${idx + 1} (e.g. {{ order_number }})`}
+                                placeholder={`Value for {{${varLabel}}} (e.g. {{ customer_name }})`}
                                 value={v}
                                 onChange={(e) => {
                                   const next = [...draft.templateVars];
@@ -4046,10 +4066,10 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                 }}
                               />
                               <SingleSelectDropdown
-                                label={`Pick var for {{${idx + 1}}}`}
+                                label={`Pick Shopify variable for {{${varLabel}}}`}
                                 options={availableVarOptions}
                                 value=""
-                                placeholder="Choose…"
+                                placeholder="Choose variable…"
                                 onChange={(sel) => {
                                   const vv = String(sel || "").trim();
                                   if (!vv) return;
@@ -4059,7 +4079,8 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                                 }}
                               />
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -4575,19 +4596,38 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       </div>
                     )}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {draft.templateVars.map((v, idx) => (
-                        <input
-                          key={`tplvar:${idx}`}
-                          className="w-full border rounded px-2 py-1"
-                          placeholder={`Var ${idx + 1} (e.g. {{ order_number }})`}
-                          value={v}
-                          onChange={(e) => {
-                            const next = [...draft.templateVars];
-                            next[idx] = e.target.value;
-                            onChange({ templateVars: next });
-                          }}
-                        />
-                      ))}
+                      {draft.templateVars.map((v, idx) => {
+                        const tplVarNames = inferBodyVarNames(selectedTemplate);
+                        const varLabel = tplVarNames[idx] || String(idx + 1);
+                        return (
+                        <div key={`tplvar:${idx}`} className="grid grid-cols-1 gap-1">
+                          <div className="text-xs font-medium text-slate-600">{`{{${varLabel}}}`}</div>
+                          <input
+                            className="w-full border rounded px-2 py-1"
+                            placeholder={`Value for {{${varLabel}}}`}
+                            value={v}
+                            onChange={(e) => {
+                              const next = [...draft.templateVars];
+                              next[idx] = e.target.value;
+                              onChange({ templateVars: next });
+                            }}
+                          />
+                          <SingleSelectDropdown
+                            label={`Pick Shopify variable`}
+                            options={availableVarOptions}
+                            value=""
+                            placeholder="Choose variable…"
+                            onChange={(sel) => {
+                              const vv = String(sel || "").trim();
+                              if (!vv) return;
+                              const next = [...draft.templateVars];
+                              next[idx] = `{{ ${vv} }}`;
+                              onChange({ templateVars: next });
+                            }}
+                          />
+                        </div>
+                        );
+                      })}
                     </div>
                     <div className="text-[11px] text-slate-500 mt-1">
                       Variables support dotted paths like <span className="font-mono">{"{{ customer.phone }}"}</span>.

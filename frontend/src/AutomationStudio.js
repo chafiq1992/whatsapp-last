@@ -292,6 +292,20 @@ function TagIcon() {
 let idSeq = 1;
 const nextId = () => "n" + idSeq++;
 
+function _inferBodyVarNamesFromTpl(tpl) {
+  try {
+    const comps = tpl?.components || [];
+    const body = (Array.isArray(comps) ? comps : []).find((c) => String(c?.type || "").toUpperCase() === "BODY");
+    if (!body) return [];
+    const text = String(body?.text || "");
+    const allMatches = text.match(/\{\{([^}]+)\}\}/g);
+    if (!allMatches) return [];
+    const unique = [...new Set(allMatches)];
+    return unique.map((m) => m.replace(/^\{\{/, "").replace(/\}\}$/, "").trim());
+  } catch {}
+  return [];
+}
+
 const defaultFlow = () => {
   const trigger = makeNode(NODE_TYPES.TRIGGER, 120, 160, {
     name: "Order Paid",
@@ -1179,7 +1193,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
                     const tplForNames = (Array.isArray(templates) ? templates : []).find((t) => t && t.name === tn) || null;
-                    const varNames = inferBodyVarNames(tplForNames);
+                    const varNames = _inferBodyVarNamesFromTpl(tplForNames);
                     const bodyParams = vars.filter((x) => String(x || "").trim()).map((v, i) => {
                       const param = { type: "text", text: String(v) };
                       const name = varNames[i];
@@ -1244,7 +1258,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
                     const tplForNames2 = (Array.isArray(templates) ? templates : []).find((t) => t && t.name === tn) || null;
-                    const varNames2 = inferBodyVarNames(tplForNames2);
+                    const varNames2 = _inferBodyVarNamesFromTpl(tplForNames2);
                     const bodyParams = vars.filter((x) => String(x || "").trim()).map((v, i) => {
                       const param = { type: "text", text: String(v) };
                       const name = varNames2[i];
@@ -1299,7 +1313,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   if (tn) {
                     const vars = Array.isArray(draft.templateVars) ? draft.templateVars : [];
                     const tplForNames3 = (Array.isArray(templates) ? templates : []).find((t) => t && t.name === tn) || null;
-                    const varNames3 = inferBodyVarNames(tplForNames3);
+                    const varNames3 = _inferBodyVarNamesFromTpl(tplForNames3);
                     const bodyParams = vars.filter((x) => String(x || "").trim()).map((v, i) => {
                       const param = { type: "text", text: String(v) };
                       const name = varNames3[i];
@@ -2663,19 +2677,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     return 0;
   };
 
-  const inferBodyVarNames = (tpl) => {
-    try {
-      const comps = tpl?.components || [];
-      const body = (Array.isArray(comps) ? comps : []).find((c) => String(c?.type || "").toUpperCase() === "BODY");
-      if (!body) return [];
-      const text = String(body?.text || "");
-      const allMatches = text.match(/\{\{([^}]+)\}\}/g);
-      if (!allMatches) return [];
-      const unique = [...new Set(allMatches)];
-      return unique.map((m) => m.replace(/^\{\{/, "").replace(/\}\}$/, "").trim());
-    } catch {}
-    return [];
-  };
+  const inferBodyVarNames = (tpl) => _inferBodyVarNamesFromTpl(tpl);
 
   const shopifyVarsByTopic = (topic) => {
     try {

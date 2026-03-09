@@ -2624,9 +2624,18 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
     try {
       const comps = tpl?.components || [];
       const body = (Array.isArray(comps) ? comps : []).find((c) => String(c?.type || "").toUpperCase() === "BODY");
+      if (!body) return 0;
+      // 1) Check example.body_text (most reliable when present)
       const ex = body?.example;
       const bodyText = ex?.body_text;
-      if (Array.isArray(bodyText) && Array.isArray(bodyText[0])) return bodyText[0].length;
+      if (Array.isArray(bodyText) && Array.isArray(bodyText[0]) && bodyText[0].length > 0) return bodyText[0].length;
+      // 2) Fallback: count {{N}} placeholders in the body text
+      const text = String(body?.text || "");
+      const matches = text.match(/\{\{\d+\}\}/g);
+      if (matches) {
+        const nums = matches.map((m) => parseInt(m.replace(/[{}]/g, ""), 10));
+        return Math.max(...nums);
+      }
     } catch {}
     return 0;
   };
@@ -2640,6 +2649,7 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
         const extra = [
           "order_number",
           "total_price",
+          "customer_name",
           "customer.first_name",
           "customer.last_name",
           "customer.email",

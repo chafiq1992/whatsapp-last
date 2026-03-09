@@ -9482,6 +9482,10 @@ class MessageProcessor:
                     or ""
                 ),
                 "customer": (order_obj.get("customer") if isinstance(order_obj.get("customer"), dict) else (data.get("customer") if isinstance(data.get("customer"), dict) else {})),
+                "customer_name": " ".join(filter(None, [
+                    str((order_obj.get("customer") or {}).get("first_name") or "").strip(),
+                    str((order_obj.get("customer") or {}).get("last_name") or "").strip(),
+                ])) or str(shipping_address.get("name") or "").strip() or "",
                 "order_number": order_obj.get("name") or data.get("name") or data.get("order_number") or "",
                 "total_price": order_obj.get("total_price") or data.get("total_price") or "",
                 # Convenient aliases used by the UI dropdowns

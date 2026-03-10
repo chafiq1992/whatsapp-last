@@ -498,6 +498,11 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     try {
       await api.post("/automation/rules", { rules: nextRules });
       setRules(nextRules);
+      try {
+        const res = await api.get("/automation/rules");
+        const arr = Array.isArray(res?.data) ? res.data : [];
+        setRules(arr);
+      } catch {}
     } catch (e) {
       setRulesError("Failed to save automations.");
     } finally {
@@ -1539,7 +1544,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   const arr = Array.isArray(rules) ? [...rules] : [];
                   const idx = arr.findIndex((r) => r.id === newId);
                   if (idx === -1) return [...arr, rule];
-                  arr[idx] = { ...arr[idx], ...rule, id: arr[idx].id };
+                  arr[idx] = rule;
                   return arr;
                 })();
                 // Auto-create per-template-button follow-up rules (triggered by WhatsApp interactive replies).

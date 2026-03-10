@@ -5584,7 +5584,17 @@ class MessageProcessor:
                             # Never block startup/init due to seeding failures
                             pass
 
-                    if isinstance(data, list) and len(data) > 0:
+                    # Check if v1→v2 migration already ran (persisted in DB so it
+                    # survives server restarts / new instances).  Without this flag
+                    # an empty v2 list would fall through to v1 migration every time,
+                    # resurrecting deleted rules.
+                    try:
+                        _mig_flag = await auth_db_manager.get_setting("automation_rules_v2_migrated")
+                        _already_migrated = bool(str(_mig_flag or "").strip())
+                    except Exception:
+                        _already_migrated = False
+
+                    if len(data) > 0 or _already_migrated:
                         _AUTOMATION_RULES_V2_INIT_DONE = True
                         return data
             except Exception:
@@ -5633,8 +5643,8 @@ class MessageProcessor:
 
             out = list(merged.values())
             try:
-                # Persist migration for future calls
                 await auth_db_manager.set_setting("automation_rules_v2", out)
+                await auth_db_manager.set_setting("automation_rules_v2_migrated", {"ts": datetime.utcnow().isoformat()})
             except Exception:
                 pass
             _AUTOMATION_RULES_V2_INIT_DONE = True

@@ -5404,12 +5404,45 @@ class MessageProcessor:
         self._template_header_media_cache: dict[tuple[str, str], tuple[float, str]] = {}
         self._template_header_media_cache_ttl_sec = 6 * 3600
 
+    async def _tenant_backup_get(self, key: str) -> str | None:
+        """Read from tenant DB (default workspace) as backup when auth DB may be ephemeral."""
+        tok = None
+        try:
+            tok = _CURRENT_WORKSPACE.set(_coerce_workspace(DEFAULT_WORKSPACE))
+            return (await db_manager.get_setting(key)) if hasattr(db_manager, "get_setting") else None
+        except Exception:
+            return None
+        finally:
+            if tok is not None:
+                try:
+                    _CURRENT_WORKSPACE.reset(tok)
+                except Exception:
+                    pass
+
+    async def _tenant_backup_set(self, key: str, value: Any) -> None:
+        """Write to tenant DB (default workspace) as backup when auth DB may be ephemeral."""
+        tok = None
+        try:
+            tok = _CURRENT_WORKSPACE.set(_coerce_workspace(DEFAULT_WORKSPACE))
+            if hasattr(db_manager, "set_setting"):
+                await db_manager.set_setting(key, value)
+        except Exception:
+            pass
+        finally:
+            if tok is not None:
+                try:
+                    _CURRENT_WORKSPACE.reset(tok)
+                except Exception:
+                    pass
+
     async def _ensure_automation_rules_v2(self) -> list[dict]:
         """Ensure the global automation rules store exists in the shared auth/settings DB.
 
         - New canonical key: auth_db_manager setting "automation_rules_v2"
         - Backwards compatibility: migrate existing per-workspace "automation_rules" into v2
           (each migrated rule becomes scoped to the workspace it came from).
+        - Tenant DB backup: when auth DB is ephemeral (e.g. SQLite in Cloud Run), we dual-write
+          to the tenant DB and fallback to it on read, so rules persist across instance restarts.
         """
         global _AUTOMATION_RULES_V2_INIT_DONE
         async with _AUTOMATION_RULES_V2_INIT_LOCK:
@@ -5417,20 +5450,35 @@ class MessageProcessor:
                 try:
                     raw = await auth_db_manager.get_setting("automation_rules_v2")
                     data = json.loads(raw) if raw else []
+                    if isinstance(data, list) and len(data) > 0:
+                        return data
+                    raw = await self._tenant_backup_get("automation_rules_v2")
+                    data = json.loads(raw) if raw else []
                     return data if isinstance(data, list) else []
                 except Exception:
-                    return []
+                    try:
+                        raw = await self._tenant_backup_get("automation_rules_v2")
+                        data = json.loads(raw) if raw else []
+                        return data if isinstance(data, list) else []
+                    except Exception:
+                        return []
 
-            # 1) Try load existing v2
+            # 1) Try load existing v2 (auth first, then tenant backup if auth empty)
             try:
                 raw = await auth_db_manager.get_setting("automation_rules_v2")
                 data = json.loads(raw) if raw else []
+                if not isinstance(data, list) or len(data) == 0:
+                    raw = await self._tenant_backup_get("automation_rules_v2")
+                    data = json.loads(raw) if raw else []
                 if isinstance(data, list):
                     # Best-effort one-time seeding of built-in rules so hardcoded automations become visible/editable.
                     # IMPORTANT: after seeding once, we never re-add them (so users can delete them permanently).
                     try:
                         seeded_flag = await auth_db_manager.get_setting("automation_rules_v2_seeded_builtin_v1")
                         already_seeded = bool(str(seeded_flag or "").strip())
+                        if not already_seeded:
+                            seeded_flag = await self._tenant_backup_get("automation_rules_v2_seeded_builtin_v1")
+                            already_seeded = bool(str(seeded_flag or "").strip())
                     except Exception:
                         already_seeded = False
                     if not already_seeded:
@@ -5578,7 +5626,9 @@ class MessageProcessor:
                                     existing_ids.add(rid_boys)
 
                             await auth_db_manager.set_setting("automation_rules_v2", next_data)
+                            await self._tenant_backup_set("automation_rules_v2", next_data)
                             await auth_db_manager.set_setting("automation_rules_v2_seeded_builtin_v1", {"ts": datetime.utcnow().isoformat()})
+                            await self._tenant_backup_set("automation_rules_v2_seeded_builtin_v1", {"ts": datetime.utcnow().isoformat()})
                             data = next_data
                         except Exception:
                             # Never block startup/init due to seeding failures
@@ -5587,10 +5637,13 @@ class MessageProcessor:
                     # Check if v1→v2 migration already ran (persisted in DB so it
                     # survives server restarts / new instances).  Without this flag
                     # an empty v2 list would fall through to v1 migration every time,
-                    # resurrecting deleted rules.
+                    # resurrecting deleted rules.  Also check tenant DB backup.
                     try:
                         _mig_flag = await auth_db_manager.get_setting("automation_rules_v2_migrated")
                         _already_migrated = bool(str(_mig_flag or "").strip())
+                        if not _already_migrated:
+                            _mig_flag = await self._tenant_backup_get("automation_rules_v2_migrated")
+                            _already_migrated = bool(str(_mig_flag or "").strip())
                     except Exception:
                         _already_migrated = False
 
@@ -5643,8 +5696,11 @@ class MessageProcessor:
 
             out = list(merged.values())
             try:
+                mig_val = {"ts": datetime.utcnow().isoformat()}
                 await auth_db_manager.set_setting("automation_rules_v2", out)
-                await auth_db_manager.set_setting("automation_rules_v2_migrated", {"ts": datetime.utcnow().isoformat()})
+                await self._tenant_backup_set("automation_rules_v2", out)
+                await auth_db_manager.set_setting("automation_rules_v2_migrated", mig_val)
+                await self._tenant_backup_set("automation_rules_v2_migrated", mig_val)
             except Exception:
                 pass
             _AUTOMATION_RULES_V2_INIT_DONE = True
@@ -12479,6 +12535,7 @@ async def set_automation_rules_endpoint(request: Request, payload: dict = Body(.
         next_all = list(by_id.values())
 
     await auth_db_manager.set_setting("automation_rules_v2", next_all)
+    await message_processor._tenant_backup_set("automation_rules_v2", next_all)
     # Bust caches for immediate effect in webhook-triggered tasks
     try:
         message_processor._automation_rules_cache.clear()

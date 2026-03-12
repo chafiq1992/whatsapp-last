@@ -5122,31 +5122,6 @@ class DatabaseManager:
                 await db.execute(query, tuple(params))
                 await db.commit()
 
-    async def search_order_by_number(self, query: str) -> List[dict]:
-        """Search orders_created and agent_events for an order matching the given query (order_id or order number fragment)."""
-        q = str(query or "").strip().lstrip("#")
-        if not q:
-            return []
-        async with self._conn() as db:
-            like_param = f"%{q}%"
-            sql = self._convert(
-                """
-                SELECT oc.order_id, oc.user_id, oc.agent_username, oc.created_at,
-                       o.status AS payout_status
-                FROM orders_created oc
-                LEFT JOIN orders o ON o.order_id = oc.order_id
-                WHERE oc.order_id LIKE ?
-                ORDER BY oc.created_at DESC
-                LIMIT 50
-                """
-            )
-            if self.use_postgres:
-                rows = await db.fetch(sql, like_param)
-            else:
-                cur = await db.execute(sql, (like_param,))
-                rows = await cur.fetchall()
-            return [dict(r) for r in (rows or [])]
-
     async def get_agent_analytics(self, agent_username: str, start: Optional[str] = None, end: Optional[str] = None) -> dict:
         # Default window: last 30 days
         end_iso = end or datetime.utcnow().isoformat()
@@ -16259,94 +16234,6 @@ async def log_order_created(payload: dict = Body(...), actor: dict = Depends(get
     except Exception:
         pass
     return {"ok": True}
-
-
-@app.get("/admin/orders/search")
-async def admin_search_orders(q: str = Query("", description="Order number or ID to search for"), _: dict = Depends(require_admin)):
-    """Search orders by number/ID. Returns local collector info + Shopify order details when available."""
-    query = str(q or "").strip()
-    if not query:
-        return {"results": [], "query": query}
-
-    local_rows = await db_manager.search_order_by_number(query)
-
-    shopify_results = []
-    try:
-        from .shopify_integration import _shopify_http_context
-        import httpx
-        base, extra_args, _store_used, _store = await _shopify_http_context(None, None)
-        search_name = query if query.startswith("#") else f"#{query}"
-        params = {"name": search_name, "status": "any", "limit": 10}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{base}/orders.json", params=params, **(extra_args or {}))
-            if resp.status_code == 200:
-                orders = (resp.json() or {}).get("orders") or []
-                for o in orders:
-                    fulfillments = o.get("fulfillments") or []
-                    fulfiller_names = []
-                    for f in fulfillments:
-                        tracking = f.get("tracking_company") or ""
-                        status = f.get("status") or ""
-                        fulfiller_names.append({"tracking_company": tracking, "status": status, "created_at": f.get("created_at") or ""})
-                    customer = o.get("customer") or {}
-                    customer_name = " ".join(filter(None, [
-                        str(customer.get("first_name") or "").strip(),
-                        str(customer.get("last_name") or "").strip(),
-                    ])) or ""
-                    shopify_results.append({
-                        "shopify_order_id": str(o.get("id") or ""),
-                        "order_number": o.get("name") or "",
-                        "created_at": o.get("created_at") or "",
-                        "financial_status": o.get("financial_status") or "",
-                        "fulfillment_status": o.get("fulfillment_status") or "unfulfilled",
-                        "total_price": o.get("total_price") or "",
-                        "currency": o.get("currency") or "",
-                        "customer_name": customer_name,
-                        "customer_phone": str(customer.get("phone") or ""),
-                        "tags": [t.strip() for t in str(o.get("tags") or "").split(",") if t.strip()],
-                        "note": o.get("note") or "",
-                        "fulfillments": fulfiller_names,
-                    })
-    except Exception:
-        pass
-
-    local_by_id = {str(r.get("order_id") or ""): r for r in local_rows}
-
-    merged = []
-    seen_ids = set()
-    for so in shopify_results:
-        sid = so.get("shopify_order_id") or ""
-        local = local_by_id.get(sid) or {}
-        merged.append({
-            **so,
-            "collected_by": local.get("agent_username") or "",
-            "collected_at": local.get("created_at") or "",
-            "payout_status": local.get("payout_status") or "",
-            "user_id": local.get("user_id") or "",
-        })
-        seen_ids.add(sid)
-    for r in local_rows:
-        rid = str(r.get("order_id") or "")
-        if rid not in seen_ids:
-            merged.append({
-                "shopify_order_id": rid,
-                "order_number": "",
-                "created_at": r.get("created_at") or "",
-                "financial_status": "",
-                "fulfillment_status": "",
-                "total_price": "",
-                "currency": "",
-                "customer_name": "",
-                "customer_phone": "",
-                "tags": [],
-                "note": "",
-                "fulfillments": [],
-                "collected_by": r.get("agent_username") or "",
-                "collected_at": r.get("created_at") or "",
-                "payout_status": r.get("payout_status") or "",
-                "user_id": r.get("user_id") or "",
-            })
-    return {"results": merged, "query": query}
 
 
 @app.post("/track/whatsapp-click")

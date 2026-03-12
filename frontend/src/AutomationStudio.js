@@ -838,7 +838,10 @@ export default function AutomationStudio({ onClose, embedded = false }) {
             const aTag = acts.find((x) => String(x?.type || "").toLowerCase().includes("tag")) || null;
             const aTpl = acts.find((x) => String(x?.type || "").toLowerCase().includes("template")) || null;
             const aOC = acts.find((x) => ["order_confirmation_flow", "order_confirm_flow"].includes(String(x?.type || "").toLowerCase())) || null;
-            const aButtons = acts.find((x) => String(x?.type || "").toLowerCase() === "send_buttons") || null;
+            const aButtons = acts.find((x) => {
+              const t = String(x?.type || "").toLowerCase();
+              return t === "send_buttons" || t === "send_interactive_buttons";
+            }) || null;
             const aList = acts.find((x) => String(x?.type || "").toLowerCase() === "send_list") || null;
             const aCatalogItem = acts.find((x) => ["send_catalog_item", "catalog_item", "send_interactive_product"].includes(String(x?.type || "").toLowerCase())) || null;
             const aCatalogSet = acts.find((x) => ["send_catalog_set", "catalog_set"].includes(String(x?.type || "").toLowerCase())) || null;
@@ -1000,16 +1003,17 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                 } catch {}
                 return {};
               })(),
-              buttonsText: String(aButtons?.text || aButtons?.message || ""),
+              buttonsText: String(aButtons?.text || aButtons?.message || aButtons?.body || ""),
               buttonsLines: (() => {
                 try {
                   const bs = Array.isArray(aButtons?.buttons) ? aButtons.buttons : [];
                   return bs
-                    .map((b) => `${String(b?.id || "").trim()}|${String(b?.title || "").trim()}`)
-                    .filter((x) => {
-                      const parts = x.split("|");
-                      return String(parts[0] || "").trim() && String(parts[1] || "").trim();
+                    .map((b) => {
+                      const id = String(b?.id ?? b?.button_id ?? "").trim();
+                      const title = String(b?.title ?? b?.label ?? "").trim();
+                      return id && title ? `${id}|${title}` : "";
                     })
+                    .filter(Boolean)
                     .join("\n");
                 } catch {
                   return "";
@@ -1372,7 +1376,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                     });
                   }
                 } else if (draft.actionMode === "buttons") {
-                  const body = String(draft.buttonsText || draft.replyText || "").trim();
+                  const body = String(draft.buttonsText || draft.replyText || "").trim() || "Choose an option";
                   const lines = String(draft.buttonsLines || "")
                     .split(/\r?\n/g)
                     .map((x) => x.trim())
@@ -1384,7 +1388,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                     const title = String(parts.slice(1).join("|") || "").trim();
                     if (id && title) btns.push({ id, title });
                   }
-                  if (body && btns.length) {
+                  if (btns.length) {
                     actions.push({
                       type: "send_buttons",
                       to: String(draft.to || "{{ phone }}"),

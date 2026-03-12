@@ -8863,6 +8863,58 @@ class MessageProcessor:
                                         "agent_username": "automation",
                                         "do_not_count_as_reply": _keep_unresponded,
                                     })
+                                elif at in ("send_buttons", "send_interactive_buttons"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    body_text = self._render_template(str(act.get("text") or act.get("message") or ""), ctx).strip()
+                                    buttons = act.get("buttons") or []
+                                    if isinstance(buttons, dict):
+                                        buttons = [buttons]
+                                    if not isinstance(buttons, list):
+                                        buttons = []
+                                    btns = []
+                                    for b in buttons:
+                                        if not isinstance(b, dict):
+                                            continue
+                                        bid = str(b.get("id") or "").strip()
+                                        title = str(b.get("title") or "").strip()
+                                        if bid and title:
+                                            btns.append({"id": bid, "title": title})
+                                    if not body_text:
+                                        body_text = "Choose an option"
+                                    if btns:
+                                        await self.process_outgoing_message({
+                                            "user_id": to_id,
+                                            "type": "buttons",
+                                            "from_me": True,
+                                            "message": body_text,
+                                            "buttons": btns,
+                                            "timestamp": datetime.utcnow().isoformat(),
+                                            "agent_username": "automation",
+                                            "do_not_count_as_reply": _keep_unresponded,
+                                        })
+                                elif at in ("send_list", "send_interactive_list"):
+                                    to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
+                                    body_text = self._render_template(str(act.get("text") or act.get("message") or ""), ctx).strip()
+                                    button_text = self._render_template(str(act.get("button_text") or "Choose"), ctx).strip() or "Choose"
+                                    sections = act.get("sections") or []
+                                    if isinstance(sections, dict):
+                                        sections = [sections]
+                                    if not isinstance(sections, list):
+                                        sections = []
+                                    if sections:
+                                        await self.process_outgoing_message({
+                                            "user_id": to_id,
+                                            "type": "list",
+                                            "from_me": True,
+                                            "message": body_text or "Choose",
+                                            "button_text": button_text,
+                                            "sections": sections,
+                                            "header_text": act.get("header_text") or None,
+                                            "footer_text": act.get("footer_text") or None,
+                                            "timestamp": datetime.utcnow().isoformat(),
+                                            "agent_username": "automation",
+                                            "do_not_count_as_reply": _keep_unresponded,
+                                        })
                                 elif at in ("add_tag", "tag"):
                                     tag = str(act.get("tag") or "").strip()
                                     if not tag:

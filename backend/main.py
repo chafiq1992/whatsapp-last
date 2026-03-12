@@ -4545,12 +4545,14 @@ class DatabaseManager:
                     wa_message_id=str(wa_message_id),
                 )
                 # Count this as replying to the latest unreplied inbound message (1-to-1)
-                await self.mark_latest_inbound_replied(
-                    user_id=str(message.get("user_id") or ""),
-                    replied_by_agent=agent_username,
-                    outbound_wa_message_id=str(wa_message_id),
-                    first_reply_ts=ts,
-                )
+                # Skip when do_not_count_as_reply (e.g. "agent late" auto message) so conversation stays unresponded
+                if not message.get("do_not_count_as_reply"):
+                    await self.mark_latest_inbound_replied(
+                        user_id=str(message.get("user_id") or ""),
+                        replied_by_agent=agent_username,
+                        outbound_wa_message_id=str(wa_message_id),
+                        first_reply_ts=ts,
+                    )
         except Exception:
             pass
 
@@ -5862,6 +5864,8 @@ class MessageProcessor:
             "shopify_order_id": message_data.get("shopify_order_id"),
             "shopify_tag_on_sent": message_data.get("shopify_tag_on_sent"),
             "shopify_tag_on_fail": message_data.get("shopify_tag_on_fail"),
+            # When set, auto message does not count as reply — conversation stays unresponded for agent inbox
+            "do_not_count_as_reply": bool(message_data.get("do_not_count_as_reply")),
         }
         # Attach agent attribution if present
         agent_username = message_data.get("agent_username")
@@ -8742,7 +8746,9 @@ class MessageProcessor:
                         continue
 
                     rid = str(rule.get("id") or "")
-                    async def _job(_rule: dict, _rid: str, _sec: int, _no_order_hours: float):
+                    keep_unresponded = bool((rule.get("condition") or {}).get("keep_unresponded"))
+
+                    async def _job(_rule: dict, _rid: str, _sec: int, _no_order_hours: float, _keep_unresponded: bool):
                         try:
                             await asyncio.sleep(max(1, int(_sec)))
                             # If replied, skip
@@ -8783,6 +8789,7 @@ class MessageProcessor:
                                         "message": msg,
                                         "timestamp": datetime.utcnow().isoformat(),
                                         "agent_username": "automation",
+                                        "do_not_count_as_reply": _keep_unresponded,
                                     })
                                 elif at in ("send_template", "send_whatsapp_template", "order_confirmation_flow"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
@@ -8802,6 +8809,7 @@ class MessageProcessor:
                                         "template_name": tname,
                                         "template_language": lang,
                                         "template_components": comps,
+                                        "do_not_count_as_reply": _keep_unresponded,
                                     })
                                 elif at in ("send_catalog_item", "catalog_item", "send_interactive_product"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
@@ -8821,6 +8829,7 @@ class MessageProcessor:
                                         "message": caption,
                                         "timestamp": datetime.utcnow().isoformat(),
                                         "agent_username": "automation",
+                                        "do_not_count_as_reply": _keep_unresponded,
                                     })
                                 elif at in ("send_catalog_set", "catalog_set"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
@@ -8852,6 +8861,7 @@ class MessageProcessor:
                                         "url": audio_url,
                                         "timestamp": datetime.utcnow().isoformat(),
                                         "agent_username": "automation",
+                                        "do_not_count_as_reply": _keep_unresponded,
                                     })
                                 elif at in ("add_tag", "tag"):
                                     tag = str(act.get("tag") or "").strip()
@@ -8875,7 +8885,7 @@ class MessageProcessor:
                         except Exception:
                             return
 
-                    asyncio.create_task(_job(rule, rid, seconds, no_order_hours))
+                    asyncio.create_task(_job(rule, rid, seconds, no_order_hours, keep_unresponded))
                 except Exception:
                     continue
         except Exception:

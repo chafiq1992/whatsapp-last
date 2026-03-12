@@ -414,7 +414,8 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     cooldownSeconds: 0,
     triggerSource: "whatsapp",
     waTriggerMode: "incoming", // incoming | no_reply | button
-    noReplyMinutes: 30,
+              noReplyMinutes: 15,
+              keepUnresponded: false,
     noOrderHours: 0,
     whatsappTestPhones: "",
     waNoUrlNoDigit: false,
@@ -771,7 +772,8 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               cooldownSeconds: 0,
               triggerSource: "whatsapp",
               waTriggerMode: "incoming",
-              noReplyMinutes: 30,
+              noReplyMinutes: 15,
+              keepUnresponded: false,
               noOrderHours: 0,
               whatsappTestPhones: "",
               waNoUrlNoDigit: false,
@@ -930,6 +932,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                 } catch {}
                 return 30;
               })(),
+              keepUnresponded: !!(r?.condition && typeof r.condition === "object" && r.condition.keep_unresponded),
               noOrderHours: (() => {
                 try {
                   const c = (r?.condition && typeof r.condition === "object") ? r.condition : {};
@@ -1489,7 +1492,14 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       : draft.triggerSource === "retargeting"
                         ? { match: "any" }
                       : (["no_reply", "confirmation_wtp2", "confirmation_wtp3"].includes(String(draft.waTriggerMode || "incoming"))
-                        ? { match: "no_reply_for", seconds: Math.max(60, Number(draft.noReplyMinutes || 30) * 60), keywords: kws }
+                        ? {
+                            match: "no_reply_for",
+                            seconds: Math.max(60, Number(draft.noReplyMinutes || 30) * 60),
+                            keywords: kws,
+                            ...(String(draft.waTriggerMode || "incoming") === "no_reply" && !!draft.keepUnresponded
+                              ? { keep_unresponded: true }
+                              : {}),
+                          }
                         : (String(draft.waTriggerMode || "incoming") === "button"
                           ? { match: "button_id", ids: buttonIds }
                           : (draft.waNoUrlNoDigit ? { match: "no_url_no_digit" } : { match: "contains", keywords: kws })
@@ -3083,20 +3093,34 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                       )}
 
                       {["no_reply", "confirmation_wtp2", "confirmation_wtp3"].includes(String(draft.waTriggerMode || "incoming")) && (
-                        <div>
-                          <div className="text-xs text-slate-500 mb-1">Wait (minutes)</div>
-                          <input
-                            type="number"
-                            min={1}
-                            className="w-full border rounded-lg px-3 py-2"
-                            value={Number(draft.noReplyMinutes || 30)}
-                            onChange={(e) => onChange({ noReplyMinutes: Number(e.target.value || 0) })}
-                          />
-                          <div className="text-[11px] text-slate-500 mt-1">
-                            {String(draft.waTriggerMode || "incoming") === "no_reply"
-                              ? "After a customer message, if nobody replies within this time, the rule will run once."
-                              : "After the order confirmation template is sent, if the customer doesn't reply within this time, the follow-up template will be sent."}
+                        <div className="space-y-2">
+                          <div>
+                            <div className="text-xs text-slate-500 mb-1">Wait (minutes)</div>
+                            <input
+                              type="number"
+                              min={1}
+                              className="w-full border rounded-lg px-3 py-2"
+                              value={Number(draft.noReplyMinutes || 30)}
+                              onChange={(e) => onChange({ noReplyMinutes: Number(e.target.value || 0) })}
+                            />
+                            <div className="text-[11px] text-slate-500 mt-1">
+                              {String(draft.waTriggerMode || "incoming") === "no_reply"
+                                ? "After a customer message, if nobody replies within this time, the rule will run once."
+                                : "After the order confirmation template is sent, if the customer doesn't reply within this time, the follow-up template will be sent."}
+                            </div>
                           </div>
+                          {String(draft.waTriggerMode || "incoming") === "no_reply" && (
+                            <label className="text-xs text-slate-700 flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={!!draft.keepUnresponded}
+                                onChange={(e) => onChange({ keepUnresponded: !!e.target.checked })}
+                              />
+                              <span>
+                                Keep conversation as unresponded — the auto message will not count as a reply, so the agent can still find it in the inbox as unread/unresponded.
+                              </span>
+                            </label>
+                          )}
                         </div>
                       )}
 

@@ -1166,7 +1166,8 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                   .filter(Boolean);
                 const buttonIds = String(draft.buttonIds || "")
                   .split(/\r?\n|,/g)
-                  .map((x) => x.trim())
+                  .map((x) => String(x || "").trim())
+                  .map((x) => (x.includes("|") ? x.split("|", 1)[0].trim() : x))
                   .filter(Boolean);
                 const testPhones = String(draft.shopifyTestPhones || "")
                   .split(/\r?\n|,/g)

@@ -8815,6 +8815,21 @@ class MessageProcessor:
                         )
                     except Exception:
                         no_order_hours = 0.0
+                    # Optional testing guard: when test numbers are set, this rule must only
+                    # run for those numbers (digits-only compare).
+                    try:
+                        test_phones = rule.get("test_phone_numbers") or rule.get("test_numbers") or []
+                        if isinstance(test_phones, str):
+                            test_phones = [x.strip() for x in re.split(r"[,\n\r]+", test_phones) if x and x.strip()]
+                        if isinstance(test_phones, list):
+                            test_set = {_digits_only(str(x or "")) for x in test_phones}
+                            test_set = {x for x in test_set if x}
+                        else:
+                            test_set = set()
+                        if test_set and _digits_only(user_id) not in test_set:
+                            continue
+                    except Exception:
+                        pass
                     if kws and not any((k.lower() in text_lc) for k in kws):
                         continue
 
@@ -9256,14 +9271,20 @@ class MessageProcessor:
                         if not bid:
                             matched = False
                         else:
+                            def _norm_btn_id(v: str) -> str:
+                                s = str(v or "").strip()
+                                # Be tolerant if admins paste "id|title" instead of plain id.
+                                if "|" in s:
+                                    s = s.split("|", 1)[0].strip()
+                                return s
                             if needle:
-                                matched = bid == needle
+                                matched = bid == _norm_btn_id(needle)
                             else:
                                 ids = cond.get("ids") or cond.get("values") or []
                                 if isinstance(ids, str):
                                     ids = [x.strip() for x in re.split(r"[,\n\r]+", ids) if x and x.strip()]
                                 if isinstance(ids, list):
-                                    s = {str(x or "").strip() for x in ids if str(x or "").strip()}
+                                    s = {_norm_btn_id(x) for x in ids if _norm_btn_id(x)}
                                     matched = bid in s if s else True
                                 else:
                                     matched = True

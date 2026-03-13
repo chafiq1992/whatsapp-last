@@ -3066,6 +3066,19 @@ class DatabaseManager:
                     last_trigger_ts TEXT
                 );
 
+                -- Per-customer "send once" guard for automation rules
+                CREATE TABLE IF NOT EXISTS automation_rule_once_sent (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace     TEXT NOT NULL DEFAULT '{DEFAULT_WORKSPACE}',
+                    rule_id       TEXT NOT NULL,
+                    user_id       TEXT NOT NULL,
+                    first_sent_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS uniq_automation_rule_once
+                    ON automation_rule_once_sent (workspace, rule_id, user_id);
+                CREATE INDEX IF NOT EXISTS idx_automation_rule_once_rule
+                    ON automation_rule_once_sent (workspace, rule_id);
+
                 -- Website (Shopify) WhatsApp click tracking (public, append-only)
                 CREATE TABLE IF NOT EXISTS whatsapp_clicks (
                     click_id    TEXT PRIMARY KEY,
@@ -5020,6 +5033,66 @@ class DatabaseManager:
                         "last_trigger_ts": d.get("last_trigger_ts") or None,
                     }
             return out
+
+    async def has_automation_rule_once_sent(self, *, workspace: str, rule_id: str, user_id: str) -> bool:
+        ws = _coerce_workspace(workspace or get_current_workspace())
+        rid = str(rule_id or "").strip()
+        uid = str(user_id or "").strip()
+        if not (ws and rid and uid):
+            return False
+        async with self._conn() as db:
+            if self.use_postgres:
+                row = await db.fetchrow(
+                    self._convert(
+                        "SELECT 1 AS ok FROM automation_rule_once_sent WHERE workspace = ? AND rule_id = ? AND user_id = ? LIMIT 1"
+                    ),
+                    ws,
+                    rid,
+                    uid,
+                )
+                return bool(row)
+            cur = await db.execute(
+                self._convert(
+                    "SELECT 1 AS ok FROM automation_rule_once_sent WHERE workspace = ? AND rule_id = ? AND user_id = ? LIMIT 1"
+                ),
+                (ws, rid, uid),
+            )
+            row = await cur.fetchone()
+            return bool(row)
+
+    async def mark_automation_rule_once_sent(self, *, workspace: str, rule_id: str, user_id: str) -> None:
+        ws = _coerce_workspace(workspace or get_current_workspace())
+        rid = str(rule_id or "").strip()
+        uid = str(user_id or "").strip()
+        if not (ws and rid and uid):
+            return
+        async with self._conn() as db:
+            if self.use_postgres:
+                await db.execute(
+                    self._convert(
+                        """
+                        INSERT INTO automation_rule_once_sent (workspace, rule_id, user_id, first_sent_ts)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT (workspace, rule_id, user_id) DO NOTHING
+                        """
+                    ),
+                    ws,
+                    rid,
+                    uid,
+                    datetime.utcnow().isoformat(),
+                )
+            else:
+                await db.execute(
+                    self._convert(
+                        """
+                        INSERT INTO automation_rule_once_sent (workspace, rule_id, user_id, first_sent_ts)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(workspace, rule_id, user_id) DO NOTHING
+                        """
+                    ),
+                    (ws, rid, uid, datetime.utcnow().isoformat()),
+                )
+                await db.commit()
 
     async def get_tag_options(self) -> List[dict]:
         raw = await self.get_setting("tag_options")
@@ -8747,13 +8820,25 @@ class MessageProcessor:
 
                     rid = str(rule.get("id") or "")
                     keep_unresponded = bool((rule.get("condition") or {}).get("keep_unresponded"))
+                    once_per_customer = bool((rule.get("condition") or {}).get("once_per_customer"))
 
-                    async def _job(_rule: dict, _rid: str, _sec: int, _no_order_hours: float, _keep_unresponded: bool):
+                    async def _job(_rule: dict, _rid: str, _sec: int, _no_order_hours: float, _keep_unresponded: bool, _once_per_customer: bool):
                         try:
                             await asyncio.sleep(max(1, int(_sec)))
                             # If replied, skip
                             if await self.db_manager.has_inbound_reply(user_id=user_id, inbound_wa_message_id=inbound_wa_message_id):
                                 return
+                            if _once_per_customer:
+                                try:
+                                    already_sent = await self.db_manager.has_automation_rule_once_sent(
+                                        workspace=ws,
+                                        rule_id=_rid,
+                                        user_id=user_id,
+                                    )
+                                    if already_sent:
+                                        return
+                                except Exception:
+                                    pass
                             if _no_order_hours > 0:
                                 has_recent = await self._has_shopify_order_in_last_hours(
                                     user_id=user_id,
@@ -8774,6 +8859,7 @@ class MessageProcessor:
                                 actions = [actions]
                             if not isinstance(actions, list):
                                 actions = []
+                            sent_any_message = False
                             for act in actions:
                                 if not isinstance(act, dict):
                                     continue
@@ -8791,6 +8877,7 @@ class MessageProcessor:
                                         "agent_username": "automation",
                                         "do_not_count_as_reply": _keep_unresponded,
                                     })
+                                    sent_any_message = True
                                 elif at in ("send_template", "send_whatsapp_template", "order_confirmation_flow"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                                     tname = self._render_template(str(act.get("template_name") or ""), ctx).strip()
@@ -8811,6 +8898,7 @@ class MessageProcessor:
                                         "template_components": comps,
                                         "do_not_count_as_reply": _keep_unresponded,
                                     })
+                                    sent_any_message = True
                                 elif at in ("send_catalog_item", "catalog_item", "send_interactive_product"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                                     retailer_id = self._render_template(
@@ -8831,6 +8919,7 @@ class MessageProcessor:
                                         "agent_username": "automation",
                                         "do_not_count_as_reply": _keep_unresponded,
                                     })
+                                    sent_any_message = True
                                 elif at in ("send_catalog_set", "catalog_set"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                                     set_id = self._render_template(str(act.get("set_id") or act.get("catalog_set_id") or ""), ctx).strip()
@@ -8838,6 +8927,7 @@ class MessageProcessor:
                                     if not set_id:
                                         continue
                                     await self.whatsapp_messenger.send_full_set(to_id, set_id, caption)
+                                    sent_any_message = True
                                 elif at in ("send_last_order_catalog_items", "send_last_order_items", "last_order_catalog_items"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                                     try:
@@ -8845,6 +8935,7 @@ class MessageProcessor:
                                     except Exception:
                                         max_items = 10
                                     await self._send_last_order_catalog_items(to_id, max_items=max_items)
+                                    sent_any_message = True
                                 elif at in ("send_audio", "send_audio_url", "send_whatsapp_audio"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                                     audio_url = self._render_template(
@@ -8863,6 +8954,7 @@ class MessageProcessor:
                                         "agent_username": "automation",
                                         "do_not_count_as_reply": _keep_unresponded,
                                     })
+                                    sent_any_message = True
                                 elif at in ("send_buttons", "send_interactive_buttons"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                                     body_text = self._render_template(str(act.get("text") or act.get("message") or ""), ctx).strip()
@@ -8892,6 +8984,7 @@ class MessageProcessor:
                                             "agent_username": "automation",
                                             "do_not_count_as_reply": _keep_unresponded,
                                         })
+                                        sent_any_message = True
                                 elif at in ("send_list", "send_interactive_list"):
                                     to_id = self._render_template(str(act.get("to") or "{{ phone }}"), ctx).strip() or user_id
                                     body_text = self._render_template(str(act.get("text") or act.get("message") or ""), ctx).strip()
@@ -8915,6 +9008,7 @@ class MessageProcessor:
                                             "agent_username": "automation",
                                             "do_not_count_as_reply": _keep_unresponded,
                                         })
+                                        sent_any_message = True
                                 elif at in ("add_tag", "tag"):
                                     tag = str(act.get("tag") or "").strip()
                                     if not tag:
@@ -8934,10 +9028,19 @@ class MessageProcessor:
                                             })
                                         except Exception:
                                             pass
+                            if _once_per_customer and sent_any_message:
+                                try:
+                                    await self.db_manager.mark_automation_rule_once_sent(
+                                        workspace=ws,
+                                        rule_id=_rid,
+                                        user_id=user_id,
+                                    )
+                                except Exception:
+                                    pass
                         except Exception:
                             return
 
-                    asyncio.create_task(_job(rule, rid, seconds, no_order_hours, keep_unresponded))
+                    asyncio.create_task(_job(rule, rid, seconds, no_order_hours, keep_unresponded, once_per_customer))
                 except Exception:
                     continue
         except Exception:

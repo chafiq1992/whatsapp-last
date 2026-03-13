@@ -414,8 +414,9 @@ export default function AutomationStudio({ onClose, embedded = false }) {
     cooldownSeconds: 0,
     triggerSource: "whatsapp",
     waTriggerMode: "incoming", // incoming | no_reply | button
-              noReplyMinutes: 15,
-              keepUnresponded: false,
+    noReplyMinutes: 15,
+    keepUnresponded: false,
+    oncePerCustomer: false,
     noOrderHours: 0,
     whatsappTestPhones: "",
     waNoUrlNoDigit: false,
@@ -774,6 +775,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               waTriggerMode: "incoming",
               noReplyMinutes: 15,
               keepUnresponded: false,
+              oncePerCustomer: false,
               noOrderHours: 0,
               whatsappTestPhones: "",
               waNoUrlNoDigit: false,
@@ -936,6 +938,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                 return 30;
               })(),
               keepUnresponded: !!(r?.condition && typeof r.condition === "object" && r.condition.keep_unresponded),
+              oncePerCustomer: !!(r?.condition && typeof r.condition === "object" && r.condition.once_per_customer),
               noOrderHours: (() => {
                 try {
                   const c = (r?.condition && typeof r.condition === "object") ? r.condition : {};
@@ -1382,10 +1385,27 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                     .map((x) => x.trim())
                     .filter(Boolean);
                   const btns = [];
-                  for (const ln of lines) {
+                  const usedIds = new Set();
+                  for (let i = 0; i < lines.length; i++) {
+                    const ln = lines[i];
                     const parts = ln.split("|");
-                    const id = String(parts[0] || "").trim();
-                    const title = String(parts.slice(1).join("|") || "").trim();
+                    let id = String(parts[0] || "").trim();
+                    let title = String(parts.slice(1).join("|") || "").trim();
+                    // Friendly input: allow "Title only" lines and auto-generate stable IDs.
+                    if (!title && id) {
+                      title = id;
+                      id = "";
+                    }
+                    if (!id && title) {
+                      const stem = title
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]+/g, "_")
+                        .replace(/^_+|_+$/g, "")
+                        .slice(0, 24);
+                      id = stem || `btn_${i + 1}`;
+                    }
+                    if (usedIds.has(id)) id = `${id}_${i + 1}`;
+                    usedIds.add(id);
                     if (id && title) btns.push({ id, title });
                   }
                   if (btns.length) {
@@ -1503,6 +1523,9 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                             ...(String(draft.waTriggerMode || "incoming") === "no_reply" && !!draft.keepUnresponded
                               ? { keep_unresponded: true }
                               : {}),
+                            ...(String(draft.waTriggerMode || "incoming") === "no_reply" && !!draft.oncePerCustomer
+                              ? { once_per_customer: true }
+                              : {}),
                           }
                         : (String(draft.waTriggerMode || "incoming") === "button"
                           ? { match: "button_id", ids: buttonIds }
@@ -1583,10 +1606,26 @@ export default function AutomationStudio({ onClose, embedded = false }) {
                       .map((x) => x.trim())
                       .filter(Boolean);
                     const btns = [];
-                    for (const ln of lines) {
+                    const usedIds = new Set();
+                    for (let i = 0; i < lines.length; i++) {
+                      const ln = lines[i];
                       const parts = ln.split("|");
-                      const id = String(parts[0] || "").trim();
-                      const title = String(parts.slice(1).join("|") || "").trim();
+                      let id = String(parts[0] || "").trim();
+                      let title = String(parts.slice(1).join("|") || "").trim();
+                      if (!title && id) {
+                        title = id;
+                        id = "";
+                      }
+                      if (!id && title) {
+                        const stem = title
+                          .toLowerCase()
+                          .replace(/[^a-z0-9]+/g, "_")
+                          .replace(/^_+|_+$/g, "")
+                          .slice(0, 24);
+                        id = stem || `btn_${i + 1}`;
+                      }
+                      if (usedIds.has(id)) id = `${id}_${i + 1}`;
+                      usedIds.add(id);
                       if (id && title) btns.push({ id, title });
                     }
                     if (body && btns.length) out.push({ type: "send_buttons", to: "{{ phone }}", text: body, buttons: btns });
@@ -3114,16 +3153,28 @@ function RuleEditor({ draft, workspaceOptions, currentWorkspace, deliveryStatusO
                             </div>
                           </div>
                           {String(draft.waTriggerMode || "incoming") === "no_reply" && (
-                            <label className="text-xs text-slate-700 flex items-start gap-2">
-                              <input
-                                type="checkbox"
-                                checked={!!draft.keepUnresponded}
-                                onChange={(e) => onChange({ keepUnresponded: !!e.target.checked })}
-                              />
-                              <span>
-                                Keep conversation as unresponded — the auto message will not count as a reply, so the agent can still find it in the inbox as unread/unresponded.
-                              </span>
-                            </label>
+                            <div className="space-y-2">
+                              <label className="text-xs text-slate-700 flex items-start gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={!!draft.keepUnresponded}
+                                  onChange={(e) => onChange({ keepUnresponded: !!e.target.checked })}
+                                />
+                                <span>
+                                  Keep conversation as unresponded — the auto message will not count as a reply, so the agent can still find it in the inbox as unread/unresponded.
+                                </span>
+                              </label>
+                              <label className="text-xs text-slate-700 flex items-start gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={!!draft.oncePerCustomer}
+                                  onChange={(e) => onChange({ oncePerCustomer: !!e.target.checked })}
+                                />
+                                <span>
+                                  Send only once per customer for this automation rule.
+                                </span>
+                              </label>
+                            </div>
                           )}
                         </div>
                       )}

@@ -12,8 +12,10 @@ import {
 import '@xyflow/react/dist/style.css';
 import { nodeTypes } from './CustomNodes';
 import Sidebar from './Sidebar';
+import { Plus, MessageSquare, Timer, MessageSquareText } from 'lucide-react';
 
 function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
+  const [popover, setPopover] = useState(null);
   const reactFlowInstance = useReactFlow();
   
   // Create nodes from rules dynamically
@@ -60,22 +62,45 @@ function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
     });
 
     return { nodes, edges };
-  }, [rules, onEdit]);
+  }, [rules, onEdit, reactFlowInstance]);
 
   const [nodes, setNodes] = useState(initialData.nodes);
   const [edges, setEdges] = useState(initialData.edges);
 
-  // Sync state if rules change externally
+  const onAddStep = useCallback((event, rule) => {
+    event.stopPropagation();
+    event.preventDefault();
+    
+    // Position the popover near the mouse click
+    const rect = event.currentTarget.getBoundingClientRect();
+    setPopover({
+      ruleId: rule?.id,
+      x: rect.right + 10,
+      y: rect.top,
+    });
+  }, []);
+
+  // Update node data to include onAddStep callback whenever rules or the callback change
   useEffect(() => {
     setNodes((nds) => {
-      // Keep existing positions if possible
+      // Keep existing positions if possible, re-inject fresh onEdit/onAddStep
       return initialData.nodes.map(n => {
         const existingNode = nds.find(e => e.id === n.id);
-        return existingNode ? { ...n, position: existingNode.position } : n;
+        const position = existingNode ? existingNode.position : n.position;
+        return {
+          ...n,
+          position,
+          data: {
+            ...n.data,
+            onAddStep
+          }
+        };
       });
     });
     setEdges(initialData.edges);
-  }, [initialData]);
+  }, [initialData, onAddStep]);
+
+  const closePopover = useCallback(() => setPopover(null), []);
 
   const onNodesChange = useCallback(
     (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
@@ -147,6 +172,67 @@ function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
         </ReactFlow>
       </div>
       <Sidebar onOpenNew={onOpenNew} />
+
+      {/* Popover for Action Selection */}
+      {popover && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={closePopover} onContextMenu={(e)=>{e.preventDefault(); closePopover()}} />
+          <div 
+            className="fixed z-50 bg-white border border-slate-200 rounded-xl shadow-xl w-64 overflow-hidden"
+            style={{ left: Math.min(popover.x, window.innerWidth - 260), top: Math.min(popover.y, window.innerHeight - 300) }}
+          >
+            <div className="bg-slate-50 px-3 py-2 border-b text-xs font-semibold text-slate-600">
+              Add next step
+            </div>
+            <div className="p-2 space-y-1">
+              <button 
+                className="w-full text-left px-3 py-2 text-sm rounded hover:bg-slate-100 flex items-center gap-2"
+                onClick={() => {
+                  const ruleObj = rules.find(r => r.id === popover.ruleId);
+                  if (ruleObj && onEdit) {
+                    const modifiedRule = { ...ruleObj, actions: [...(ruleObj.actions || []), { type: "send_whatsapp_text", to: "{{ phone }}", text: "New message" }] };
+                    onEdit(modifiedRule);
+                  }
+                  closePopover();
+                }}
+              >
+                <MessageSquare className="w-4 h-4 text-blue-500" />
+                <span>Send Message</span>
+              </button>
+              
+              <button 
+                className="w-full text-left px-3 py-2 text-sm rounded hover:bg-slate-100 flex items-center gap-2"
+                onClick={() => {
+                  const ruleObj = rules.find(r => r.id === popover.ruleId);
+                  if (ruleObj && onEdit) {
+                    const modifiedRule = { ...ruleObj, actions: [...(ruleObj.actions || []), { type: "send_whatsapp_template", to: "{{ phone }}", template_name: "", language: "en" }] };
+                    onEdit(modifiedRule);
+                  }
+                  closePopover();
+                }}
+              >
+                <MessageSquareText className="w-4 h-4 text-emerald-500" />
+                <span>Send Template</span>
+              </button>
+
+              <button 
+                className="w-full text-left px-3 py-2 text-sm rounded hover:bg-slate-100 flex items-center gap-2"
+                onClick={() => {
+                  const ruleObj = rules.find(r => r.id === popover.ruleId);
+                  if (ruleObj && onEdit) {
+                    const modifiedRule = { ...ruleObj, actions: [...(ruleObj.actions || []), { type: "delay", delay: "10m" }] };
+                    onEdit(modifiedRule);
+                  }
+                  closePopover();
+                }}
+              >
+                <Timer className="w-4 h-4 text-amber-500" />
+                <span>Add Delay</span>
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

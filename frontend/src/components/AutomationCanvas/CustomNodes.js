@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { ShoppingCart, MessageSquare, ScanLine, Tag, Activity } from 'lucide-react';
+import { ShoppingCart, MessageSquare, ScanLine, Tag, Activity, Plus } from 'lucide-react';
 
 const ICON_MAP = {
   shopify: <ShoppingCart className="w-5 h-5 text-green-500" />,
@@ -29,12 +29,22 @@ export const TriggerNode = ({ data }) => {
           <p className="text-xs text-slate-500">{event}</p>
         </div>
       </div>
-      <div className="mt-3 pt-3 border-t border-slate-100">
+      <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between">
         <span className="inline-flex items-center px-2 py-1 rounded bg-slate-100 text-[10px] font-medium text-slate-600">
           Trigger Phase
         </span>
+        <button 
+          onClick={(e) => {
+            e.stopPropagation();
+            if (data.onAddStep) data.onAddStep(e, data.rule);
+          }}
+          className="p-1.5 rounded-full bg-blue-50 text-blue-600 hover:bg-blue-100 hover:scale-110 transition-all shadow-sm group"
+          title="Add next step"
+        >
+          <Plus className="w-4 h-4" />
+        </button>
       </div>
-      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-500" />
+      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-blue-500 opacity-0 group-hover:opacity-100 transition-opacity" />
     </div>
   );
 };

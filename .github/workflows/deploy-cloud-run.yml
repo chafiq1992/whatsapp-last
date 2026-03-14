@@ -51,9 +51,6 @@ jobs:
             --vpc-connector "${{ secrets.VPC_CONNECTOR }}" \
             --vpc-egress private-ranges-only \
             --memory 1Gi \
-            --set-env-vars "REDIS_URL=redis://${{ secrets.REDIS_HOST }}:6379" \
-            --set-env-vars "ENABLE_WS_PUBSUB=1" \
-            --set-env-vars "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" \
-            --set-env-vars "PORT=8080"
+            --update-env-vars "REDIS_URL=redis://${{ secrets.REDIS_HOST }}:6379,ENABLE_WS_PUBSUB=1,GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }},PORT=8080"
 
 

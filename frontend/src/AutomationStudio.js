@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import api from "./api";
 import WhatsAppTemplatesPanel from "./WhatsAppTemplatesPanel";
+import AutomationCanvas from "./components/AutomationCanvas";
 
 const NODE_TYPES = {
   TRIGGER: "trigger",
@@ -349,7 +350,7 @@ function makeEdge(from, fromPort, to, toPort) {
 export default function AutomationStudio({ onClose, embedded = false }) {
   // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
   // Settings are now in a dedicated page (/#/automation-settings).
-  const [mode, setMode] = useState("simple"); // simple | templates | (legacy flow editor)
+  const [mode, setMode] = useState("simple"); // simple | templates | canvas
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesSaving, setRulesSaving] = useState(false);
@@ -713,7 +714,13 @@ export default function AutomationStudio({ onClose, embedded = false }) {
               className={`px-2 py-1 border rounded text-sm ${mode === "simple" ? "bg-blue-50 border-blue-200" : ""}`}
               onClick={() => setMode("simple")}
             >
-              Automation
+              List
+            </button>
+            <button
+              className={`px-2 py-1 border rounded text-sm ${mode === "canvas" ? "bg-blue-50 border-blue-200" : ""}`}
+              onClick={() => setMode("canvas")}
+            >
+              Canvas
             </button>
             <button
               className={`px-2 py-1 border rounded text-sm ${mode === "templates" ? "bg-blue-50 border-blue-200" : ""}`}
@@ -750,8 +757,9 @@ export default function AutomationStudio({ onClose, embedded = false }) {
       </header>
       )}
 
-      {mode === "simple" ? (
+      {mode === "simple" || mode === "canvas" ? (
         <SimpleAutomations
+          viewMode={mode}
           rules={rules}
           stats={ruleStats}
           loading={rulesLoading}
@@ -2199,7 +2207,7 @@ function Inspector({ node, onUpdate }){
   return <div className="text-sm text-slate-500">No settings.</div>;
 }
 
-function SimpleAutomations({ rules, stats, loading, saving, error, showAll, onToggleShowAll, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
+function SimpleAutomations({ viewMode = "simple", rules, stats, loading, saving, error, showAll, onToggleShowAll, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
   return (
     <div className="p-4 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-3">
@@ -2237,6 +2245,9 @@ function SimpleAutomations({ rules, stats, loading, saving, error, showAll, onTo
       {loading && <div className="text-sm text-slate-500">Loading…</div>}
 
       {!loading && (
+        viewMode === "canvas" ? (
+          <AutomationCanvas rules={rules} onEdit={onEdit} onOpenNew={onOpenNew} />
+        ) : (
         <div className="grid gap-2">
           {(rules || []).length === 0 ? (
             <div className="p-4 rounded border bg-white text-sm text-slate-500">No automations yet. Create your first automation.</div>
@@ -2290,6 +2301,7 @@ function SimpleAutomations({ rules, stats, loading, saving, error, showAll, onTo
             })
           )}
         </div>
+        )
       )}
 
       {children}

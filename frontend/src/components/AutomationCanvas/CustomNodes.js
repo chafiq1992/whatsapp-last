@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { ShoppingCart, MessageSquare, ScanLine, Tag, Activity, Plus } from 'lucide-react';
+import { ShoppingCart, MessageSquare, ScanLine, Tag, Activity, Plus, SplitSquareHorizontal } from 'lucide-react';
 
 const ICON_MAP = {
   shopify: <ShoppingCart className="w-5 h-5 text-green-500" />,
@@ -14,19 +14,24 @@ const getTriggerIcon = (source) => ICON_MAP[source] || ICON_MAP.whatsapp;
 export const TriggerNode = ({ data }) => {
   const source = data?.rule?.trigger?.source || 'whatsapp';
   const event = data?.rule?.trigger?.event || 'incoming_message';
+  const isNew = !data?.rule?.id || data?.rule?.name === '';
   
   return (
     <div 
-      className="bg-white rounded-xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.1)] border border-slate-200 p-4 min-w-[260px] cursor-pointer hover:border-blue-400 transition-colors"
+      className={`bg-white rounded-xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.1)] border ${isNew ? 'border-amber-300 shadow-amber-100' : 'border-slate-200'} p-4 min-w-[260px] cursor-pointer hover:border-blue-400 transition-colors`}
       onClick={() => data.onEdit && data.onEdit(data.rule)}
     >
       <div className="flex items-center gap-3 mb-2">
-        <div className="p-2 bg-slate-50 rounded-lg">
+        <div className="p-2 bg-slate-50 rounded-lg flex items-center justify-center">
           {getTriggerIcon(source)}
         </div>
         <div>
           <h3 className="text-sm font-semibold text-slate-800 capitalize leading-tight">{source}</h3>
-          <p className="text-xs text-slate-500">{event}</p>
+          {isNew ? (
+            <p className="text-[11px] text-amber-600 font-medium">Click to configure event...</p>
+          ) : (
+            <p className="text-[11px] text-slate-500">{event}</p>
+          )}
         </div>
       </div>
       <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between">
@@ -52,7 +57,9 @@ export const TriggerNode = ({ data }) => {
 export const ActionNode = ({ data }) => {
   const rule = data?.rule;
   const actions = rule?.actions || [];
-  const primaryAction = actions[0]?.type || 'send_text';
+  const primaryAction = actions[0] ? String(actions[0].type).replace(/_/g, ' ') : 'Select an action...';
+  const isDelay = actions[0]?.type === 'delay';
+  const ActionIcon = isDelay ? <div className="w-5 h-5 flex items-center justify-center text-amber-500">⏱️</div> : <MessageSquare className="w-5 h-5 text-blue-500" />;
 
   return (
     <div 
@@ -61,12 +68,12 @@ export const ActionNode = ({ data }) => {
     >
       <Handle type="target" position={Position.Left} className="w-3 h-3 bg-blue-500" />
       <div className="flex items-center gap-3 mb-2">
-        <div className="p-2 bg-slate-50 rounded-lg">
-          <MessageSquare className="w-5 h-5 text-blue-500" />
+        <div className="p-2 bg-slate-50 rounded-lg flex items-center justify-center">
+          {ActionIcon}
         </div>
         <div>
           <h3 className="text-sm font-semibold text-slate-800 leading-tight">Action</h3>
-          <p className="text-xs text-slate-500 truncate max-w-[150px]">{primaryAction.replace(/_/g, ' ')}</p>
+          <p className="text-[11px] text-slate-500 truncate max-w-[150px] capitalize">{primaryAction}</p>
         </div>
       </div>
       
@@ -85,7 +92,37 @@ export const ActionNode = ({ data }) => {
   );
 };
 
+export const ConditionNode = ({ data }) => {
+  const rule = data?.rule;
+  const match = rule?.condition?.match || 'all';
+
+  return (
+    <div 
+      className="bg-white rounded-xl shadow-[0_4px_20px_-4px_rgba(0,0,0,0.1)] border border-slate-200 p-4 min-w-[260px] cursor-pointer hover:border-indigo-400 transition-colors"
+      onClick={() => data.onEdit && data.onEdit(data.rule)}
+    >
+      <Handle type="target" position={Position.Left} className="w-3 h-3 bg-indigo-500" />
+      <div className="flex items-center gap-3 mb-2">
+        <div className="p-2 bg-slate-50 rounded-lg flex items-center justify-center">
+          <SplitSquareHorizontal className="w-5 h-5 text-indigo-500" />
+        </div>
+        <div>
+          <h3 className="text-sm font-semibold text-slate-800 leading-tight">Condition</h3>
+          <p className="text-[11px] text-slate-500 capitalize">Match: {match}</p>
+        </div>
+      </div>
+      <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between">
+        <span className="inline-flex items-center px-2 py-1 rounded bg-slate-100 text-[10px] font-medium text-slate-600">
+          Check
+        </span>
+      </div>
+      <Handle type="source" position={Position.Right} className="w-3 h-3 bg-indigo-500" />
+    </div>
+  );
+};
+
 export const nodeTypes = {
   triggerNode: TriggerNode,
   actionNode: ActionNode,
+  conditionNode: ConditionNode,
 };

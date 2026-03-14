@@ -2198,8 +2198,8 @@ function Inspector({ node, onUpdate }){
 
 function SimpleAutomations({ viewMode = "simple", onViewModeChange, rules, stats, loading, saving, error, showAll, onToggleShowAll, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
   return (
-    <div className="p-4 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between mb-3">
+    <div className={viewMode === "canvas" ? "w-full h-full flex flex-col bg-slate-50" : "p-4 max-w-5xl mx-auto"}>
+      <div className={`flex items-center justify-between mb-3 ${viewMode === "canvas" ? "p-4 border-b bg-white mb-0" : ""}`}>
         <div>
           <div className="text-lg font-semibold">WhatsApp Automations</div>
           <div className="text-sm text-slate-500">Real-time automations connected to the inbox (trigger on incoming WhatsApp messages).</div>
@@ -2253,7 +2253,9 @@ function SimpleAutomations({ viewMode = "simple", onViewModeChange, rules, stats
 
       {!loading && (
         viewMode === "canvas" ? (
-          <AutomationCanvas rules={rules} onEdit={onEdit} onOpenNew={onOpenNew} />
+          <div className="flex-1 w-full h-full relative">
+            <AutomationCanvas rules={rules} onEdit={onEdit} onOpenNew={onOpenNew} />
+          </div>
         ) : (
         <div className="grid gap-2">
           {(rules || []).length === 0 ? (

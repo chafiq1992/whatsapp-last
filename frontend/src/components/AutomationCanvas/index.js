@@ -32,8 +32,11 @@ function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
       const xOffset = col * 800 + 100;
       const yOffset = row * 300 + 100;
       
+      const hasCondition = rule.condition && Object.keys(rule.condition).length > 0;
+      
       const triggerId = `trigger-${rule.id}`;
       const actionId = `action-${rule.id}`;
+      const conditionId = `condition-${rule.id}`;
 
       nodes.push({
         id: triggerId,
@@ -43,22 +46,58 @@ function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
         draggable: true,
       });
 
-      nodes.push({
-        id: actionId,
-        type: 'actionNode',
-        position: { x: xOffset + 400, y: yOffset },
-        data: { rule, onEdit },
-        draggable: true,
-      });
+      if (hasCondition) {
+        nodes.push({
+          id: conditionId,
+          type: 'conditionNode',
+          position: { x: xOffset + 350, y: yOffset },
+          data: { rule, onEdit },
+          draggable: true,
+        });
 
-      edges.push({
-        id: `edge-${rule.id}`,
-        source: triggerId,
-        target: actionId,
-        type: 'smoothstep',
-        animated: rule.enabled,
-        style: { stroke: rule.enabled ? '#3b82f6' : '#cbd5e1', strokeWidth: 2 },
-      });
+        nodes.push({
+          id: actionId,
+          type: 'actionNode',
+          position: { x: xOffset + 700, y: yOffset },
+          data: { rule, onEdit },
+          draggable: true,
+        });
+
+        edges.push({
+          id: `edge-t-c-${rule.id}`,
+          source: triggerId,
+          target: conditionId,
+          type: 'smoothstep',
+          animated: rule.enabled,
+          style: { stroke: rule.enabled ? '#3b82f6' : '#cbd5e1', strokeWidth: 2 },
+        });
+
+        edges.push({
+          id: `edge-c-a-${rule.id}`,
+          source: conditionId,
+          target: actionId,
+          type: 'smoothstep',
+          animated: rule.enabled,
+          style: { stroke: rule.enabled ? '#3b82f6' : '#cbd5e1', strokeWidth: 2 },
+        });
+      } else {
+        nodes.push({
+          id: actionId,
+          type: 'actionNode',
+          position: { x: xOffset + 400, y: yOffset },
+          data: { rule, onEdit },
+          draggable: true,
+        });
+
+        edges.push({
+          id: `edge-${rule.id}`,
+          source: triggerId,
+          target: actionId,
+          type: 'smoothstep',
+          animated: rule.enabled,
+          style: { stroke: rule.enabled ? '#3b82f6' : '#cbd5e1', strokeWidth: 2 },
+        });
+      }
     });
 
     return { nodes, edges };
@@ -73,10 +112,18 @@ function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
     
     // Position the popover near the mouse click
     const rect = event.currentTarget.getBoundingClientRect();
+    const popupWidth = 260;
+    
+    let xOffset = rect.right + 10;
+    if (xOffset + popupWidth > window.innerWidth - 20) {
+      // If there's no room on the right, display it on the left of the + button
+      xOffset = rect.left - popupWidth - 10;
+    }
+    
     setPopover({
       ruleId: rule?.id,
-      x: rect.right + 10,
-      y: rect.top,
+      x: xOffset,
+      y: Math.min(rect.top, window.innerHeight - 300),
     });
   }, []);
 
@@ -179,7 +226,7 @@ function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
           <div className="fixed inset-0 z-40" onClick={closePopover} onContextMenu={(e)=>{e.preventDefault(); closePopover()}} />
           <div 
             className="fixed z-50 bg-white border border-slate-200 rounded-xl shadow-xl w-64 overflow-hidden"
-            style={{ left: Math.min(popover.x, window.innerWidth - 260), top: Math.min(popover.y, window.innerHeight - 300) }}
+            style={{ left: popover.x, top: popover.y }}
           >
             <div className="bg-slate-50 px-3 py-2 border-b text-xs font-semibold text-slate-600">
               Add next step
@@ -228,6 +275,27 @@ function FlowContextWrapper({ rules, onEdit, onOpenNew }) {
               >
                 <Timer className="w-4 h-4 text-amber-500" />
                 <span>Add Delay</span>
+              </button>
+
+              <div className="border-t border-slate-100 my-1 pt-1"></div>
+
+              <button 
+                className="w-full text-left px-3 py-2 text-sm rounded hover:bg-slate-100 flex items-center gap-2"
+                onClick={() => {
+                  const ruleObj = rules.find(r => r.id === popover.ruleId);
+                  if (ruleObj && onEdit) {
+                    // Injecting a default condition structure
+                    const modifiedRule = { 
+                      ...ruleObj, 
+                      condition: { ...(ruleObj.condition || {}), match: "all", rules: [] } 
+                    };
+                    onEdit(modifiedRule);
+                  }
+                  closePopover();
+                }}
+              >
+                <Plus className="w-4 h-4 text-indigo-500" />
+                <span>Add Condition (Logic)</span>
               </button>
             </div>
           </div>

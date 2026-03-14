@@ -640,9 +640,9 @@ export default function AutomationSettingsPage() {
         </div>
       </header>
 
-      <div className="p-4 max-w-6xl mx-auto">
-        {error && <div className="mb-3 p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{error}</div>}
-        {loading && <div className="text-sm text-slate-500">Loading…</div>}
+      <div className={activeTab === 'automation' ? "w-full h-[calc(100vh-3.5rem)]" : "p-4 max-w-6xl mx-auto"}>
+        {activeTab !== 'automation' && error && <div className="mb-3 p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{error}</div>}
+        {activeTab !== 'automation' && loading && <div className="text-sm text-slate-500">Loading…</div>}
 
         {!loading && activeTab === 'analytics' && (
           <div className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur shadow-sm">
@@ -653,7 +653,7 @@ export default function AutomationSettingsPage() {
         )}
 
         {!loading && activeTab === 'automation' && (
-          <div className="h-[calc(100vh-5rem)] border rounded-2xl overflow-hidden bg-white/50 backdrop-blur shadow-sm">
+          <div className="h-full w-full bg-white overflow-hidden">
             <AutomationStudio embedded />
           </div>
         )}

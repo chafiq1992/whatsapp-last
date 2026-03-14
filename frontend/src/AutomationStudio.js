@@ -711,18 +711,6 @@ export default function AutomationStudio({ onClose, embedded = false }) {
         <div className="flex items-center gap-2">
           <div className="hidden sm:flex items-center gap-1 mr-2">
             <button
-              className={`px-2 py-1 border rounded text-sm ${mode === "simple" ? "bg-blue-50 border-blue-200" : ""}`}
-              onClick={() => setMode("simple")}
-            >
-              List
-            </button>
-            <button
-              className={`px-2 py-1 border rounded text-sm ${mode === "canvas" ? "bg-blue-50 border-blue-200" : ""}`}
-              onClick={() => setMode("canvas")}
-            >
-              Canvas
-            </button>
-            <button
               className={`px-2 py-1 border rounded text-sm ${mode === "templates" ? "bg-blue-50 border-blue-200" : ""}`}
               onClick={() => setMode("templates")}
             >
@@ -760,6 +748,7 @@ export default function AutomationStudio({ onClose, embedded = false }) {
       {mode === "simple" || mode === "canvas" ? (
         <SimpleAutomations
           viewMode={mode}
+          onViewModeChange={setMode}
           rules={rules}
           stats={ruleStats}
           loading={rulesLoading}
@@ -2207,7 +2196,7 @@ function Inspector({ node, onUpdate }){
   return <div className="text-sm text-slate-500">No settings.</div>;
 }
 
-function SimpleAutomations({ viewMode = "simple", rules, stats, loading, saving, error, showAll, onToggleShowAll, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
+function SimpleAutomations({ viewMode = "simple", onViewModeChange, rules, stats, loading, saving, error, showAll, onToggleShowAll, onRefresh, onOpenNew, onEdit, onToggle, onDelete, children }) {
   return (
     <div className="p-4 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-3">
@@ -2216,6 +2205,24 @@ function SimpleAutomations({ viewMode = "simple", rules, stats, loading, saving,
           <div className="text-sm text-slate-500">Real-time automations connected to the inbox (trigger on incoming WhatsApp messages).</div>
         </div>
         <div className="flex items-center gap-2">
+          {onViewModeChange && (
+            <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200 mr-2">
+              <button
+                className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${viewMode === "simple" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                onClick={() => onViewModeChange("simple")}
+                disabled={loading || saving}
+              >
+                List
+              </button>
+              <button
+                className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${viewMode === "canvas" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                onClick={() => onViewModeChange("canvas")}
+                disabled={loading || saving}
+              >
+                Canvas
+              </button>
+            </div>
+          )}
           <button
             className={`px-3 py-1.5 border rounded text-sm ${showAll ? "bg-amber-100 border-amber-300 text-amber-800" : ""}`}
             onClick={() => onToggleShowAll(!showAll)}

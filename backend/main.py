@@ -6065,7 +6065,7 @@ class MessageProcessor:
         return None, None
 
     async def _handle_order_status_request(self, user_id: str) -> None:
-        """Fetch recent orders (last 4 days) for this phone and send details."""
+        """Fetch recent orders for this phone and send a polished Arabic status summary."""
         try:
             import httpx  # type: ignore
             from .shopify_integration import fetch_customer_by_phone, admin_api_base, _client_args  # type: ignore
@@ -6076,20 +6076,21 @@ class MessageProcessor:
                     "type": "text",
                     "from_me": True,
                     "message": (
-                        "Aucune commande trouvée pour votre numéro.\n"
-                        "لم يتم العثور على أي طلب مرتبط برقم هاتفك."
+                        "السلام عليكم 🙏\n"
+                        "لم يتم العثور على أي طلب مرتبط برقم هاتفك.\n"
+                        "يرجى التواصل معنا إذا كنت تعتقد أن هناك خطأ. 🙏"
                     ),
                     "timestamp": datetime.utcnow().isoformat(),
                 })
                 return
             customer_id = cust["customer_id"]
             now = datetime.utcnow()
-            since = (now - timedelta(days=4)).isoformat() + "Z"
+            since = (now - timedelta(days=30)).isoformat() + "Z"
             params = {
                 "customer_id": str(customer_id),
                 "status": "any",
                 "order": "created_at desc",
-                "limit": 10,
+                "limit": 3,
                 "created_at_min": since,
             }
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -6103,43 +6104,76 @@ class MessageProcessor:
                     "type": "text",
                     "from_me": True,
                     "message": (
-                        "Aucune commande des 4 derniers jours.\n"
-                        "لا توجد طلبات خلال آخر 4 أيام."
+                        "السلام عليكم 🙏\n"
+                        "لا توجد طلبات حديثة مرتبطة برقمك.\n"
+                        "نتمنى لك يوماً سعيداً! 🌟"
                     ),
                     "timestamp": datetime.utcnow().isoformat(),
                 })
                 return
-            # Compose bilingual summary
-            lines_fr: list[str] = ["Voici vos commandes (4 derniers jours):"]
-            lines_ar: list[str] = ["هذه طلباتك خلال آخر 4 أيام:"]
-            # Also collect up to 2 images to send
-            images: list[tuple[str, str]] = []  # (url, caption)
+
+            # Helper: determine fulfillment date from the order's fulfillments array
+            def _fulfillment_date(order: dict) -> str | None:
+                """Return the most recent fulfillment created_at or updated_at, or None."""
+                fulfillments = order.get("fulfillments")
+                if not isinstance(fulfillments, list) or not fulfillments:
+                    return None
+                latest = None
+                for f in fulfillments:
+                    if not isinstance(f, dict):
+                        continue
+                    dt_str = f.get("created_at") or f.get("updated_at") or ""
+                    if dt_str and (latest is None or dt_str > latest):
+                        latest = dt_str
+                return latest
+
+            lines: list[str] = ["السلام عليكم 🙏", "هذه آخر طلباتك:", ""]
+
             for o in orders[:3]:
                 name = o.get("name") or f"#{o.get('id')}"
                 created_at = o.get("created_at", "")
                 status = o.get("fulfillment_status") or "unfulfilled"
-                status_fr = "expédiée" if status == "fulfilled" else "non expédiée"
-                status_ar = "مكتملة" if status == "fulfilled" else "غير مكتملة"
-                lines_fr.append(f"- {name} — {created_at[:10]} — Statut: {status_fr}")
-                lines_ar.append(f"- {name} — {created_at[:10]} — الحالة: {status_ar}")
-                for li in (o.get("line_items") or [])[:2]:
-                    t = li.get("title") or ""
-                    vt = li.get("variant_title") or ""
-                    q = li.get("quantity") or 1
-                    lines_fr.append(f"  • {t} — {vt} ×{q}")
-                    lines_ar.append(f"  • {t} — {vt} ×{q}")
-                    # Try to resolve variant image
-                    try:
-                        vid = li.get("variant_id")
-                        if vid and len(images) < 2:
-                            v_id_str, v_obj = await self._resolve_shopify_variant(str(vid))
-                            img = (v_obj or {}).get("image_src")
-                            if img:
-                                cap = f"{t} — {vt}"
-                                images.append((img, cap))
-                    except Exception:
-                        pass
-            summary = "\n".join(lines_fr + [""] + lines_ar)
+
+                # Determine smart status
+                if status == "fulfilled":
+                    ful_date_str = _fulfillment_date(o)
+                    recently_fulfilled = False
+                    if ful_date_str:
+                        try:
+                            ful_dt = datetime.fromisoformat(ful_date_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                            if (now - ful_dt).days <= 3:
+                                recently_fulfilled = True
+                        except Exception:
+                            pass
+                    if recently_fulfilled:
+                        status_text = "🚚 مع شركة التوصيل، التوصيل المتوقع اليوم أو غداً"
+                    else:
+                        status_text = "✅ تم التوصيل"
+                elif status == "partially_fulfilled":
+                    status_text = "📦 تم شحن جزء من الطلب"
+                else:
+                    status_text = "⏳ قيد التجهيز"
+
+                # Collect line items as compact variant-only descriptions
+                item_parts: list[str] = []
+                total_qty = 0
+                for li in (o.get("line_items") or []):
+                    q = int(li.get("quantity") or 1)
+                    total_qty += q
+                    vt = str(li.get("variant_title") or "").strip()
+                    if vt:
+                        item_parts.append(f"{q}x {vt}")
+
+                lines.append(f"📦 طلب {name} — {created_at[:10]}")
+                lines.append(f"   الحالة: {status_text}")
+                if item_parts:
+                    lines.append(f"   المنتجات: {' — '.join(item_parts)}")
+                lines.append(f"   عدد المنتجات: {total_qty}")
+                lines.append("")
+
+            lines.append("نتمنى لك تجربة تسوق سعيدة! 🌟")
+
+            summary = "\n".join(lines)
             await self.process_outgoing_message({
                 "user_id": user_id,
                 "type": "text",
@@ -6147,16 +6181,6 @@ class MessageProcessor:
                 "message": summary,
                 "timestamp": datetime.utcnow().isoformat(),
             })
-            for url, cap in images:
-                await self.process_outgoing_message({
-                    "user_id": user_id,
-                    "type": "image",
-                    "from_me": True,
-                    "message": url,
-                    "url": url,
-                    "caption": cap,
-                    "timestamp": datetime.utcnow().isoformat(),
-                })
         except Exception as exc:
             print(f"order status fetch error: {exc}")
             await self.process_outgoing_message({
@@ -6164,8 +6188,9 @@ class MessageProcessor:
                 "type": "text",
                 "from_me": True,
                 "message": (
-                    "Une erreur est survenue lors de la récupération de vos commandes.\n"
-                    "حدث خطأ أثناء جلب طلباتك."
+                    "السلام عليكم 🙏\n"
+                    "حدث خطأ أثناء جلب طلباتك.\n"
+                    "يرجى المحاولة لاحقاً أو التواصل معنا. 🙏"
                 ),
                 "timestamp": datetime.utcnow().isoformat(),
             })

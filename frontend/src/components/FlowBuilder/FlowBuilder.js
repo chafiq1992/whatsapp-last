@@ -14,29 +14,186 @@ import {
 } from 'lucide-react';
 
 /* ═══════════════════════════════════════════════════════════
-   Trigger / Action / Condition catalogs
-   (mirroring the variables & templates from AutomationStudio)
+   Rich Trigger / Action / Condition catalogs
+   Real variables from Shopify, WhatsApp, and Delivery APIs
    ═══════════════════════════════════════════════════════════ */
 const SHOPIFY_EVENTS = [
-  { id: 'orders/paid',           label: 'Order Paid',              variables: ['id','order_number','total_price','customer.phone','customer.first_name','created_at'] },
-  { id: 'orders/create',         label: 'New Order Created',       variables: ['id','order_number','financial_status','total_price','customer.phone','customer.first_name','line_items[].title','shipping_address.city'] },
-  { id: 'fulfillments/create',   label: 'Fulfillment Created',     variables: ['tracking','customer.phone','customer.first_name'] },
-  { id: 'customers/create',      label: 'New Customer',            variables: ['id','email','first_name','last_name','phone','default_address.city'] },
-  { id: 'checkouts/update',      label: 'Abandoned Checkout',      variables: ['id','abandoned_checkout_url','email','phone','total_price','line_items[].title'] },
-  { id: 'draft_orders/create',   label: 'Draft Order Created',     variables: ['id','name','invoice_url','status','total_price','customer.phone','customer.first_name'] },
+  // ── Orders ──
+  { id: 'orders/paid', label: 'Order Paid', cat: 'Orders', variables: [
+    { key: 'order_number', label: 'Order Number' }, { key: 'id', label: 'Order ID' },
+    { key: 'total_price', label: 'Total Price', type: 'number' }, { key: 'subtotal_price', label: 'Subtotal', type: 'number' },
+    { key: 'total_discounts', label: 'Total Discounts', type: 'number' }, { key: 'total_tax', label: 'Total Tax', type: 'number' },
+    { key: 'currency', label: 'Currency' }, { key: 'financial_status', label: 'Financial Status' },
+    { key: 'fulfillment_status', label: 'Fulfillment Status' }, { key: 'tags', label: 'Order Tags' },
+    { key: 'note', label: 'Order Note' }, { key: 'created_at', label: 'Created At' },
+    { key: 'customer.phone', label: 'Customer Phone' }, { key: 'customer.first_name', label: 'Customer First Name' },
+    { key: 'customer.last_name', label: 'Customer Last Name' }, { key: 'customer.email', label: 'Customer Email' },
+    { key: 'customer.orders_count', label: 'Customer Order Count', type: 'number' },
+    { key: 'customer.total_spent', label: 'Customer Total Spent', type: 'number' },
+    { key: 'customer.tags', label: 'Customer Tags' },
+    { key: 'shipping_address.city', label: 'Shipping City' }, { key: 'shipping_address.province', label: 'Shipping Province' },
+    { key: 'shipping_address.country', label: 'Shipping Country' }, { key: 'shipping_address.zip', label: 'Shipping ZIP' },
+    { key: 'shipping_address.address1', label: 'Shipping Address' },
+    { key: 'billing_address.city', label: 'Billing City' },
+    { key: 'line_items[].title', label: 'Product Titles' }, { key: 'line_items[].quantity', label: 'Item Quantities', type: 'number' },
+    { key: 'line_items[].price', label: 'Item Prices', type: 'number' }, { key: 'line_items[].sku', label: 'Item SKU' },
+    { key: 'discount_codes[].code', label: 'Discount Codes' }, { key: 'payment_gateway_names', label: 'Payment Method' },
+    { key: 'source_name', label: 'Order Source' }, { key: 'landing_site', label: 'Landing Page' },
+    { key: 'referring_site', label: 'Referring Site' },
+  ]},
+  { id: 'orders/create', label: 'New Order Created', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
+  { id: 'orders/updated', label: 'Order Updated', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
+  { id: 'orders/cancelled', label: 'Order Cancelled', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
+  { id: 'orders/fulfilled', label: 'Order Fulfilled', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
+  { id: 'orders/partially_fulfilled', label: 'Order Partially Fulfilled', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
+  { id: 'refunds/create', label: 'Refund Created', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
+  // ── Fulfillments ──
+  { id: 'fulfillments/create', label: 'Fulfillment Created', cat: 'Fulfillments', variables: [
+    { key: 'tracking_number', label: 'Tracking Number' }, { key: 'tracking_url', label: 'Tracking URL' },
+    { key: 'tracking_company', label: 'Shipping Carrier' }, { key: 'status', label: 'Fulfillment Status' },
+    { key: 'order_id', label: 'Order ID' }, { key: 'order.order_number', label: 'Order Number' },
+    { key: 'customer.phone', label: 'Customer Phone' }, { key: 'customer.first_name', label: 'First Name' },
+    { key: 'customer.last_name', label: 'Last Name' }, { key: 'customer.email', label: 'Email' },
+    { key: 'destination.city', label: 'Destination City' }, { key: 'destination.country', label: 'Destination Country' },
+    { key: 'line_items[].title', label: 'Fulfilled Items' }, { key: 'line_items[].quantity', label: 'Fulfilled Qty', type: 'number' },
+  ]},
+  { id: 'fulfillments/update', label: 'Fulfillment Updated', cat: 'Fulfillments', variables: 'SAME_AS:fulfillments/create' },
+  // ── Customers ──
+  { id: 'customers/create', label: 'New Customer', cat: 'Customers', variables: [
+    { key: 'id', label: 'Customer ID' }, { key: 'first_name', label: 'First Name' }, { key: 'last_name', label: 'Last Name' },
+    { key: 'email', label: 'Email' }, { key: 'phone', label: 'Phone' },
+    { key: 'orders_count', label: 'Orders Count', type: 'number' }, { key: 'total_spent', label: 'Total Spent', type: 'number' },
+    { key: 'tags', label: 'Customer Tags' }, { key: 'verified_email', label: 'Email Verified', type: 'boolean' },
+    { key: 'accepts_marketing', label: 'Accepts Marketing', type: 'boolean' },
+    { key: 'default_address.city', label: 'City' }, { key: 'default_address.province', label: 'Province' },
+    { key: 'default_address.country', label: 'Country' }, { key: 'default_address.zip', label: 'ZIP Code' },
+    { key: 'created_at', label: 'Created At' }, { key: 'note', label: 'Customer Note' },
+  ]},
+  { id: 'customers/update', label: 'Customer Updated', cat: 'Customers', variables: 'SAME_AS:customers/create' },
+  // ── Checkouts ──
+  { id: 'checkouts/update', label: 'Abandoned Checkout', cat: 'Checkouts', variables: [
+    { key: 'id', label: 'Checkout ID' }, { key: 'token', label: 'Checkout Token' },
+    { key: 'abandoned_checkout_url', label: 'Recovery URL' },
+    { key: 'total_price', label: 'Total Price', type: 'number' }, { key: 'subtotal_price', label: 'Subtotal', type: 'number' },
+    { key: 'total_discounts', label: 'Total Discounts', type: 'number' },
+    { key: 'email', label: 'Email' }, { key: 'phone', label: 'Phone' },
+    { key: 'customer.first_name', label: 'First Name' }, { key: 'customer.last_name', label: 'Last Name' },
+    { key: 'line_items[].title', label: 'Cart Items' }, { key: 'line_items[].quantity', label: 'Item Qty', type: 'number' },
+    { key: 'line_items[].price', label: 'Item Price', type: 'number' },
+    { key: 'shipping_address.city', label: 'Shipping City' }, { key: 'currency', label: 'Currency' },
+  ]},
+  // ── Draft Orders ──
+  { id: 'draft_orders/create', label: 'Draft Order Created', cat: 'Draft Orders', variables: [
+    { key: 'id', label: 'Draft ID' }, { key: 'name', label: 'Draft Name' },
+    { key: 'invoice_url', label: 'Invoice URL' }, { key: 'status', label: 'Status' },
+    { key: 'total_price', label: 'Total Price', type: 'number' },
+    { key: 'customer.phone', label: 'Customer Phone' }, { key: 'customer.first_name', label: 'First Name' },
+    { key: 'customer.email', label: 'Email' }, { key: 'note', label: 'Note' },
+  ]},
+  { id: 'draft_orders/update', label: 'Draft Order Updated', cat: 'Draft Orders', variables: 'SAME_AS:draft_orders/create' },
+  // ── Products ──
+  { id: 'products/create', label: 'Product Created', cat: 'Products', variables: [
+    { key: 'id', label: 'Product ID' }, { key: 'title', label: 'Product Title' },
+    { key: 'vendor', label: 'Vendor' }, { key: 'product_type', label: 'Product Type' },
+    { key: 'tags', label: 'Product Tags' }, { key: 'status', label: 'Status' },
+    { key: 'variants[].price', label: 'Variant Price', type: 'number' },
+    { key: 'variants[].inventory_quantity', label: 'Inventory Qty', type: 'number' },
+    { key: 'variants[].sku', label: 'Variant SKU' }, { key: 'variants[].title', label: 'Variant Title' },
+  ]},
+  { id: 'products/update', label: 'Product Updated', cat: 'Products', variables: 'SAME_AS:products/create' },
+  { id: 'inventory_levels/update', label: 'Inventory Changed', cat: 'Products', variables: [
+    { key: 'inventory_item_id', label: 'Item ID' }, { key: 'available', label: 'Available Qty', type: 'number' },
+    { key: 'location_id', label: 'Location ID' },
+  ]},
 ];
+
+// Resolve "SAME_AS" references
+SHOPIFY_EVENTS.forEach(ev => {
+  if (typeof ev.variables === 'string' && ev.variables.startsWith('SAME_AS:')) {
+    const ref = ev.variables.replace('SAME_AS:', '');
+    const src = SHOPIFY_EVENTS.find(e => e.id === ref);
+    ev.variables = src ? src.variables : [];
+  }
+});
 
 const WHATSAPP_EVENTS = [
-  { id: 'message',     label: 'Incoming Message',  mode: 'incoming' },
-  { id: 'no_reply',    label: 'No Agent Reply',    mode: 'no_reply' },
-  { id: 'interactive', label: 'Button Clicked',    mode: 'button'   },
+  { id: 'message', label: 'Incoming Message', cat: 'Messages', mode: 'incoming', variables: [
+    { key: 'phone', label: 'Sender Phone' }, { key: 'message_text', label: 'Message Text' },
+    { key: 'message_type', label: 'Message Type' }, { key: 'contact_name', label: 'Contact Name' },
+    { key: 'timestamp', label: 'Timestamp' }, { key: 'is_group', label: 'Is Group Chat', type: 'boolean' },
+  ]},
+  { id: 'no_reply', label: 'No Agent Reply', cat: 'Messages', mode: 'no_reply', variables: [
+    { key: 'phone', label: 'Customer Phone' }, { key: 'contact_name', label: 'Contact Name' },
+    { key: 'minutes_waiting', label: 'Minutes Waiting', type: 'number' },
+    { key: 'last_message_text', label: 'Last Message' }, { key: 'conversation_status', label: 'Conv. Status' },
+  ]},
+  { id: 'interactive', label: 'Button Clicked', cat: 'Interactive', mode: 'button', variables: [
+    { key: 'phone', label: 'Customer Phone' }, { key: 'button_title', label: 'Button Title' },
+    { key: 'button_id', label: 'Button ID' }, { key: 'contact_name', label: 'Contact Name' },
+    { key: 'list_title', label: 'List Selection Title' }, { key: 'list_id', label: 'List Selection ID' },
+  ]},
+  { id: 'first_message', label: 'First-Time Message', cat: 'Messages', mode: 'incoming', variables: [
+    { key: 'phone', label: 'Sender Phone' }, { key: 'message_text', label: 'Message Text' },
+    { key: 'contact_name', label: 'Contact Name' },
+  ]},
+  { id: 'keyword_match', label: 'Keyword Match', cat: 'Messages', mode: 'incoming', variables: [
+    { key: 'phone', label: 'Sender Phone' }, { key: 'message_text', label: 'Message Text' },
+    { key: 'matched_keyword', label: 'Matched Keyword' }, { key: 'contact_name', label: 'Contact Name' },
+  ]},
+  { id: 'media_received', label: 'Media Received', cat: 'Messages', mode: 'incoming', variables: [
+    { key: 'phone', label: 'Sender Phone' }, { key: 'media_type', label: 'Media Type' },
+    { key: 'media_url', label: 'Media URL' }, { key: 'caption', label: 'Caption' },
+    { key: 'contact_name', label: 'Contact Name' },
+  ]},
 ];
 
+const DELIVERY_EVENTS = [
+  { id: 'status_change', label: 'Delivery Status Change', cat: 'Status', variables: [
+    { key: 'order_id', label: 'Order ID' }, { key: 'tracking_number', label: 'Tracking Number' },
+    { key: 'status', label: 'Delivery Status' }, { key: 'previous_status', label: 'Previous Status' },
+    { key: 'customer_phone', label: 'Customer Phone' }, { key: 'customer_name', label: 'Customer Name' },
+    { key: 'city', label: 'Delivery City' }, { key: 'address', label: 'Delivery Address' },
+    { key: 'driver_name', label: 'Driver Name' }, { key: 'driver_phone', label: 'Driver Phone' },
+    { key: 'estimated_delivery', label: 'Estimated Delivery' }, { key: 'total_price', label: 'Order Total', type: 'number' },
+    { key: 'cod_amount', label: 'COD Amount', type: 'number' }, { key: 'delivery_fee', label: 'Delivery Fee', type: 'number' },
+    { key: 'attempt_count', label: 'Attempt Count', type: 'number' }, { key: 'notes', label: 'Delivery Notes' },
+  ]},
+  { id: 'out_for_delivery', label: 'Out for Delivery', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'delivered', label: 'Delivered', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'failed_delivery', label: 'Failed Delivery', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'returned', label: 'Returned to Sender', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'pickup_ready', label: 'Ready for Pickup', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'driver_assigned', label: 'Driver Assigned', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'cod_collected', label: 'COD Collected', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+];
+
+DELIVERY_EVENTS.forEach(ev => {
+  if (typeof ev.variables === 'string' && ev.variables.startsWith('SAME_AS_DEL:')) {
+    const ref = ev.variables.replace('SAME_AS_DEL:', '');
+    const src = DELIVERY_EVENTS.find(e => e.id === ref);
+    ev.variables = src ? src.variables : [];
+  }
+});
+
+/* Helper: get variables for the active trigger */
+function getVariablesForTrigger(source, event) {
+  const all = source === 'shopify' ? SHOPIFY_EVENTS : source === 'whatsapp' ? WHATSAPP_EVENTS : DELIVERY_EVENTS;
+  const ev = all.find(e => e.id === event);
+  const vars = Array.isArray(ev?.variables) ? ev.variables : [];
+  return [...vars, { key: '__custom__', label: '✏️ Custom variable…' }];
+}
+
 const ACTION_CATALOG = [
-  { id: 'send_text',     label: 'Send Text Message',       icon: <MessageSquare className="w-4 h-4 text-blue-500" />,   type: 'send_whatsapp_text' },
-  { id: 'send_template', label: 'Send WhatsApp Template',  icon: <MessageSquare className="w-4 h-4 text-emerald-500" />, type: 'send_whatsapp_template' },
-  { id: 'tag_customer',  label: 'Tag Customer (Shopify)',   icon: <Zap className="w-4 h-4 text-amber-500" />,            type: 'shopify_tag' },
-  { id: 'exit',          label: 'Stop / Exit',              icon: <Ban className="w-4 h-4 text-rose-500" />,             type: 'exit' },
+  { id: 'send_text',         label: 'Send Text Message',       icon: <MessageSquare className="w-4 h-4 text-blue-500" />,   type: 'send_whatsapp_text',     desc: 'Send a plain WhatsApp text with variables' },
+  { id: 'send_template',     label: 'Send WhatsApp Template',  icon: <MessageSquare className="w-4 h-4 text-emerald-500" />, type: 'send_whatsapp_template', desc: 'Send an approved template message' },
+  { id: 'send_buttons',      label: 'Send Button Message',     icon: <MessageSquare className="w-4 h-4 text-indigo-500" />,  type: 'send_buttons',           desc: 'Interactive message with reply buttons' },
+  { id: 'send_image',        label: 'Send Image',              icon: <MessageSquare className="w-4 h-4 text-pink-500" />,    type: 'send_image',             desc: 'Send an image with optional caption' },
+  { id: 'send_audio',        label: 'Send Audio',              icon: <MessageSquare className="w-4 h-4 text-violet-500" />,  type: 'send_audio',             desc: 'Send a voice message or audio file' },
+  { id: 'tag_customer',      label: 'Tag Customer (Shopify)',   icon: <Zap className="w-4 h-4 text-amber-500" />,            type: 'shopify_tag',            desc: 'Add a tag to the Shopify customer' },
+  { id: 'remove_tag',        label: 'Remove Tag (Shopify)',     icon: <Zap className="w-4 h-4 text-orange-500" />,           type: 'shopify_remove_tag',     desc: 'Remove a tag from the Shopify customer' },
+  { id: 'assign_agent',      label: 'Assign to Agent',         icon: <Zap className="w-4 h-4 text-cyan-500" />,             type: 'assign_agent',           desc: 'Route conversation to a specific agent' },
+  { id: 'close_conversation',label: 'Close Conversation',      icon: <Ban className="w-4 h-4 text-slate-500" />,            type: 'close_conversation',     desc: 'Mark conversation as resolved' },
+  { id: 'exit',              label: 'Stop / Exit',              icon: <Ban className="w-4 h-4 text-rose-500" />,             type: 'exit',                   desc: 'End the workflow here' },
 ];
 
 /* ═══════════════════════════════════════════════════════════
@@ -224,6 +381,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   const [addAfterNodeId, setAddAfterNodeId] = useState(null);
 
   const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [nodes, selectedNodeId]);
+  const currentTriggerNode = useMemo(() => nodes.find(n => n.type === 'startTrigger' && n.data?.configured), [nodes]);
 
   const onNodesChange = useCallback((changes) => setNodes(nds => applyNodeChanges(changes, nds)), []);
   const onEdgesChange = useCallback((changes) => setEdges(eds => applyEdgeChanges(changes, eds)), []);
@@ -645,6 +803,8 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
                 onUpdate={(patch) => updateNodeData(selectedNode.id, patch)}
                 onDelete={() => deleteNode(selectedNode.id)}
                 onSelectTrigger={configureTrigger}
+                triggerSource={currentTriggerNode?.data.source}
+                triggerEvent={currentTriggerNode?.data.event}
               />
             )}
           </div>
@@ -659,52 +819,48 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
    ═══════════════════════════════════════════════════════════ */
 
 function TriggerPickerPanel({ onClose, onSelectTrigger }) {
+  const [search, setSearch] = React.useState('');
+  const lc = search.toLowerCase();
+  const filterEv = (ev) => !lc || ev.label.toLowerCase().includes(lc) || ev.id.toLowerCase().includes(lc);
+  const shopifyCats = {};
+  SHOPIFY_EVENTS.filter(filterEv).forEach(ev => { const c = ev.cat || 'Other'; if (!shopifyCats[c]) shopifyCats[c] = []; shopifyCats[c].push(ev); });
   return (
     <>
       <div className="flex items-center justify-between p-4 border-b">
         <h3 className="font-semibold text-slate-800">Select a trigger</h3>
         <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="w-4 h-4" /></button>
       </div>
-      <div className="p-4 space-y-4">
+      <div className="px-4 pt-3 pb-1">
+        <input className="w-full border rounded-lg px-3 py-2 text-sm placeholder-slate-400 focus:ring-2 focus:ring-blue-200 outline-none" placeholder="Search triggers…" value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      <div className="p-4 space-y-4 overflow-y-auto flex-1">
         <div>
           <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><ShoppingCart className="w-3.5 h-3.5" /> Shopify</div>
-          <div className="space-y-1">
-            {SHOPIFY_EVENTS.map(ev => (
-              <button
-                key={ev.id}
-                className="w-full text-left px-3 py-2.5 text-sm rounded-lg hover:bg-emerald-50 hover:text-emerald-700 transition-colors flex items-center gap-2"
-                onClick={() => onSelectTrigger('shopify', ev.id, ev.label)}
-              >
-                <ShoppingCart className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                <span>{ev.label}</span>
-              </button>
-            ))}
-          </div>
+          {Object.entries(shopifyCats).map(([cat, evts]) => (
+            <div key={cat} className="mb-3">
+              <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1 pl-1">{cat}</div>
+              <div className="space-y-0.5">{evts.map(ev => (
+                <button key={ev.id} className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-emerald-50 hover:text-emerald-700 transition-colors flex items-center gap-2" onClick={() => onSelectTrigger('shopify', ev.id, ev.label)}>
+                  <ShoppingCart className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" /><span className="truncate">{ev.label}</span>
+                  <span className="text-[9px] text-slate-300 ml-auto flex-shrink-0">{Array.isArray(ev.variables) ? ev.variables.length : 0} vars</span>
+                </button>))}</div>
+            </div>))}
         </div>
         <div className="border-t pt-4">
           <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><MessageSquare className="w-3.5 h-3.5" /> WhatsApp</div>
-          <div className="space-y-1">
-            {WHATSAPP_EVENTS.map(ev => (
-              <button
-                key={ev.id}
-                className="w-full text-left px-3 py-2.5 text-sm rounded-lg hover:bg-green-50 hover:text-green-700 transition-colors flex items-center gap-2"
-                onClick={() => onSelectTrigger('whatsapp', ev.id, ev.label)}
-              >
-                <MessageSquare className="w-4 h-4 text-green-500 flex-shrink-0" />
-                <span>{ev.label}</span>
-              </button>
-            ))}
-          </div>
+          <div className="space-y-0.5">{WHATSAPP_EVENTS.filter(filterEv).map(ev => (
+            <button key={ev.id} className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-green-50 hover:text-green-700 transition-colors flex items-center gap-2" onClick={() => onSelectTrigger('whatsapp', ev.id, ev.label)}>
+              <MessageSquare className="w-3.5 h-3.5 text-green-500 flex-shrink-0" /><span>{ev.label}</span>
+              <span className="text-[9px] text-slate-300 ml-auto flex-shrink-0">{Array.isArray(ev.variables) ? ev.variables.length : 0} vars</span>
+            </button>))}</div>
         </div>
         <div className="border-t pt-4">
           <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><ScanLine className="w-3.5 h-3.5" /> Delivery</div>
-          <button
-            className="w-full text-left px-3 py-2.5 text-sm rounded-lg hover:bg-sky-50 hover:text-sky-700 transition-colors flex items-center gap-2"
-            onClick={() => onSelectTrigger('delivery', 'status_change', 'Delivery Status Change')}
-          >
-            <ScanLine className="w-4 h-4 text-sky-500 flex-shrink-0" />
-            <span>Status Change</span>
-          </button>
+          <div className="space-y-0.5">{DELIVERY_EVENTS.filter(filterEv).map(ev => (
+            <button key={ev.id} className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-sky-50 hover:text-sky-700 transition-colors flex items-center gap-2" onClick={() => onSelectTrigger('delivery', ev.id, ev.label)}>
+              <ScanLine className="w-3.5 h-3.5 text-sky-500 flex-shrink-0" /><span>{ev.label}</span>
+              <span className="text-[9px] text-slate-300 ml-auto flex-shrink-0">{Array.isArray(ev.variables) ? ev.variables.length : 0} vars</span>
+            </button>))}</div>
         </div>
       </div>
     </>
@@ -718,229 +874,174 @@ function StepPickerPanel({ onClose, onAddStep }) {
         <h3 className="font-semibold text-slate-800">Add a step</h3>
         <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="w-4 h-4" /></button>
       </div>
-      <div className="p-4 space-y-3">
+      <div className="p-4 space-y-3 overflow-y-auto flex-1">
         <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Conditions</div>
-        <button
-          className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-amber-300 hover:bg-amber-50 transition-all flex items-center gap-3 group"
-          onClick={() => onAddStep('condition')}
-        >
+        <button className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-amber-300 hover:bg-amber-50 transition-all flex items-center gap-3 group" onClick={() => onAddStep('condition')}>
           <div className="p-2 rounded-lg bg-amber-50 text-amber-600 group-hover:bg-amber-100"><SplitSquareHorizontal className="w-5 h-5" /></div>
-          <div>
-            <div className="text-sm font-semibold text-slate-700">Condition</div>
-            <div className="text-xs text-slate-400">Check a value before continuing</div>
-          </div>
+          <div><div className="text-sm font-semibold text-slate-700">Condition</div><div className="text-xs text-slate-400">Check a value before continuing</div></div>
         </button>
-
         <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1 mt-4">Actions</div>
         {ACTION_CATALOG.map(a => (
-          <button
-            key={a.id}
-            className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-blue-300 hover:bg-blue-50 transition-all flex items-center gap-3 group"
-            onClick={() => onAddStep('action', { type: a.type })}
-          >
+          <button key={a.id} className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-blue-300 hover:bg-blue-50 transition-all flex items-center gap-3 group" onClick={() => onAddStep('action', { type: a.type })}>
             <div className="p-2 rounded-lg bg-blue-50 text-blue-600 group-hover:bg-blue-100">{a.icon}</div>
-            <div>
-              <div className="text-sm font-semibold text-slate-700">{a.label}</div>
-            </div>
+            <div className="min-w-0"><div className="text-sm font-semibold text-slate-700">{a.label}</div>{a.desc && <div className="text-xs text-slate-400 truncate">{a.desc}</div>}</div>
           </button>
         ))}
-
         <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1 mt-4">Timing</div>
-        <button
-          className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-violet-300 hover:bg-violet-50 transition-all flex items-center gap-3 group"
-          onClick={() => onAddStep('delay')}
-        >
+        <button className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-violet-300 hover:bg-violet-50 transition-all flex items-center gap-3 group" onClick={() => onAddStep('delay')}>
           <div className="p-2 rounded-lg bg-violet-50 text-violet-600 group-hover:bg-violet-100"><Timer className="w-5 h-5" /></div>
-          <div>
-            <div className="text-sm font-semibold text-slate-700">Delay</div>
-            <div className="text-xs text-slate-400">Wait before the next step</div>
-          </div>
+          <div><div className="text-sm font-semibold text-slate-700">Delay</div><div className="text-xs text-slate-400">Wait before the next step</div></div>
         </button>
       </div>
     </>
   );
 }
 
-function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelectTrigger }) {
+function VariableInsertRow({ variables, onInsert }) {
+  if (!variables || !variables.length) return null;
+  return (
+    <div className="mt-2">
+      <div className="text-[10px] font-semibold text-slate-400 mb-1">Click to insert variable:</div>
+      <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+        {variables.filter(v => v.key !== '__custom__').map(v => (
+          <button key={v.key} type="button" className="px-2 py-0.5 rounded text-[10px] bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors border border-blue-100 font-mono" onClick={() => onInsert(`{{ ${v.key} }}`)} title={v.label}>{v.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelectTrigger, triggerSource, triggerEvent }) {
   const d = node.data || {};
   const t = node.type;
+  const [customField, setCustomField] = React.useState('');
+  const trigVars = React.useMemo(() => getVariablesForTrigger(triggerSource, triggerEvent), [triggerSource, triggerEvent]);
+  const insertVar = (v) => { const cur = d.text || ''; onUpdate({ text: cur + v, description: (cur + v).slice(0, 50) }); };
 
   return (
     <>
       <div className="flex items-center justify-between p-4 border-b">
-        <h3 className="font-semibold text-slate-800">
-          {t === 'startTrigger' ? 'Edit Trigger' : t === 'conditionFlow' ? 'Edit Condition' : t === 'delayFlow' ? 'Edit Delay' : 'Edit Action'}
-        </h3>
+        <h3 className="font-semibold text-slate-800">{t === 'startTrigger' ? 'Edit Trigger' : t === 'conditionFlow' ? 'Edit Condition' : t === 'delayFlow' ? 'Edit Delay' : 'Edit Action'}</h3>
         <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="w-4 h-4" /></button>
       </div>
       <div className="p-4 space-y-4 flex-1 overflow-y-auto">
-        {t === 'startTrigger' && (
-          <>
-            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm">
-              <div className="font-semibold text-emerald-800 mb-1">Current trigger</div>
-              <div className="text-emerald-600">{d.source}: {d.event || d.label}</div>
+        {t === 'startTrigger' && (<>
+          <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm">
+            <div className="font-semibold text-emerald-800 mb-1">Current trigger</div>
+            <div className="text-emerald-600">{d.source}: {d.event || d.label}</div>
+          </div>
+          <button className="w-full px-4 py-2.5 rounded-lg border border-slate-200 text-sm hover:bg-slate-50" onClick={() => onSelectTrigger && onSelectTrigger(d.source, d.event, d.label)}>Change trigger…</button>
+          <div>
+            <div className="text-xs font-semibold text-slate-500 mb-1">Available variables ({trigVars.filter(v => v.key !== '__custom__').length}):</div>
+            <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
+              {trigVars.filter(v => v.key !== '__custom__').map(v => (
+                <span key={v.key} className="px-2 py-0.5 rounded text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-100 font-mono" title={`{{ ${v.key} }}`}>{v.label}</span>
+              ))}
             </div>
-            <button
-              className="w-full px-4 py-2.5 rounded-lg border border-slate-200 text-sm hover:bg-slate-50 transition-colors"
-              onClick={() => onSelectTrigger && onSelectTrigger(d.source, d.event, d.label)} // Re-open trigger picker
-            >
-              Change trigger…
-            </button>
-          </>
-        )}
+          </div>
+        </>)}
 
-        {t === 'conditionFlow' && (
-          <>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Variable to check</label>
-              <input
-                className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-200 focus:border-blue-400 outline-none"
-                value={d.field || ''}
-                onChange={(e) => {
-                  const f = e.target.value;
-                  onUpdate({ field: f, expression: `${f} ${d.operator || '=='} ${d.value || ''}` });
-                }}
-                placeholder="e.g. total_price, customer.phone"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs font-semibold text-slate-500 mb-1 block">Operator</label>
-                <select
-                  className="w-full border rounded-lg px-3 py-2 text-sm"
-                  value={d.operator || '=='}
-                  onChange={(e) => {
-                    const op = e.target.value;
-                    onUpdate({ operator: op, expression: `${d.field || ''} ${op} ${d.value || ''}` });
-                  }}
-                >
-                  <option value="==">equals</option>
-                  <option value="!=">not equals</option>
-                  <option value=">">greater than</option>
-                  <option value=">=">greater or equal</option>
-                  <option value="<">less than</option>
-                  <option value="<=">less or equal</option>
-                  <option value="contains">contains</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-500 mb-1 block">Value</label>
-                <input
-                  className="w-full border rounded-lg px-3 py-2 text-sm"
-                  value={d.value || ''}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    onUpdate({ value: v, expression: `${d.field || ''} ${d.operator || '=='} ${v}` });
-                  }}
-                  placeholder="e.g. 150"
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs font-semibold text-slate-500 mb-1 block">True label</label>
-                <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.trueLabel || ''} onChange={(e) => onUpdate({ trueLabel: e.target.value })} />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-500 mb-1 block">False label</label>
-                <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.falseLabel || ''} onChange={(e) => onUpdate({ falseLabel: e.target.value })} />
-              </div>
-            </div>
-            {d.expression && (
-              <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
-                <span className="font-semibold">Plain English:</span> Check if <span className="font-mono">{d.field}</span> {d.operator} <span className="font-mono">{d.value}</span>
-              </div>
+        {t === 'conditionFlow' && (<>
+          <div>
+            <label className="text-xs font-semibold text-slate-500 mb-1 block">Variable to check</label>
+            <select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={d.field || ''} onChange={(e) => {
+              const f = e.target.value;
+              if (f === '__custom__') { setCustomField(''); onUpdate({ field: '' }); return; }
+              const vDef = trigVars.find(v => v.key === f);
+              onUpdate({ field: f, fieldLabel: vDef?.label || f, expression: `${vDef?.label || f} ${d.operator || '=='} ${d.value || ''}` });
+            }}>
+              <option value="">— Select a variable —</option>
+              {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
+            </select>
+            {(d.field === '__custom__' || customField !== '') && (
+              <input className="w-full border rounded-lg px-3 py-2 text-sm mt-2" placeholder="Custom variable key…" value={customField} onChange={(e) => { setCustomField(e.target.value); onUpdate({ field: e.target.value, fieldLabel: e.target.value, expression: `${e.target.value} ${d.operator || '=='} ${d.value || ''}` }); }} />
             )}
-          </>
-        )}
-
-        {t === 'actionFlow' && (
-          <>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Action type</label>
-              <select
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                value={d.actionType || 'send_whatsapp_text'}
-                onChange={(e) => {
-                  const at = e.target.value;
-                  const cat = ACTION_CATALOG.find(a => a.type === at) || ACTION_CATALOG[0];
-                  onUpdate({ actionType: at, actionLabel: cat.label });
-                }}
-              >
-                {ACTION_CATALOG.map(a => (
-                  <option key={a.id} value={a.type}>{a.label}</option>
-                ))}
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Operator</label>
+              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.operator || '=='} onChange={(e) => onUpdate({ operator: e.target.value, expression: `${d.fieldLabel || d.field || ''} ${e.target.value} ${d.value || ''}` })}>
+                <option value="==">equals</option><option value="!=">not equals</option>
+                <option value=">">greater than</option><option value=">=">greater or equal</option>
+                <option value="<">less than</option><option value="<=">less or equal</option>
+                <option value="contains">contains</option><option value="not_contains">does not contain</option>
+                <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
+                <option value="is_empty">is empty</option><option value="is_not_empty">is not empty</option>
+                <option value="matches">regex matches</option>
               </select>
             </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Value</label>
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.value || ''} onChange={(e) => onUpdate({ value: e.target.value, expression: `${d.fieldLabel || d.field || ''} ${d.operator || '=='} ${e.target.value}` })} placeholder="e.g. 150, VIP, Casablanca" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">True label</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.trueLabel || ''} onChange={(e) => onUpdate({ trueLabel: e.target.value })} /></div>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">False label</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.falseLabel || ''} onChange={(e) => onUpdate({ falseLabel: e.target.value })} /></div>
+          </div>
+          {d.expression && (
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
+              <span className="font-semibold">Summary:</span> If <span className="font-mono font-semibold">{d.fieldLabel || d.field}</span> {d.operator} <span className="font-mono font-semibold">{d.value}</span>
+            </div>
+          )}
+        </>)}
 
-            {(d.actionType === 'send_whatsapp_text') && (
-              <div>
-                <label className="text-xs font-semibold text-slate-500 mb-1 block">Message text</label>
-                <textarea
-                  className="w-full border rounded-lg px-3 py-2 text-sm h-28 resize-none"
-                  value={d.text || ''}
-                  onChange={(e) => onUpdate({ text: e.target.value, description: e.target.value.slice(0, 50) + (e.target.value.length > 50 ? '…' : '') })}
-                  placeholder="Type your message… Use {{ variable }} for dynamic values"
-                />
-                <div className="text-[10px] text-slate-400 mt-1">Variables: {'{{ phone }}'}, {'{{ order_number }}'}, {'{{ total_price }}'}, {'{{ customer.first_name }}'}</div>
-              </div>
-            )}
-
-            {(d.actionType === 'send_whatsapp_template') && (
-              <>
-                <div>
-                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Template name</label>
-                  <select
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                    value={d.templateName || ''}
-                    onChange={(e) => onUpdate({ templateName: e.target.value, description: `Template: ${e.target.value}` })}
-                  >
-                    <option value="">Select a template…</option>
-                    {(templates || []).filter(t => String(t.status || '').toLowerCase() === 'approved').map(t => (
-                      <option key={t.name} value={t.name}>{t.name} ({t.language})</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Language</label>
-                  <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateLanguage || 'en'} onChange={(e) => onUpdate({ templateLanguage: e.target.value })} />
-                </div>
-              </>
-            )}
-
-            {(d.actionType === 'shopify_tag') && (
-              <div>
-                <label className="text-xs font-semibold text-slate-500 mb-1 block">Tag to add</label>
-                <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.tag || ''} onChange={(e) => onUpdate({ tag: e.target.value, description: `Tag: ${e.target.value}` })} placeholder="e.g. VIP" />
-              </div>
-            )}
-          </>
-        )}
+        {t === 'actionFlow' && (<>
+          <div>
+            <label className="text-xs font-semibold text-slate-500 mb-1 block">Action type</label>
+            <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.actionType || 'send_whatsapp_text'} onChange={(e) => { const cat = ACTION_CATALOG.find(a => a.type === e.target.value) || ACTION_CATALOG[0]; onUpdate({ actionType: e.target.value, actionLabel: cat.label }); }}>
+              {ACTION_CATALOG.map(a => (<option key={a.id} value={a.type}>{a.label}</option>))}
+            </select>
+          </div>
+          {d.actionType === 'send_whatsapp_text' && (
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Message text</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-28 resize-none" value={d.text || ''} onChange={(e) => onUpdate({ text: e.target.value, description: e.target.value.slice(0, 50) + (e.target.value.length > 50 ? '…' : '') })} placeholder="Type your message… Click variables below to insert" />
+              <VariableInsertRow variables={trigVars} onInsert={insertVar} />
+            </div>
+          )}
+          {d.actionType === 'send_whatsapp_template' && (<>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Template</label>
+              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateName || ''} onChange={(e) => onUpdate({ templateName: e.target.value, description: `Template: ${e.target.value}` })}>
+                <option value="">Select a template…</option>
+                {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (<option key={tp.name} value={tp.name}>{tp.name} ({tp.language})</option>))}
+              </select>
+            </div>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Language</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateLanguage || 'en'} onChange={(e) => onUpdate({ templateLanguage: e.target.value })} /></div>
+          </>)}
+          {d.actionType === 'send_buttons' && (<>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.buttonsText || ''} onChange={(e) => onUpdate({ buttonsText: e.target.value, description: 'Buttons: ' + e.target.value.slice(0, 30) })} placeholder="Message body…" />
+              <VariableInsertRow variables={trigVars} onInsert={(v) => onUpdate({ buttonsText: (d.buttonsText || '') + v })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Buttons (one per line)</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none font-mono" value={d.buttonsLines || ''} onChange={(e) => onUpdate({ buttonsLines: e.target.value })} placeholder={"Confirm ✅\nChange order\nTalk to agent"} />
+            </div>
+          </>)}
+          {d.actionType === 'send_image' && (<>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Image URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.imageUrl || ''} onChange={(e) => onUpdate({ imageUrl: e.target.value, description: 'Image' })} placeholder="https://…" /></div>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label><textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.caption || ''} onChange={(e) => onUpdate({ caption: e.target.value })} /><VariableInsertRow variables={trigVars} onInsert={(v) => onUpdate({ caption: (d.caption || '') + v })} /></div>
+          </>)}
+          {d.actionType === 'send_audio' && (
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Audio URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.audioUrl || ''} onChange={(e) => onUpdate({ audioUrl: e.target.value, description: 'Audio' })} placeholder="https://…" /></div>
+          )}
+          {(d.actionType === 'shopify_tag' || d.actionType === 'shopify_remove_tag') && (
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">{d.actionType === 'shopify_remove_tag' ? 'Tag to remove' : 'Tag to add'}</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.tag || ''} onChange={(e) => onUpdate({ tag: e.target.value, description: `Tag: ${e.target.value}` })} placeholder="e.g. VIP, confirmed" /></div>
+          )}
+          {d.actionType === 'assign_agent' && (
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Agent name</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.agent || ''} onChange={(e) => onUpdate({ agent: e.target.value, description: `Assign: ${e.target.value}` })} placeholder="e.g. support-team" /></div>
+          )}
+        </>)}
 
         {t === 'delayFlow' && (
-          <div>
-            <label className="text-xs font-semibold text-slate-500 mb-1 block">Wait (minutes)</label>
-            <input
-              type="number"
-              className="w-full border rounded-lg px-3 py-2 text-sm"
-              value={d.minutes || 10}
-              min={1}
-              onChange={(e) => onUpdate({ minutes: Math.max(1, Number(e.target.value) || 1) })}
-            />
-          </div>
+          <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Wait (minutes)</label><input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" value={d.minutes || 10} min={1} onChange={(e) => onUpdate({ minutes: Math.max(1, Number(e.target.value) || 1) })} /></div>
         )}
       </div>
-
-      {/* Delete button */}
       {t !== 'startTrigger' && (
-        <div className="p-4 border-t">
-          <button
-            className="w-full px-4 py-2.5 rounded-lg text-sm font-medium text-rose-600 border border-rose-200 hover:bg-rose-50 transition-colors flex items-center justify-center gap-2"
-            onClick={onDelete}
-          >
-            <Trash2 className="w-4 h-4" /> Delete this step
-          </button>
-        </div>
+        <div className="p-4 border-t"><button className="w-full px-4 py-2.5 rounded-lg text-sm font-medium text-rose-600 border border-rose-200 hover:bg-rose-50 transition-colors flex items-center justify-center gap-2" onClick={onDelete}><Trash2 className="w-4 h-4" /> Delete this step</button></div>
       )}
     </>
   );

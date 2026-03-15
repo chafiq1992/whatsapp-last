@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import api from './api';
 import AnalyticsPanel from './AnalyticsPanel';
 import AutomationStudio from './AutomationStudio';
+import FlowBuilder from './components/FlowBuilder/FlowBuilder';
 import CustomersSegmentsPage from './CustomersSegmentsPage';
 import WhatsAppTemplatesPanel from './WhatsAppTemplatesPanel';
 import UsersTagsAdminPanel from './UsersTagsAdminPanel';
@@ -667,7 +668,7 @@ export default function AutomationSettingsPage() {
 
         {!loading && activeTab === 'flows' && (
           <div className="h-full w-full bg-white overflow-hidden">
-            <AutomationStudio embedded defaultMode="canvas" />
+            <FlowBuilder />
           </div>
         )}
 

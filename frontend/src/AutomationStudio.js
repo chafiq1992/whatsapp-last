@@ -347,10 +347,10 @@ function makeEdge(from, fromPort, to, toPort) {
   return { id: nextId(), from, fromPort, to, toPort };
 }
 
-export default function AutomationStudio({ onClose, embedded = false }) {
+export default function AutomationStudio({ onClose, embedded = false, defaultMode = "simple" }) {
   // Simple mode: real rules persisted in backend and executed on inbound WhatsApp messages.
   // Settings are now in a dedicated page (/#/automation-settings).
-  const [mode, setMode] = useState("simple"); // simple | templates | canvas
+  const [mode, setMode] = useState(defaultMode); // simple | templates | canvas
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesSaving, setRulesSaving] = useState(false);

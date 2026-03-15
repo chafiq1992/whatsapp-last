@@ -6,7 +6,7 @@ import CustomersSegmentsPage from './CustomersSegmentsPage';
 import WhatsAppTemplatesPanel from './WhatsAppTemplatesPanel';
 import UsersTagsAdminPanel from './UsersTagsAdminPanel';
 import ShopifyConnectPanel from './ShopifyConnectPanel';
-import { BarChart3, Bot, MessageSquareText, Users, Settings as SettingsIcon, BookOpen, Home, UserCog, Tag } from 'lucide-react';
+import { BarChart3, Bot, GitBranch, MessageSquareText, Users, Settings as SettingsIcon, BookOpen, Home, UserCog, Tag } from 'lucide-react';
 
 function normalizeWorkspaceId(v) {
   try {
@@ -503,6 +503,7 @@ export default function AutomationSettingsPage() {
       // Prefer /settings/<tab>
       if (key.includes('/settings/analytics') || key.includes('/#/settings/analytics')) return 'analytics';
       if (key.includes('/settings/automation') || key.includes('/#/settings/automation') || key.includes('/automation-studio')) return 'automation';
+      if (key.includes('/settings/flows') || key.includes('/#/settings/flows')) return 'flows';
       if (key.includes('/settings/templates') || key.includes('/#/settings/templates') || key.includes('/whatsapp-templates')) return 'templates';
       if (key.includes('/settings/customers') || key.includes('/#/settings/customers') || key.includes('/customers')) return 'customers';
       if (key.includes('/settings/users') || key.includes('/#/settings/users') || key.includes('/settings/tags') || key.includes('/#/settings/tags') || key.includes('/settings/users-tags') || key.includes('/#/settings/users-tags')) return 'users_tags';
@@ -578,6 +579,12 @@ export default function AutomationSettingsPage() {
               <span className="inline-flex items-center gap-2"><Bot className="w-4 h-4" />Automation</span>
             </button>
             <button
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'flows' ? 'bg-rose-400/20 border border-rose-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('flows')}
+            >
+              <span className="inline-flex items-center gap-2"><GitBranch className="w-4 h-4" />Flows</span>
+            </button>
+            <button
               className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'templates' ? 'bg-sky-400/20 border border-sky-300/20' : 'hover:bg-white/10'}`}
               onClick={() => goTab('templates')}
             >
@@ -640,9 +647,9 @@ export default function AutomationSettingsPage() {
         </div>
       </header>
 
-      <div className={activeTab === 'automation' ? "w-full h-[calc(100vh-3.5rem)]" : "p-4 max-w-6xl mx-auto"}>
-        {activeTab !== 'automation' && error && <div className="mb-3 p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{error}</div>}
-        {activeTab !== 'automation' && loading && <div className="text-sm text-slate-500">Loading…</div>}
+      <div className={activeTab === 'automation' || activeTab === 'flows' ? "w-full h-[calc(100vh-3.5rem)]" : "p-4 max-w-6xl mx-auto"}>
+        {activeTab !== 'automation' && activeTab !== 'flows' && error && <div className="mb-3 p-2 rounded border border-rose-200 bg-rose-50 text-rose-700 text-sm">{error}</div>}
+        {activeTab !== 'automation' && activeTab !== 'flows' && loading && <div className="text-sm text-slate-500">Loading…</div>}
 
         {!loading && activeTab === 'analytics' && (
           <div className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur shadow-sm">
@@ -655,6 +662,12 @@ export default function AutomationSettingsPage() {
         {!loading && activeTab === 'automation' && (
           <div className="h-full w-full bg-white overflow-hidden">
             <AutomationStudio embedded />
+          </div>
+        )}
+
+        {!loading && activeTab === 'flows' && (
+          <div className="h-full w-full bg-white overflow-hidden">
+            <AutomationStudio embedded defaultMode="canvas" />
           </div>
         )}
 

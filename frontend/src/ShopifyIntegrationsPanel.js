@@ -927,6 +927,11 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
           <span className="flex items-center"><FaShopify className="mr-2 text-green-400" />Contact Information</span>
           <span>{showInfo ? "▲" : "▼"}</span>
         </button>
+        {activeUser?.name && String(activeUser.name).trim() && String(activeUser.name).trim() !== String(activeUser?.user_id || '') && (
+          <div className="bg-gray-800 px-4 py-1.5 text-sm text-gray-200 border-t border-gray-700 flex items-center gap-2">
+            <span className="font-semibold text-white">{String(activeUser.name).trim()}</span>
+          </div>
+        )}
         {showInfo && (
           <div className="bg-gray-700 p-4 space-y-2 rounded-b shadow-inner">
             {!activeUser?.phone && (

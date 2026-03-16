@@ -10,7 +10,7 @@ import React, {
 import api from './api';
 import { FixedSizeList as List } from "react-window";
 import { FiSearch, FiMail, FiMessageSquare, FiUserCheck, FiUser, FiTag } from 'react-icons/fi';
-import { Clock3, Check, CheckCheck, XCircle } from 'lucide-react';
+import { Clock3, Check, CheckCheck, XCircle, ArrowUpDown } from 'lucide-react';
 
 // Consistent timezone and date helpers shared with ChatWindow
 const CHAT_TZ = 'Africa/Casablanca';
@@ -105,6 +105,7 @@ function ChatList({
   const [needsReplyOnly, setNeedsReplyOnly] = useState(false);
   const [showUnread24hOnly, setShowUnread24hOnly] = useState(false);
   const [showNeedsReply24hOnly, setShowNeedsReply24hOnly] = useState(false);
+  const [olderFirst, setOlderFirst] = useState(false);
   const activeUserRef = useRef(activeUser);
   const containerRef = useRef(null);
   const [listHeight, setListHeight] = useState(0);
@@ -295,9 +296,12 @@ function ChatList({
       const archiveOK = showArchive ? isDone : !isDone;
       return matches && unreadOK && assignedOK && tagsOK && needsReplyOK && unread24hOK && unresponded24hOK && archiveOK;
     });
-    // Sort by most recent activity (desc), using normalized parsing
-    return filtered.sort((a, b) => toMsNormalized(b.last_message_time) - toMsNormalized(a.last_message_time));
-  }, [conversations, search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showUnread24hOnly, showNeedsReply24hOnly, showArchive]);
+    // Sort by most recent activity (desc by default), using normalized parsing
+    return filtered.sort((a, b) => olderFirst
+      ? toMsNormalized(a.last_message_time) - toMsNormalized(b.last_message_time)
+      : toMsNormalized(b.last_message_time) - toMsNormalized(a.last_message_time)
+    );
+  }, [conversations, search, showUnreadOnly, assignedFilter, tagFilters, needsReplyOnly, showUnread24hOnly, showNeedsReply24hOnly, showArchive, olderFirst]);
 
   const inbox24hStats = useMemo(() => {
     const list = Array.isArray(conversations) ? conversations : [];
@@ -575,6 +579,19 @@ function ChatList({
             }`}>
               {inbox24hStats.unresponded24hConversations}
             </span>
+          </button>
+          <button
+            type="button"
+            className={`px-2 py-1 rounded-full text-xs border transition-all duration-200 inline-flex items-center gap-1.5 shadow-sm ${
+              olderFirst
+                ? 'bg-gradient-to-r from-purple-600 to-indigo-500 text-white border-purple-400/80 ring-1 ring-purple-300/40'
+                : 'bg-purple-900/30 text-purple-200 border-purple-700/80 hover:bg-purple-800/45'
+            }`}
+            onClick={() => setOlderFirst(v => !v)}
+            title="Show oldest conversations first"
+          >
+            <ArrowUpDown size={13} className="opacity-90" />
+            <span>Older first</span>
           </button>
         </div>
         {tagFilters.length > 0 && (

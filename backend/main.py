@@ -5713,6 +5713,7 @@ class MessageProcessor:
                     # survives server restarts / new instances).  Without this flag
                     # an empty v2 list would fall through to v1 migration every time,
                     # resurrecting deleted rules.  Also check tenant DB backup.
+                    # FIX: also check the "ever_saved" flag set by POST /automation/rules.
                     try:
                         _mig_flag = await auth_db_manager.get_setting("automation_rules_v2_migrated")
                         _already_migrated = bool(str(_mig_flag or "").strip())
@@ -5720,13 +5721,27 @@ class MessageProcessor:
                             _mig_flag = await self._tenant_backup_get("automation_rules_v2_migrated")
                             _already_migrated = bool(str(_mig_flag or "").strip())
                     except Exception:
-                        _already_migrated = False
+                        # DEFENSIVE: if we can't read the flag, assume already migrated.
+                        # Re-migrating from stale v1 data is far worse than skipping a first-time migration.
+                        _already_migrated = True
+                    # Also check if rules were ever saved via the UI (durable guard against re-migration).
+                    if not _already_migrated:
+                        try:
+                            _es = await auth_db_manager.get_setting("automation_rules_v2_ever_saved")
+                            if not bool(str(_es or "").strip()):
+                                _es = await self._tenant_backup_get("automation_rules_v2_ever_saved")
+                            _already_migrated = bool(str(_es or "").strip())
+                        except Exception:
+                            _already_migrated = True
 
                     if len(data) > 0 or _already_migrated:
                         _AUTOMATION_RULES_V2_INIT_DONE = True
                         return data
             except Exception:
-                pass
+                # DEFENSIVE: if the entire v2 load block failed, do NOT silently fall through
+                # to v1 migration. Only allow migration if we can confirm it hasn't run.
+                _AUTOMATION_RULES_V2_INIT_DONE = True
+                return []
 
             # 2) Migrate from per-workspace v1 store: tenant DB setting "automation_rules"
             merged: dict[str, dict] = {}
@@ -12747,6 +12762,25 @@ async def set_automation_rules_endpoint(request: Request, payload: dict = Body(.
 
     await auth_db_manager.set_setting("automation_rules_v2", next_all)
     await message_processor._tenant_backup_set("automation_rules_v2", next_all)
+    # Set durable "ever saved" flag so v1 migration never re-runs after a user save.
+    _ever_saved_val = {"ts": datetime.utcnow().isoformat()}
+    try:
+        await auth_db_manager.set_setting("automation_rules_v2_ever_saved", _ever_saved_val)
+    except Exception:
+        pass
+    try:
+        await message_processor._tenant_backup_set("automation_rules_v2_ever_saved", _ever_saved_val)
+    except Exception:
+        pass
+    # Also ensure migrated flag is set (belt-and-suspenders).
+    try:
+        await auth_db_manager.set_setting("automation_rules_v2_migrated", _ever_saved_val)
+    except Exception:
+        pass
+    try:
+        await message_processor._tenant_backup_set("automation_rules_v2_migrated", _ever_saved_val)
+    except Exception:
+        pass
     # Bust caches for immediate effect in webhook-triggered tasks
     try:
         message_processor._automation_rules_cache.clear()

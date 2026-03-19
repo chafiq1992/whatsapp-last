@@ -5529,6 +5529,21 @@ class MessageProcessor:
                         return data
                     raw = await self._tenant_backup_get("automation_rules_v2")
                     data = json.loads(raw) if raw else []
+                    if isinstance(data, list) and len(data) > 0:
+                        return data
+                    # Both DBs returned empty — check if rules were ever saved.
+                    # If so, this is likely a transient DB issue; reset the init flag
+                    # so the next call does a full re-read instead of returning [] permanently.
+                    try:
+                        _es = await auth_db_manager.get_setting("automation_rules_v2_ever_saved")
+                        if not bool(str(_es or "").strip()):
+                            _es = await self._tenant_backup_get("automation_rules_v2_ever_saved")
+                        if bool(str(_es or "").strip()):
+                            # Rules were saved before but both DBs are empty now (transient issue).
+                            # Reset so the next call retries the full init path.
+                            _AUTOMATION_RULES_V2_INIT_DONE = False
+                    except Exception:
+                        pass
                     return data if isinstance(data, list) else []
                 except Exception:
                     try:

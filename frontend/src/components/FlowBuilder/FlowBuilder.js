@@ -12,6 +12,7 @@ import {
   SplitSquareHorizontal, Timer, Ban,
   ChevronRight, X,
 } from 'lucide-react';
+import EmojiPicker from 'emoji-picker-react';
 
 /* ═══════════════════════════════════════════════════════════
    Rich Trigger / Action / Condition catalogs
@@ -25,7 +26,7 @@ const SHOPIFY_EVENTS = [
     { key: 'total_discounts', label: 'Total Discounts', type: 'number' }, { key: 'total_tax', label: 'Total Tax', type: 'number' },
     { key: 'currency', label: 'Currency' }, { key: 'financial_status', label: 'Financial Status' },
     { key: 'fulfillment_status', label: 'Fulfillment Status' }, { key: 'tags', label: 'Order Tags' },
-    { key: 'note', label: 'Order Note' }, { key: 'created_at', label: 'Created At' },
+    { key: 'note', label: 'Order Note' }, { key: 'created_at', label: 'Created At' }, { key: 'note_attributes', label: 'Note Attributes' },
     { key: 'customer.phone', label: 'Customer Phone' }, { key: 'customer.first_name', label: 'Customer First Name' },
     { key: 'customer.last_name', label: 'Customer Last Name' }, { key: 'customer.email', label: 'Customer Email' },
     { key: 'customer.orders_count', label: 'Customer Order Count', type: 'number' },
@@ -33,11 +34,13 @@ const SHOPIFY_EVENTS = [
     { key: 'customer.tags', label: 'Customer Tags' },
     { key: 'shipping_address.city', label: 'Shipping City' }, { key: 'shipping_address.province', label: 'Shipping Province' },
     { key: 'shipping_address.country', label: 'Shipping Country' }, { key: 'shipping_address.zip', label: 'Shipping ZIP' },
-    { key: 'shipping_address.address1', label: 'Shipping Address' },
+    { key: 'shipping_address.address1', label: 'Shipping Address' }, { key: 'shipping_address.phone', label: 'Shipping Phone' },
     { key: 'billing_address.city', label: 'Billing City' },
     { key: 'line_items[].title', label: 'Product Titles' }, { key: 'line_items[].quantity', label: 'Item Quantities', type: 'number' },
     { key: 'line_items[].price', label: 'Item Prices', type: 'number' }, { key: 'line_items[].sku', label: 'Item SKU' },
-    { key: 'discount_codes[].code', label: 'Discount Codes' }, { key: 'payment_gateway_names', label: 'Payment Method' },
+    { key: 'line_items[].grams', label: 'Item Weight (g)', type: 'number' }, { key: 'line_items[].vendor', label: 'Item Vendor' },
+    { key: 'discount_codes[].code', label: 'Discount Codes' }, { key: 'discount_applications', label: 'Discount Applications' },
+    { key: 'payment_gateway_names', label: 'Payment Method' },
     { key: 'source_name', label: 'Order Source' }, { key: 'landing_site', label: 'Landing Page' },
     { key: 'referring_site', label: 'Referring Site' },
   ]},
@@ -149,14 +152,15 @@ const WHATSAPP_EVENTS = [
 
 const DELIVERY_EVENTS = [
   { id: 'status_change', label: 'Delivery Status Change', cat: 'Status', variables: [
-    { key: 'order_id', label: 'Order ID' }, { key: 'tracking_number', label: 'Tracking Number' },
+    { key: 'order_id', label: 'Order ID' }, { key: 'tracking_number', label: 'Tracking Number' }, { key: 'tracking_url', label: 'Tracking URL' },
     { key: 'status', label: 'Delivery Status' }, { key: 'previous_status', label: 'Previous Status' },
     { key: 'customer_phone', label: 'Customer Phone' }, { key: 'customer_name', label: 'Customer Name' },
-    { key: 'city', label: 'Delivery City' }, { key: 'address', label: 'Delivery Address' },
+    { key: 'city', label: 'Delivery City' }, { key: 'address', label: 'Delivery Address' }, { key: 'shipping_zone', label: 'Shipping Zone' },
     { key: 'driver_name', label: 'Driver Name' }, { key: 'driver_phone', label: 'Driver Phone' },
     { key: 'estimated_delivery', label: 'Estimated Delivery' }, { key: 'total_price', label: 'Order Total', type: 'number' },
     { key: 'cod_amount', label: 'COD Amount', type: 'number' }, { key: 'delivery_fee', label: 'Delivery Fee', type: 'number' },
     { key: 'attempt_count', label: 'Attempt Count', type: 'number' }, { key: 'notes', label: 'Delivery Notes' },
+    { key: 'warehouse', label: 'Warehouse / Hub' }, { key: 'delivery_company', label: 'Delivery Company' },
   ]},
   { id: 'out_for_delivery', label: 'Out for Delivery', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
   { id: 'delivered', label: 'Delivered', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
@@ -174,6 +178,11 @@ DELIVERY_EVENTS.forEach(ev => {
     ev.variables = src ? src.variables : [];
   }
 });
+
+const ALL_SHOPIFY_VARS = Array.from(new Map(SHOPIFY_EVENTS.flatMap(e => Array.isArray(e.variables) ? e.variables : []).map(v => [v.key, v])).values());
+const ALL_DELIVERY_VARS = Array.from(new Map(DELIVERY_EVENTS.flatMap(e => Array.isArray(e.variables) ? e.variables : []).map(v => [v.key, v])).values());
+const ALL_WHATSAPP_VARS = Array.from(new Map(WHATSAPP_EVENTS.flatMap(e => Array.isArray(e.variables) ? e.variables : []).map(v => [v.key, v])).values());
+
 
 /* Helper: get variables for the active trigger */
 function getVariablesForTrigger(source, event) {
@@ -897,16 +906,50 @@ function StepPickerPanel({ onClose, onAddStep }) {
   );
 }
 
-function VariableInsertRow({ variables, onInsert }) {
-  if (!variables || !variables.length) return null;
+function PlatformVariableSelector({ onInsert }) {
+  const [activeTab, setActiveTab] = React.useState('shopify');
+  const [copied, setCopied] = React.useState(null);
+
+  const handleCopyAndInsert = (v) => {
+    const textToInsert = `{{ ${v.key} }}`;
+    onInsert(textToInsert);
+    try { navigator.clipboard.writeText(textToInsert); } catch (e) {}
+    setCopied(v.key);
+    setTimeout(() => setCopied(null), 1500);
+  };
+
+  const renderVars = (vars) => (
+    <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto p-3 bg-slate-50 border-t border-slate-100">
+      {vars.filter(v => v.key !== '__custom__').map(v => (
+        <button
+          key={v.key}
+          type="button"
+          onClick={() => handleCopyAndInsert(v)}
+          className="relative px-2.5 py-1.5 rounded-full text-[10px] font-medium bg-white text-slate-600 border border-slate-200 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-all shadow-sm flex items-center gap-1"
+          title={`Click to copy and insert {{ ${v.key} }}`}
+        >
+          {v.label}
+          {copied === v.key && (
+            <span className="absolute -top-7 left-1/2 -translate-x-1/2 bg-slate-800 text-white text-[10px] px-2 py-0.5 rounded shadow-lg whitespace-nowrap z-10 animate-fade-in">
+              Copied & Inserted!
+              <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800" />
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
-    <div className="mt-2">
-      <div className="text-[10px] font-semibold text-slate-400 mb-1">Click to insert variable:</div>
-      <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
-        {variables.filter(v => v.key !== '__custom__').map(v => (
-          <button key={v.key} type="button" className="px-2 py-0.5 rounded text-[10px] bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors border border-blue-100 font-mono" onClick={() => onInsert(`{{ ${v.key} }}`)} title={v.label}>{v.label}</button>
-        ))}
+    <div className="mt-3 border border-slate-200 rounded-xl overflow-hidden shadow-sm bg-white">
+      <div className="flex border-b bg-slate-50/50">
+        <button type="button" onClick={() => setActiveTab('shopify')} className={`flex-1 py-2 text-xs font-semibold flex justify-center items-center gap-1.5 transition-colors ${activeTab==='shopify' ? 'text-blue-600 border-b-2 border-blue-500 bg-white' : 'text-slate-500 hover:text-slate-700'}`}><ShoppingCart className="w-3.5 h-3.5"/> Shopify</button>
+        <button type="button" onClick={() => setActiveTab('delivery')} className={`flex-1 py-2 text-xs font-semibold flex justify-center items-center gap-1.5 transition-colors ${activeTab==='delivery' ? 'text-sky-600 border-b-2 border-sky-500 bg-white' : 'text-slate-500 hover:text-slate-700'}`}><ScanLine className="w-3.5 h-3.5"/> Delivery</button>
+        <button type="button" onClick={() => setActiveTab('whatsapp')} className={`flex-1 py-2 text-xs font-semibold flex justify-center items-center gap-1.5 transition-colors ${activeTab==='whatsapp' ? 'text-green-600 border-b-2 border-green-500 bg-white' : 'text-slate-500 hover:text-slate-700'}`}><MessageSquare className="w-3.5 h-3.5"/> WhatsApp</button>
       </div>
+      {activeTab === 'shopify' && renderVars(ALL_SHOPIFY_VARS)}
+      {activeTab === 'delivery' && renderVars(ALL_DELIVERY_VARS)}
+      {activeTab === 'whatsapp' && renderVars(ALL_WHATSAPP_VARS)}
     </div>
   );
 }
@@ -968,6 +1011,10 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                 <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
                 <option value="is_empty">is empty</option><option value="is_not_empty">is not empty</option>
                 <option value="matches">regex matches</option>
+                <option value="in">is in list (comma separated)</option>
+                <option value="not_in">is not in list</option>
+                <option value="is_true">is exactly true</option>
+                <option value="is_false">is exactly false</option>
               </select>
             </div>
             <div>
@@ -997,7 +1044,15 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Message text</label>
               <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-28 resize-none" value={d.text || ''} onChange={(e) => onUpdate({ text: e.target.value, description: e.target.value.slice(0, 50) + (e.target.value.length > 50 ? '…' : '') })} placeholder="Type your message… Click variables below to insert" />
-              <VariableInsertRow variables={trigVars} onInsert={insertVar} />
+              <div className="flex justify-end mt-1 mb-2">
+                <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmoji: !d._showEmoji })}>😀</button>
+              </div>
+              {d._showEmoji && (
+                <div className="mb-3 border rounded-xl overflow-hidden shadow-sm">
+                  <EmojiPicker width="100%" height={300} onEmojiClick={(ev) => insertVar(ev.emoji)} />
+                </div>
+              )}
+              <PlatformVariableSelector onInsert={insertVar} />
             </div>
           )}
           {d.actionType === 'send_whatsapp_template' && (<>
@@ -1014,7 +1069,15 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
               <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.buttonsText || ''} onChange={(e) => onUpdate({ buttonsText: e.target.value, description: 'Buttons: ' + e.target.value.slice(0, 30) })} placeholder="Message body…" />
-              <VariableInsertRow variables={trigVars} onInsert={(v) => onUpdate({ buttonsText: (d.buttonsText || '') + v })} />
+              <div className="flex justify-end mt-1 mb-2">
+                <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmojiBtn: !d._showEmojiBtn })}>😀</button>
+              </div>
+              {d._showEmojiBtn && (
+                <div className="mb-3 border rounded-xl overflow-hidden shadow-sm">
+                  <EmojiPicker width="100%" height={300} onEmojiClick={(ev) => onUpdate({ buttonsText: (d.buttonsText || '') + ev.emoji })} />
+                </div>
+              )}
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ buttonsText: (d.buttonsText || '') + v })} />
             </div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Buttons (one per line)</label>
@@ -1023,7 +1086,19 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           </>)}
           {d.actionType === 'send_image' && (<>
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Image URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.imageUrl || ''} onChange={(e) => onUpdate({ imageUrl: e.target.value, description: 'Image' })} placeholder="https://…" /></div>
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label><textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.caption || ''} onChange={(e) => onUpdate({ caption: e.target.value })} /><VariableInsertRow variables={trigVars} onInsert={(v) => onUpdate({ caption: (d.caption || '') + v })} /></div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.caption || ''} onChange={(e) => onUpdate({ caption: e.target.value })} />
+              <div className="flex justify-end mt-1 mb-2">
+                <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmojiCap: !d._showEmojiCap })}>😀</button>
+              </div>
+              {d._showEmojiCap && (
+                <div className="mb-3 border rounded-xl overflow-hidden shadow-sm">
+                  <EmojiPicker width="100%" height={300} onEmojiClick={(ev) => onUpdate({ caption: (d.caption || '') + ev.emoji })} />
+                </div>
+              )}
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ caption: (d.caption || '') + v })} />
+            </div>
           </>)}
           {d.actionType === 'send_audio' && (
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Audio URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.audioUrl || ''} onChange={(e) => onUpdate({ audioUrl: e.target.value, description: 'Audio' })} placeholder="https://…" /></div>

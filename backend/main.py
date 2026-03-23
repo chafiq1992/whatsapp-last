@@ -12548,6 +12548,76 @@ async def set_tag_options_endpoint(payload: dict = Body(...), _: dict = Depends(
     return {"ok": True, "count": len(norm)}
 
 
+# ---- Media upload to GCS (for Flow Builder audio/image/video URLs) ----
+@app.post("/admin/upload-media")
+async def upload_media_to_gcs_endpoint(
+    file: UploadFile = File(...),
+    _: dict = Depends(require_admin),
+):
+    """Upload an audio, image, video or document file to GCS and return its public URL.
+
+    Used by the Flow Builder to get a shareable URL for WhatsApp media messages.
+    Max 50 MB.
+    """
+    from google_cloud_storage import upload_file_to_gcs
+    import tempfile, uuid, pathlib
+
+    MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+
+    content_type = file.content_type or "application/octet-stream"
+    original_name = str(file.filename or "upload")
+    # Build a unique blob name that preserves extension
+    ext = pathlib.Path(original_name).suffix or ""
+    blob_name = f"flow_builder_media/{uuid.uuid4().hex}{ext}"
+
+    # Stream to a temp file (avoids loading full file into RAM)
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            total = 0
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_SIZE:
+                    raise HTTPException(status_code=413, detail="File too large (max 50 MB)")
+                tmp.write(chunk)
+            tmp_path = tmp.name
+
+        # Upload to GCS
+        from google_cloud_storage import _get_client, GCS_BUCKET_NAME as _GCS_BUCKET
+        import asyncio, os
+        bucket_name = os.getenv("GCS_BUCKET_NAME", _GCS_BUCKET)
+        if not bucket_name:
+            raise HTTPException(status_code=503, detail="GCS_BUCKET_NAME not configured")
+
+        # Re-use existing async upload helper but with our custom blob name
+        loop = asyncio.get_event_loop()
+        def _upload():
+            client = _get_client()
+            bucket = client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            blob.upload_from_filename(tmp_path, content_type=content_type)
+            try:
+                blob.make_public()
+            except Exception:
+                pass
+            return blob.public_url
+
+        public_url = await loop.run_in_executor(None, _upload)
+        return {"ok": True, "url": public_url, "content_type": content_type, "size": total}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+    finally:
+        try:
+            import os
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
 # ---- Automation rules (global store, scoped per rule) ----
 @app.get("/automation/rules")
 async def get_automation_rules_endpoint(request: Request, _: dict = Depends(require_admin)):

@@ -647,9 +647,16 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       const actionNode = prev.find(n => n.id === actionNodeId);
       if (!actionNode) return prev;
 
-      // Remove any old button-reply children
+      // Remove any old button-reply children AND any addStep children below them
       const oldChildIds = actionNode.data?.buttonChildIds || [];
-      const withoutOld = prev.filter(n => !oldChildIds.includes(n.id));
+      // Also collect addStep nodes that were children of button reply nodes
+      const oldAddStepIds = prev
+        .filter(n => n.type === 'addStepFlow' && oldChildIds.some(bid => {
+          // addStep nodes have id format `add_${buttonId}`
+          return n.id === `add_${bid}`;
+        }))
+        .map(n => n.id);
+      const withoutOld = prev.filter(n => !oldChildIds.includes(n.id) && !oldAddStepIds.includes(n.id));
 
       if (!buttonDefs || buttonDefs.length === 0) {
         // Patch action node to remove buttonChildIds
@@ -668,23 +675,29 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       const newChildIds = [];
       const newChildNodes = buttonDefs.map((btn, i) => {
         const childId = uid();
+        const addStepId = `add_${childId}`;
         newChildIds.push(childId);
-        return rfNode(childId, 'buttonReply', startX + i * spread, ay + 320, {
-          buttonText: btn.text,
-          buttonId: btn.id,
-          buttonIndex: i,
-          replyActionType: '',
-          replyActionLabel: '',
-          replyText: '',
-          replyTemplateName: '',
-        });
+        return [
+          rfNode(childId, 'buttonReply', startX + i * spread, ay + 320, {
+            buttonText: btn.text,
+            buttonId: btn.id,
+            buttonIndex: i,
+            replyActionType: '',
+            replyActionLabel: '',
+            replyText: '',
+            replyTemplateName: '',
+          }),
+          rfNode(addStepId, 'addStepFlow', startX + i * spread, ay + 500, {}),
+        ];
       });
 
       const patched = withoutOld.map(n => n.id === actionNodeId
         ? { ...n, data: { ...n.data, buttonChildIds: newChildIds, buttonDefs } }
         : n
       );
-      return [...patched, ...newChildNodes];
+      // Flatten the array of arrays from buttonDefs.map
+      const allNewNodes = newChildNodes.flat();
+      return [...patched, ...allNewNodes];
     });
 
     setEdges(prev => {
@@ -1255,6 +1268,159 @@ function PlatformVariableSelector({ onInsert }) {
   );
 }
 
+
+/* ═══════════════════════════════════════════════════════════
+   GcsMediaUpload — drag-and-drop upload to GCS
+   ═══════════════════════════════════════════════════════════ */
+function GcsMediaUpload({ label, accept, value, onChange }) {
+  const [uploading, setUploading] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const inputRef = React.useRef();
+
+  const doUpload = async (file) => {
+    if (!file) return;
+    setUploading(true); setErr('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await api.post('/admin/upload-media', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      if (res?.data?.url) { onChange(res.data.url); }
+      else setErr('Upload failed — no URL returned');
+    } catch (e) {
+      setErr(String(e?.response?.data?.detail || e?.message || 'Upload failed'));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const onDrop = (e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) doUpload(f); };
+  const onDragOver = (e) => e.preventDefault();
+
+  return (
+    <div className="space-y-2">
+      <label className="text-xs font-semibold text-slate-500 block">{label} URL</label>
+      <div
+        className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-colors ${uploading ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200 hover:border-indigo-400 hover:bg-indigo-50'}`}
+        onClick={() => inputRef.current?.click()}
+        onDrop={onDrop}
+        onDragOver={onDragOver}
+      >
+        {uploading ? (
+          <div className="flex items-center justify-center gap-2 text-indigo-600 text-sm">
+            <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+            Uploading…
+          </div>
+        ) : (
+          <div className="text-slate-500 text-xs">
+            <div className="text-2xl mb-1">☁️</div>
+            <span className="font-medium text-indigo-600">Click or drag</span> to upload {label.toLowerCase()}<br/>
+            <span className="text-[10px] text-slate-400">Max 50 MB · Uploads to GCS</span>
+          </div>
+        )}
+      </div>
+      <input ref={inputRef} type="file" accept={accept} className="hidden" onChange={(e) => doUpload(e.target.files?.[0])} />
+      <input
+        className="w-full border rounded-lg px-3 py-2 text-sm"
+        value={value || ''}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Or paste URL directly…"
+      />
+      {err && <div className="text-xs text-rose-600 mt-1">{err}</div>}
+      {value && !uploading && (
+        <div className="text-[10px] text-emerald-600 truncate">✓ {value}</div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   VariableSearchPicker — searchable, source-aware variable picker
+   ═══════════════════════════════════════════════════════════ */
+const ALL_VARIABLES_BY_SOURCE = {
+  whatsapp: [
+    { label: 'Customer name', value: '{{customer_name}}' },
+    { label: 'Customer phone', value: '{{customer_phone}}' },
+    { label: 'Message text', value: '{{message_text}}' },
+    { label: 'Message timestamp', value: '{{message_timestamp}}' },
+    { label: 'Button title clicked', value: '{{button_title}}' },
+    { label: 'List reply title', value: '{{list_reply_title}}' },
+  ],
+  shopify: [
+    { label: 'Order ID', value: '{{order_id}}' },
+    { label: 'Order number', value: '{{order_number}}' },
+    { label: 'Order status', value: '{{order_status}}' },
+    { label: 'Order total', value: '{{order_total_price}}' },
+    { label: 'Order items count', value: '{{order_items_count}}' },
+    { label: 'Order tracking URL', value: '{{order_tracking_url}}' },
+    { label: 'Product title', value: '{{product_title}}' },
+    { label: 'Product price', value: '{{product_price}}' },
+    { label: 'Discount code', value: '{{discount_code}}' },
+    { label: 'Shopify customer name', value: '{{shopify_customer_name}}' },
+    { label: 'Shopify customer email', value: '{{shopify_customer_email}}' },
+    { label: 'First order date', value: '{{first_order_date}}' },
+    { label: 'Last order date', value: '{{last_order_date}}' },
+    { label: 'Total orders', value: '{{total_orders}}' },
+    { label: 'Total spent', value: '{{total_spent}}' },
+  ],
+  delivery: [
+    { label: 'Delivery status', value: '{{delivery_status}}' },
+    { label: 'Tracking number', value: '{{tracking_number}}' },
+    { label: 'Estimated delivery', value: '{{estimated_delivery}}' },
+    { label: 'Driver name', value: '{{driver_name}}' },
+  ],
+};
+
+function VariableSearchPicker({ onInsert }) {
+  const [open, setOpen] = React.useState(false);
+  const [source, setSource] = React.useState('whatsapp');
+  const [q, setQ] = React.useState('');
+  const vars = ALL_VARIABLES_BY_SOURCE[source] || [];
+  const filtered = q ? vars.filter(v => v.label.toLowerCase().includes(q.toLowerCase()) || v.value.toLowerCase().includes(q.toLowerCase())) : vars;
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        className="text-xs text-indigo-600 font-medium hover:underline flex items-center gap-1 mt-1"
+        onClick={() => setOpen(o => !o)}
+      >
+        <span>{'{ }'}</span> Insert variable
+      </button>
+      {open && (
+        <div className="absolute z-50 top-full left-0 mt-1 w-72 bg-white border border-slate-200 rounded-xl shadow-xl p-2">
+          <div className="flex gap-1 mb-2">
+            {Object.keys(ALL_VARIABLES_BY_SOURCE).map(src => (
+              <button key={src} type="button"
+                className={`flex-1 text-xs py-1 rounded-lg font-medium capitalize transition-colors ${source === src ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                onClick={() => { setSource(src); setQ(''); }}
+              >{src}</button>
+            ))}
+          </div>
+          <input
+            className="w-full border rounded-lg px-2 py-1.5 text-xs mb-2"
+            placeholder="Search variables…"
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            autoFocus
+          />
+          <div className="max-h-48 overflow-y-auto space-y-0.5">
+            {filtered.map(v => (
+              <button key={v.value} type="button"
+                className="w-full text-left px-2 py-1.5 rounded-lg text-xs hover:bg-indigo-50 flex items-center justify-between group"
+                onClick={() => { onInsert(v.value); setOpen(false); setQ(''); }}
+              >
+                <span className="text-slate-700">{v.label}</span>
+                <span className="text-slate-400 font-mono group-hover:text-indigo-500">{v.value}</span>
+              </button>
+            ))}
+            {filtered.length === 0 && <div className="text-xs text-slate-400 text-center py-2">No variables found</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelectTrigger, triggerSource, triggerEvent, onSpawnButtons }) {
   const d = node.data || {};
   const t = node.type;
@@ -1471,7 +1637,12 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
 
           {/* ── Image ── */}
           {d.actionType === 'send_image' && (<>
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Image URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.imageUrl || ''} onChange={(e) => onUpdate({ imageUrl: e.target.value, description: 'Image' })} placeholder="https://…" /></div>
+            <GcsMediaUpload
+              label="Image"
+              accept="image/*"
+              value={d.imageUrl || ''}
+              onChange={(url) => onUpdate({ imageUrl: url, description: 'Image' })}
+            />
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
               <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.caption || ''} onChange={(e) => onUpdate({ caption: e.target.value })} />
@@ -1481,7 +1652,12 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
 
           {/* ── Video ── */}
           {d.actionType === 'send_video' && (<>
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Video URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.videoUrl || ''} onChange={(e) => onUpdate({ videoUrl: e.target.value, description: 'Video' })} placeholder="https://…" /></div>
+            <GcsMediaUpload
+              label="Video"
+              accept="video/*"
+              value={d.videoUrl || ''}
+              onChange={(url) => onUpdate({ videoUrl: url, description: 'Video' })}
+            />
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
               <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.caption || ''} onChange={(e) => onUpdate({ caption: e.target.value })} />
@@ -1491,7 +1667,12 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
 
           {/* ── Audio ── */}
           {d.actionType === 'send_audio' && (
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Audio URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.audioUrl || ''} onChange={(e) => onUpdate({ audioUrl: e.target.value, description: 'Audio' })} placeholder="https://…" /></div>
+            <GcsMediaUpload
+              label="Audio"
+              accept="audio/*,.ogg,.m4a,.opus"
+              value={d.audioUrl || ''}
+              onChange={(url) => onUpdate({ audioUrl: url, description: 'Audio' })}
+            />
           )}
 
           {/* ── Tag / Remove Tag ── */}
@@ -1527,21 +1708,18 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           </>)}
 
-          {/* ── Last Order Items + Audio ── */}
+          {/* ── Last Order Items ── */}
           {d.actionType === 'send_last_order_catalog_items' && (<>
             <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-sm text-pink-700">
               <div className="font-semibold mb-1">Last Order Catalog Items</div>
-              <div className="text-xs">Sends the customer's last order items as interactive catalog product cards.</div>
+              <div className="text-xs">Sends the customer's last order items as interactive catalog product cards. You can add an Audio node below to send a voice note alongside.</div>
             </div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Max items to send</label>
               <input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" value={d.lastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpdate({ lastOrderItemsMax: Number(e.target.value) || 10 })} />
             </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Audio URL (optional)</label>
-              <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.lastOrderAudioUrl || ''} onChange={(e) => onUpdate({ lastOrderAudioUrl: e.target.value })} placeholder="https://… (voice note to accompany)" />
-            </div>
           </>)}
+
 
           {/* ── Assign Agent ── */}
           {d.actionType === 'assign_agent' && (

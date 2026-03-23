@@ -12292,6 +12292,120 @@ async def admin_upload_media(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ───────────────────────── Flow Drafter (AI-powered draft generation) ─────────────────────────
+_FLOW_DRAFTER_SYSTEM_PROMPT = """You are Flow Drafter, an AI assistant that generates WhatsApp automation flow drafts.
+You ONLY output valid JSON — no markdown, no explanation, no code fences.
+
+## AVAILABLE TRIGGER SOURCES
+- shopify (events: orders/paid, orders/create, orders/updated, orders/cancelled, orders/fulfilled, fulfillments/create, fulfillments/update, customers/create, customers/update, checkouts/update, draft_orders/create, products/create, products/update, inventory_levels/update)
+- whatsapp (events: message, no_reply, interactive, first_message, keyword_match, media_received)
+- delivery (events: status_change, out_for_delivery, delivered, failed_delivery, returned, pickup_ready, driver_assigned, cod_collected)
+
+## AVAILABLE ACTION TYPES
+- send_whatsapp_text: Send a plain text. Data: {text, to:"{{ phone }}"}
+- send_whatsapp_template: Send a template. Data: {templateName, templateLanguage:"en", to:"{{ phone }}"}
+- send_buttons: Interactive buttons. Data: {text, buttonsLines:"id1|Title 1\\nid2|Title 2", to:"{{ phone }}"}
+- send_list: List message. Data: {listText, listButtonText:"Choose", listRowsLines:"id1|Title 1|Description\\nid2|Title 2", to:"{{ phone }}"}
+- send_image: Image message. Data: {imageUrl, caption, to:"{{ phone }}"}
+- send_video: Video message. Data: {videoUrl, caption, to:"{{ phone }}"}
+- send_audio: Audio message. Data: {audioUrl, to:"{{ phone }}"}
+- shopify_tag (add_tag): Tag customer. Data: {tag}
+- shopify_remove_tag (remove_tag): Remove tag. Data: {tag}
+- order_confirmation_flow: Multi-step confirmation. Data: {templateName, templateLanguage:"en"}
+- shopify_order_status: Look up order status. Data: {}
+- send_catalog_item: Single product. Data: {catalogItemRetailerId, catalogItemCaption}
+- send_catalog_set: Product set. Data: {catalogSetId, catalogSetCaption}
+- send_last_order_catalog_items: Last order items. Data: {lastOrderItemsMax:10}
+- assign_agent: Assign conversation. Data: {agent}
+- close_conversation: Close conversation. Data: {}
+- exit: Stop workflow. Data: {}
+
+## AVAILABLE VARIABLES (use as {{ variable_key }})
+Shopify: order_number, id, total_price, subtotal_price, total_discounts, currency, financial_status, fulfillment_status, tags, note, customer.phone, customer.first_name, customer.last_name, customer.email, customer.orders_count, customer.total_spent, customer.tags, shipping_address.city, shipping_address.province, shipping_address.country, line_items[].title, line_items[].quantity, line_items[].price, discount_codes[].code, tracking_number, tracking_url, tracking_company
+WhatsApp: phone, message_text, message_type, contact_name, button_title, button_id
+Delivery: order_id, tracking_number, tracking_url, status, previous_status, customer_phone, customer_name, driver_name, driver_phone, city, total_price, cod_amount
+
+## NODE TYPES
+- startTrigger: The trigger node. data = {configured:true, source, label, event, description}
+- conditionFlow: A condition branch. data = {expression, trueLabel, falseLabel, field, operator, value}. Has handles "true" and "false".
+- actionFlow: An action step. data = {actionType, actionLabel, description, ...action-specific fields}
+- addStep: Empty placeholder. data = {}
+
+## OUTPUT FORMAT
+Return ONLY a JSON object: {"nodes":[...], "edges":[...]}
+- Each node: {"id":"n_<unique>", "type":"<nodeType>", "position":{"x":<num>,"y":<num>}, "data":{...}}
+- Each edge: {"id":"e_<src>_<tgt>_<handle>", "source":"<nodeId>", "target":"<nodeId>", "sourceHandle":"<handle or null>"}
+- Start trigger at position (0,0), then space nodes ~200px apart vertically. For condition branches, offset left/right by ~150px.
+- Always start with exactly one startTrigger node.
+- End branches with an addStep node.
+
+IMPORTANT: Output ONLY the JSON. No text before or after."""
+
+@app.post("/api/flow-drafter")
+async def flow_drafter_endpoint(request: Request):
+    """AI-powered flow draft generation. Sandboxed: only generates node/edge JSON."""
+    import os as _os
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    api_key = _os.environ.get("FLOW_DRAFTER_API_KEY") or _os.environ.get("OPENAI_API_KEY") or ""
+    if not api_key:
+        raise HTTPException(status_code=500, detail="FLOW_DRAFTER_API_KEY not configured on server")
+
+    model = _os.environ.get("FLOW_DRAFTER_MODEL", "gpt-4.1-nano")
+    trigger_hint = ""
+    ts = str(body.get("triggerSource") or "").strip()
+    te = str(body.get("triggerEvent") or "").strip()
+    if ts and te:
+        trigger_hint = f"\nThe user already selected trigger source={ts}, event={te}. Use this as the startTrigger."
+
+    messages = [
+        {"role": "system", "content": _FLOW_DRAFTER_SYSTEM_PROMPT + trigger_hint},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "temperature": 0.3, "max_tokens": 4096},
+            )
+            if resp.status_code != 200:
+                detail = resp.text[:500]
+                print(f"❌ Flow Drafter OpenAI error: {resp.status_code} {detail}")
+                raise HTTPException(status_code=502, detail=f"AI service error: {detail}")
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Flow Drafter request error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to reach AI service: {e}")
+
+    # Parse JSON from the AI response
+    import re as _re
+    # Strip possible markdown code fences
+    cleaned = _re.sub(r'^```(?:json)?\s*', '', content.strip(), flags=_re.MULTILINE)
+    cleaned = _re.sub(r'```\s*$', '', cleaned.strip(), flags=_re.MULTILINE)
+    try:
+        result = json.loads(cleaned)
+    except Exception:
+        print(f"⚠️ Flow Drafter: could not parse AI response as JSON: {content[:300]}")
+        raise HTTPException(status_code=422, detail="AI returned invalid JSON. Please try rephrasing.")
+
+    if not isinstance(result, dict) or "nodes" not in result:
+        raise HTTPException(status_code=422, detail="AI response missing 'nodes'. Please try again.")
+
+    return {"flow": result}
+
+
 # ───────────────────────── Internal Notes Upload (no WhatsApp send) ─────────────────────────
 @app.post("/notes/upload")
 async def upload_note_file(

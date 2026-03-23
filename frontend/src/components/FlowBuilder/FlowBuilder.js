@@ -12,6 +12,7 @@ import {
   SplitSquareHorizontal, Timer, Ban,
   ChevronRight, X, List, Package, Search,
   CheckCircle, FileText, BarChart2, MousePointerClick,
+  Sparkles, Send, Loader2,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 
@@ -1143,6 +1144,143 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             )}
           </div>
         )}
+      </div>
+
+      {/* Flow Drafter AI chat window */}
+      <FlowDrafterChat
+        nodes={nodes}
+        setNodes={setNodes}
+        edges={edges}
+        setEdges={setEdges}
+        triggerSource={currentTriggerNode?.data?.source}
+        triggerEvent={currentTriggerNode?.data?.event}
+      />
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Flow Drafter — AI-powered draft generation chat
+   ═══════════════════════════════════════════════════════════ */
+function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, triggerEvent }) {
+  const [open, setOpen] = React.useState(false);
+  const [messages, setMessages] = React.useState([{ role: 'assistant', text: 'Hi! Describe the flow you want and I\'ll draft it for you. ✨' }]);
+  const [input, setInput] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+  const bottomRef = React.useRef(null);
+
+  React.useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  const sendPrompt = async () => {
+    const prompt = input.trim();
+    if (!prompt || loading) return;
+    setInput('');
+    setMessages(prev => [...prev.slice(-8), { role: 'user', text: prompt }]);
+    setLoading(true);
+    try {
+      const res = await api.post('/api/flow-drafter', { prompt, triggerSource: triggerSource || '', triggerEvent: triggerEvent || '' });
+      const flow = res.data?.flow;
+      if (flow?.nodes?.length) {
+        // Remap node IDs to avoid collisions
+        const ts = Date.now();
+        const idMap = {};
+        const newNodes = flow.nodes.map((n, i) => {
+          const newId = `fd_${ts}_${i}`;
+          idMap[n.id] = newId;
+          return { ...n, id: newId, draggable: true, position: n.position || { x: 0, y: i * 200 } };
+        });
+        const newEdges = (flow.edges || []).map(e => ({
+          ...e,
+          id: `e_${idMap[e.source] || e.source}_${idMap[e.target] || e.target}_${e.sourceHandle || 'default'}`,
+          source: idMap[e.source] || e.source,
+          target: idMap[e.target] || e.target,
+          type: 'smoothstep', animated: true,
+          style: { stroke: '#94a3b8', strokeWidth: 2 },
+          markerEnd: { type: 'arrowclosed', color: '#94a3b8' },
+        }));
+        setNodes(newNodes);
+        setEdges(newEdges);
+        setMessages(prev => [...prev, { role: 'assistant', text: `✅ Draft created with ${newNodes.length} nodes! Review the canvas and edit as needed.` }]);
+      } else {
+        setMessages(prev => [...prev, { role: 'assistant', text: '⚠️ No flow was generated. Try being more specific.' }]);
+      }
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err.message || 'Unknown error';
+      setMessages(prev => [...prev, { role: 'assistant', text: `❌ ${detail}` }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-gradient-to-br from-violet-600 to-indigo-600 text-white shadow-2xl hover:shadow-violet-500/40 hover:scale-110 transition-all flex items-center justify-center group"
+        title="Flow Drafter AI"
+      >
+        <Sparkles className="w-6 h-6 group-hover:animate-pulse" />
+      </button>
+    );
+  }
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50 w-[360px] h-[480px] rounded-2xl bg-white border border-slate-200 shadow-2xl flex flex-col overflow-hidden" style={{ boxShadow: '0 25px 60px -12px rgba(124, 58, 237, 0.25)' }}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-violet-600 to-indigo-600 text-white">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-5 h-5" />
+          <span className="font-semibold text-sm">Flow Drafter</span>
+          <span className="text-[10px] opacity-70 bg-white/20 px-1.5 py-0.5 rounded-full">AI</span>
+        </div>
+        <button onClick={() => setOpen(false)} className="p-1 rounded-lg hover:bg-white/20 transition-colors">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 bg-gradient-to-b from-slate-50 to-white">
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed ${
+              m.role === 'user'
+                ? 'bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-br-md'
+                : 'bg-white border border-slate-200 text-slate-700 rounded-bl-md shadow-sm'
+            }`}>
+              {m.text}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="bg-white border border-slate-200 text-slate-500 px-4 py-3 rounded-2xl rounded-bl-md shadow-sm flex items-center gap-2 text-sm">
+              <Loader2 className="w-4 h-4 animate-spin text-violet-500" /> Generating flow…
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      <div className="px-3 py-3 border-t bg-white">
+        <div className="flex gap-2">
+          <input
+            className="flex-1 px-3.5 py-2.5 text-sm rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-400 placeholder:text-slate-400 transition-all"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendPrompt()}
+            placeholder="Describe your flow…"
+            disabled={loading}
+          />
+          <button
+            onClick={sendPrompt}
+            disabled={loading || !input.trim()}
+            className="px-3 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white disabled:opacity-40 hover:shadow-lg hover:shadow-violet-500/25 transition-all flex items-center"
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </div>
+        <p className="text-[10px] text-slate-400 mt-1.5 text-center">Drafts only — review before saving</p>
       </div>
     </div>
   );

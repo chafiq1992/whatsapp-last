@@ -10,7 +10,8 @@ import {
   Save, Power, PowerOff, Plus, Trash2, ArrowLeft,
   ShoppingCart, MessageSquare, ScanLine, Zap,
   SplitSquareHorizontal, Timer, Ban,
-  ChevronRight, X,
+  ChevronRight, X, List, Package, Search,
+  CheckCircle, FileText,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 
@@ -192,17 +193,55 @@ function getVariablesForTrigger(source, event) {
   return [...vars, { key: '__custom__', label: '✏️ Custom variable…' }];
 }
 
+/* Helper: infer body variable placeholder names from a WhatsApp template */
+function _inferBodyVarNamesFromTpl(tpl) {
+  try {
+    const comps = tpl?.components || [];
+    const body = (Array.isArray(comps) ? comps : []).find(c => String(c?.type || '').toUpperCase() === 'BODY');
+    if (!body) return [];
+    const text = String(body?.text || '');
+    const allMatches = text.match(/\{\{([^}]+)\}\}/g);
+    if (!allMatches) return [];
+    return [...new Set(allMatches)].map(m => m.replace(/^\{\{/, '').replace(/\}\}$/, '').trim());
+  } catch { return []; }
+}
+function _getTemplateHeaderType(tpl) {
+  try {
+    const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+    const h = comps.find(c => String(c?.type || '').toUpperCase() === 'HEADER');
+    return String(h?.format || '').toUpperCase(); // IMAGE | VIDEO | DOCUMENT | TEXT
+  } catch { return ''; }
+}
+
+const ACTION_CATEGORIES = [
+  { id: 'whatsapp', label: 'WhatsApp Messaging', icon: <MessageSquare className="w-3.5 h-3.5" />, color: 'green' },
+  { id: 'shopify',  label: 'Shopify Actions',    icon: <ShoppingCart className="w-3.5 h-3.5" />,  color: 'emerald' },
+  { id: 'catalog',  label: 'Catalog & Orders',   icon: <Package className="w-3.5 h-3.5" />,       color: 'indigo' },
+  { id: 'workflow', label: 'Workflow Control',   icon: <Zap className="w-3.5 h-3.5" />,           color: 'slate' },
+];
+
 const ACTION_CATALOG = [
-  { id: 'send_text',         label: 'Send Text Message',       icon: <MessageSquare className="w-4 h-4 text-blue-500" />,   type: 'send_whatsapp_text',     desc: 'Send a plain WhatsApp text with variables' },
-  { id: 'send_template',     label: 'Send WhatsApp Template',  icon: <MessageSquare className="w-4 h-4 text-emerald-500" />, type: 'send_whatsapp_template', desc: 'Send an approved template message' },
-  { id: 'send_buttons',      label: 'Send Button Message',     icon: <MessageSquare className="w-4 h-4 text-indigo-500" />,  type: 'send_buttons',           desc: 'Interactive message with reply buttons' },
-  { id: 'send_image',        label: 'Send Image',              icon: <MessageSquare className="w-4 h-4 text-pink-500" />,    type: 'send_image',             desc: 'Send an image with optional caption' },
-  { id: 'send_audio',        label: 'Send Audio',              icon: <MessageSquare className="w-4 h-4 text-violet-500" />,  type: 'send_audio',             desc: 'Send a voice message or audio file' },
-  { id: 'tag_customer',      label: 'Tag Customer (Shopify)',   icon: <Zap className="w-4 h-4 text-amber-500" />,            type: 'shopify_tag',            desc: 'Add a tag to the Shopify customer' },
-  { id: 'remove_tag',        label: 'Remove Tag (Shopify)',     icon: <Zap className="w-4 h-4 text-orange-500" />,           type: 'shopify_remove_tag',     desc: 'Remove a tag from the Shopify customer' },
-  { id: 'assign_agent',      label: 'Assign to Agent',         icon: <Zap className="w-4 h-4 text-cyan-500" />,             type: 'assign_agent',           desc: 'Route conversation to a specific agent' },
-  { id: 'close_conversation',label: 'Close Conversation',      icon: <Ban className="w-4 h-4 text-slate-500" />,            type: 'close_conversation',     desc: 'Mark conversation as resolved' },
-  { id: 'exit',              label: 'Stop / Exit',              icon: <Ban className="w-4 h-4 text-rose-500" />,             type: 'exit',                   desc: 'End the workflow here' },
+  // ── WhatsApp Messaging ──
+  { id: 'send_text',         label: 'Send Text Message',       icon: <MessageSquare className="w-4 h-4 text-blue-500" />,    type: 'send_whatsapp_text',            cat: 'whatsapp', desc: 'Send a plain WhatsApp text with variables' },
+  { id: 'send_template',     label: 'Send WhatsApp Template',  icon: <FileText className="w-4 h-4 text-emerald-500" />,      type: 'send_whatsapp_template',        cat: 'whatsapp', desc: 'Send an approved template message' },
+  { id: 'send_buttons',      label: 'Send Button Message',     icon: <MessageSquare className="w-4 h-4 text-indigo-500" />,  type: 'send_buttons',                  cat: 'whatsapp', desc: 'Interactive message with reply buttons' },
+  { id: 'send_list',         label: 'Send List Message',       icon: <List className="w-4 h-4 text-teal-500" />,             type: 'send_list',                     cat: 'whatsapp', desc: 'Interactive list with selectable rows' },
+  { id: 'send_image',        label: 'Send Image',              icon: <MessageSquare className="w-4 h-4 text-pink-500" />,    type: 'send_image',                    cat: 'whatsapp', desc: 'Send an image with optional caption' },
+  { id: 'send_video',        label: 'Send Video',              icon: <MessageSquare className="w-4 h-4 text-rose-500" />,    type: 'send_video',                    cat: 'whatsapp', desc: 'Send a video with optional caption' },
+  { id: 'send_audio',        label: 'Send Audio',              icon: <MessageSquare className="w-4 h-4 text-violet-500" />,  type: 'send_audio',                    cat: 'whatsapp', desc: 'Send a voice message or audio file' },
+  // ── Shopify Actions ──
+  { id: 'tag_customer',      label: 'Tag Customer',            icon: <Zap className="w-4 h-4 text-amber-500" />,             type: 'shopify_tag',                   cat: 'shopify',  desc: 'Add a tag to the Shopify customer' },
+  { id: 'remove_tag',        label: 'Remove Tag',              icon: <Zap className="w-4 h-4 text-orange-500" />,            type: 'shopify_remove_tag',            cat: 'shopify',  desc: 'Remove a tag from the Shopify customer' },
+  { id: 'order_confirm',     label: 'Confirmation Flow',       icon: <CheckCircle className="w-4 h-4 text-emerald-500" />,   type: 'order_confirmation_flow',       cat: 'shopify',  desc: 'Multi-step order confirmation with buttons' },
+  { id: 'order_status',      label: 'Order Status Lookup',     icon: <Search className="w-4 h-4 text-sky-500" />,            type: 'shopify_order_status',           cat: 'shopify',  desc: 'Look up and send order status to customer' },
+  // ── Catalog & Orders ──
+  { id: 'catalog_item',      label: 'Send Catalog Item',       icon: <Package className="w-4 h-4 text-indigo-500" />,        type: 'send_catalog_item',             cat: 'catalog',  desc: 'Send a single product from your catalog' },
+  { id: 'catalog_set',       label: 'Send Catalog Set',        icon: <Package className="w-4 h-4 text-purple-500" />,        type: 'send_catalog_set',              cat: 'catalog',  desc: 'Send a product set from your catalog' },
+  { id: 'last_order_items',  label: 'Last Order Items + Audio', icon: <ShoppingCart className="w-4 h-4 text-pink-500" />,     type: 'send_last_order_catalog_items', cat: 'catalog',  desc: 'Send last order items as catalog cards + audio' },
+  // ── Workflow Control ──
+  { id: 'assign_agent',      label: 'Assign to Agent',         icon: <Zap className="w-4 h-4 text-cyan-500" />,              type: 'assign_agent',                  cat: 'workflow', desc: 'Route conversation to a specific agent' },
+  { id: 'close_conversation',label: 'Close Conversation',      icon: <Ban className="w-4 h-4 text-slate-500" />,             type: 'close_conversation',            cat: 'workflow', desc: 'Mark conversation as resolved' },
+  { id: 'exit',              label: 'Stop / Exit',             icon: <Ban className="w-4 h-4 text-rose-500" />,              type: 'exit',                          cat: 'workflow', desc: 'End the workflow here' },
 ];
 
 /* ═══════════════════════════════════════════════════════════
@@ -504,8 +543,45 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         text: config.text || '',
         templateName: config.templateName || '',
         templateLanguage: config.templateLanguage || 'en',
+        templateVars: config.templateVars || [],
+        templateHeaderUrl: config.templateHeaderUrl || '',
+        templateHeaderType: config.templateHeaderType || '',
         tag: config.tag || '',
         description: config.description || '',
+        // Buttons
+        buttonsText: config.buttonsText || '',
+        buttonsLines: config.buttonsLines || '',
+        // List
+        listText: config.listText || '',
+        listButtonText: config.listButtonText || 'Choose',
+        listSectionTitle: config.listSectionTitle || '',
+        listRowsLines: config.listRowsLines || '',
+        // Image / Video
+        imageUrl: config.imageUrl || '',
+        videoUrl: config.videoUrl || '',
+        caption: config.caption || '',
+        // Audio
+        audioUrl: config.audioUrl || '',
+        // Catalog
+        catalogItemRetailerId: config.catalogItemRetailerId || '',
+        catalogItemCaption: config.catalogItemCaption || '',
+        catalogSetId: config.catalogSetId || '',
+        catalogSetCaption: config.catalogSetCaption || '',
+        // Last order items
+        lastOrderItemsMax: config.lastOrderItemsMax || 10,
+        lastOrderAudioUrl: config.lastOrderAudioUrl || '',
+        // Confirmation flow
+        ocEntryGateMode: config.ocEntryGateMode || 'all',
+        ocConfirmTitles: config.ocConfirmTitles || 'تأكيد الطلب\nتاكيد الطلب',
+        ocChangeTitles: config.ocChangeTitles || 'تغيير المعلومات\nتغير المعلومات',
+        ocTalkTitles: config.ocTalkTitles || 'تكلم مع العميل',
+        ocConfirmAudioUrl: config.ocConfirmAudioUrl || '',
+        ocChangeAudioUrl: config.ocChangeAudioUrl || '',
+        ocTalkAudioUrl: config.ocTalkAudioUrl || '',
+        ocSendItems: config.ocSendItems !== false,
+        ocMaxItems: config.ocMaxItems || 10,
+        // Agent
+        agent: config.agent || '',
       });
       const addBtn = rfNode(addBtnId, 'addStep', px, py + 260, {});
       setNodes(prev => {
@@ -659,16 +735,83 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
           if (at === 'send_whatsapp_text') {
             actions.push({ type: 'send_whatsapp_text', to: '{{ phone }}', text: d.text || '' });
           } else if (at === 'send_whatsapp_template') {
+            // Build components with header + body vars
             const comps = [];
+            const headerUrl = String(d.templateHeaderUrl || '').trim();
+            const headerType = String(d.templateHeaderType || '').toUpperCase();
+            if (headerUrl && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerType)) {
+              if (headerType === 'IMAGE') comps.push({ type: 'header', parameters: [{ type: 'image', image: { link: headerUrl } }] });
+              else if (headerType === 'VIDEO') comps.push({ type: 'header', parameters: [{ type: 'video', video: { link: headerUrl } }] });
+              else comps.push({ type: 'header', parameters: [{ type: 'document', document: { link: headerUrl } }] });
+            }
+            const tVars = Array.isArray(d.templateVars) ? d.templateVars : [];
+            const bodyParams = tVars.filter(v => String(v || '').trim()).map(v => ({ type: 'text', text: String(v) }));
+            if (bodyParams.length) comps.push({ type: 'body', parameters: bodyParams });
             actions.push({
-              type: 'send_whatsapp_template',
-              to: '{{ phone }}',
-              template_name: d.templateName || '',
-              language: d.templateLanguage || 'en',
+              type: 'send_whatsapp_template', to: '{{ phone }}',
+              template_name: d.templateName || '', language: d.templateLanguage || 'en',
               components: comps,
             });
+          } else if (at === 'send_buttons') {
+            const lines = String(d.buttonsLines || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
+            const btns = lines.map((ln, i) => {
+              const parts = ln.split('|'); let id = parts[0]?.trim(); let title = parts.slice(1).join('|').trim();
+              if (!title && id) { title = id; id = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24) || `btn_${i+1}`; }
+              return id && title ? { id, title } : null;
+            }).filter(Boolean);
+            if (btns.length) actions.push({ type: 'send_buttons', to: '{{ phone }}', text: d.buttonsText || '', buttons: btns });
+          } else if (at === 'send_list') {
+            const rowLines = String(d.listRowsLines || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
+            const rows = rowLines.map(ln => {
+              const p = ln.split('|'); const id = p[0]?.trim(); const title = p[1]?.trim(); const desc = p.slice(2).join('|').trim();
+              if (!id || !title) return null;
+              const row = { id, title }; if (desc) row.description = desc; return row;
+            }).filter(Boolean);
+            if (rows.length) actions.push({ type: 'send_list', to: '{{ phone }}', text: d.listText || '', button_text: d.listButtonText || 'Choose', sections: [{ ...(d.listSectionTitle ? { title: d.listSectionTitle } : {}), rows }] });
+          } else if (at === 'send_image') {
+            actions.push({ type: 'send_image', to: '{{ phone }}', image_url: d.imageUrl || '', caption: d.caption || '' });
+          } else if (at === 'send_video') {
+            actions.push({ type: 'send_video', to: '{{ phone }}', video_url: d.videoUrl || '', caption: d.caption || '' });
+          } else if (at === 'send_audio') {
+            actions.push({ type: 'send_audio_url', to: '{{ phone }}', audio_url: d.audioUrl || '' });
           } else if (at === 'shopify_tag') {
             actions.push({ type: 'add_tag', tag: d.tag || '' });
+          } else if (at === 'shopify_remove_tag') {
+            actions.push({ type: 'remove_tag', tag: d.tag || '' });
+          } else if (at === 'order_confirmation_flow') {
+            const listFromLines = s => String(s || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
+            const comps = [];
+            const headerUrl = String(d.templateHeaderUrl || '').trim();
+            const headerType = String(d.templateHeaderType || '').toUpperCase();
+            if (headerUrl && ['IMAGE','VIDEO','DOCUMENT'].includes(headerType)) {
+              if (headerType === 'IMAGE') comps.push({ type: 'header', parameters: [{ type: 'image', image: { link: headerUrl } }] });
+              else if (headerType === 'VIDEO') comps.push({ type: 'header', parameters: [{ type: 'video', video: { link: headerUrl } }] });
+              else comps.push({ type: 'header', parameters: [{ type: 'document', document: { link: headerUrl } }] });
+            }
+            const tVars = Array.isArray(d.templateVars) ? d.templateVars : [];
+            const bodyParams = tVars.filter(v => String(v||'').trim()).map(v => ({ type: 'text', text: String(v) }));
+            if (bodyParams.length) comps.push({ type: 'body', parameters: bodyParams });
+            actions.push({
+              type: 'order_confirmation_flow', to: '{{ phone }}',
+              template_name: d.templateName || '', language: d.templateLanguage || 'en', components: comps,
+              entry_gate_mode: d.ocEntryGateMode || 'all',
+              confirm_titles: listFromLines(d.ocConfirmTitles), change_titles: listFromLines(d.ocChangeTitles), talk_titles: listFromLines(d.ocTalkTitles),
+              confirm_audio_url: d.ocConfirmAudioUrl || '', change_audio_url: d.ocChangeAudioUrl || '', talk_audio_url: d.ocTalkAudioUrl || '',
+              send_items: !!d.ocSendItems, max_items: Number(d.ocMaxItems || 10),
+            });
+          } else if (at === 'shopify_order_status') {
+            actions.push({ type: 'shopify_order_status' });
+          } else if (at === 'send_catalog_item') {
+            actions.push({ type: 'send_catalog_item', to: '{{ phone }}', retailer_id: d.catalogItemRetailerId || '', caption: d.catalogItemCaption || '' });
+          } else if (at === 'send_catalog_set') {
+            actions.push({ type: 'send_catalog_set', to: '{{ phone }}', set_id: d.catalogSetId || '', caption: d.catalogSetCaption || '' });
+          } else if (at === 'send_last_order_catalog_items') {
+            actions.push({ type: 'send_last_order_catalog_items', to: '{{ phone }}', max_items: Number(d.lastOrderItemsMax || 10) });
+            if (String(d.lastOrderAudioUrl || '').trim()) actions.push({ type: 'send_audio_url', to: '{{ phone }}', audio_url: d.lastOrderAudioUrl });
+          } else if (at === 'assign_agent') {
+            actions.push({ type: 'assign_agent', agent: d.agent || '' });
+          } else if (at === 'close_conversation') {
+            actions.push({ type: 'close_conversation' });
           } else if (at === 'exit') {
             actions.push({ type: 'exit' });
           }
@@ -877,6 +1020,9 @@ function TriggerPickerPanel({ onClose, onSelectTrigger }) {
 }
 
 function StepPickerPanel({ onClose, onAddStep }) {
+  const [openCats, setOpenCats] = React.useState({ whatsapp: true, shopify: true, catalog: true, workflow: true });
+  const toggleCat = (id) => setOpenCats(prev => ({ ...prev, [id]: !prev[id] }));
+  const catColors = { whatsapp: { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-700', hover: 'hover:bg-green-50 hover:border-green-300', btnBg: 'bg-green-50', btnText: 'text-green-600' }, shopify: { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-700', hover: 'hover:bg-emerald-50 hover:border-emerald-300', btnBg: 'bg-emerald-50', btnText: 'text-emerald-600' }, catalog: { bg: 'bg-indigo-50', border: 'border-indigo-200', text: 'text-indigo-700', hover: 'hover:bg-indigo-50 hover:border-indigo-300', btnBg: 'bg-indigo-50', btnText: 'text-indigo-600' }, workflow: { bg: 'bg-slate-50', border: 'border-slate-200', text: 'text-slate-700', hover: 'hover:bg-slate-50 hover:border-slate-300', btnBg: 'bg-slate-100', btnText: 'text-slate-600' } };
   return (
     <>
       <div className="flex items-center justify-between p-4 border-b">
@@ -884,23 +1030,51 @@ function StepPickerPanel({ onClose, onAddStep }) {
         <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="w-4 h-4" /></button>
       </div>
       <div className="p-4 space-y-3 overflow-y-auto flex-1">
+        {/* Condition */}
         <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Conditions</div>
         <button className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-amber-300 hover:bg-amber-50 transition-all flex items-center gap-3 group" onClick={() => onAddStep('condition')}>
           <div className="p-2 rounded-lg bg-amber-50 text-amber-600 group-hover:bg-amber-100"><SplitSquareHorizontal className="w-5 h-5" /></div>
           <div><div className="text-sm font-semibold text-slate-700">Condition</div><div className="text-xs text-slate-400">Check a value before continuing</div></div>
         </button>
-        <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1 mt-4">Actions</div>
-        {ACTION_CATALOG.map(a => (
-          <button key={a.id} className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-blue-300 hover:bg-blue-50 transition-all flex items-center gap-3 group" onClick={() => onAddStep('action', { type: a.type })}>
-            <div className="p-2 rounded-lg bg-blue-50 text-blue-600 group-hover:bg-blue-100">{a.icon}</div>
-            <div className="min-w-0"><div className="text-sm font-semibold text-slate-700">{a.label}</div>{a.desc && <div className="text-xs text-slate-400 truncate">{a.desc}</div>}</div>
-          </button>
-        ))}
+
+        {/* Delay */}
         <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1 mt-4">Timing</div>
         <button className="w-full text-left px-4 py-3 rounded-xl border border-slate-200 hover:border-violet-300 hover:bg-violet-50 transition-all flex items-center gap-3 group" onClick={() => onAddStep('delay')}>
           <div className="p-2 rounded-lg bg-violet-50 text-violet-600 group-hover:bg-violet-100"><Timer className="w-5 h-5" /></div>
           <div><div className="text-sm font-semibold text-slate-700">Delay</div><div className="text-xs text-slate-400">Wait before the next step</div></div>
         </button>
+
+        {/* Action categories */}
+        <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1 mt-4">Actions</div>
+        {ACTION_CATEGORIES.map(cat => {
+          const items = ACTION_CATALOG.filter(a => a.cat === cat.id);
+          if (!items.length) return null;
+          const cc = catColors[cat.id] || catColors.workflow;
+          const isOpen = openCats[cat.id] !== false;
+          return (
+            <div key={cat.id} className={`rounded-xl border ${cc.border} overflow-hidden`}>
+              <button type="button" className={`w-full flex items-center justify-between px-3 py-2.5 ${cc.bg} transition-colors`} onClick={() => toggleCat(cat.id)}>
+                <div className={`flex items-center gap-2 text-xs font-bold uppercase tracking-widest ${cc.text}`}>
+                  {cat.icon} {cat.label}
+                </div>
+                <ChevronRight className={`w-4 h-4 ${cc.text} transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+              </button>
+              {isOpen && (
+                <div className="p-2 space-y-1 bg-white">
+                  {items.map(a => (
+                    <button key={a.id} className={`w-full text-left px-3 py-2.5 rounded-lg border border-transparent ${cc.hover} transition-all flex items-center gap-3 group`} onClick={() => onAddStep('action', { type: a.type })}>
+                      <div className={`p-1.5 rounded-lg ${cc.btnBg} ${cc.btnText}`}>{a.icon}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-slate-700">{a.label}</div>
+                        {a.desc && <div className="text-[11px] text-slate-400 truncate">{a.desc}</div>}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </>
   );
@@ -1037,9 +1211,14 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           <div>
             <label className="text-xs font-semibold text-slate-500 mb-1 block">Action type</label>
             <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.actionType || 'send_whatsapp_text'} onChange={(e) => { const cat = ACTION_CATALOG.find(a => a.type === e.target.value) || ACTION_CATALOG[0]; onUpdate({ actionType: e.target.value, actionLabel: cat.label }); }}>
-              {ACTION_CATALOG.map(a => (<option key={a.id} value={a.type}>{a.label}</option>))}
+              {ACTION_CATEGORIES.map(cat => {
+                const items = ACTION_CATALOG.filter(a => a.cat === cat.id);
+                return (<optgroup key={cat.id} label={cat.label}>{items.map(a => (<option key={a.id} value={a.type}>{a.label}</option>))}</optgroup>);
+              })}
             </select>
           </div>
+
+          {/* ── Send Text ── */}
           {d.actionType === 'send_whatsapp_text' && (
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Message text</label>
@@ -1047,67 +1226,201 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               <div className="flex justify-end mt-1 mb-2">
                 <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmoji: !d._showEmoji })}>😀</button>
               </div>
-              {d._showEmoji && (
-                <div className="mb-3 border rounded-xl overflow-hidden shadow-sm">
-                  <EmojiPicker width="100%" height={300} onEmojiClick={(ev) => insertVar(ev.emoji)} />
-                </div>
-              )}
+              {d._showEmoji && (<div className="mb-3 border rounded-xl overflow-hidden shadow-sm"><EmojiPicker width="100%" height={300} onEmojiClick={(ev) => insertVar(ev.emoji)} /></div>)}
               <PlatformVariableSelector onInsert={insertVar} />
             </div>
           )}
-          {d.actionType === 'send_whatsapp_template' && (<>
+
+          {/* ── Send Template (RICH) ── */}
+          {(d.actionType === 'send_whatsapp_template' || d.actionType === 'order_confirmation_flow') && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Template</label>
-              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateName || ''} onChange={(e) => onUpdate({ templateName: e.target.value, description: `Template: ${e.target.value}` })}>
+              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateName || ''} onChange={(e) => {
+                const tn = e.target.value;
+                const tpl = (templates || []).find(t => t.name === tn);
+                const lang = tpl?.language || 'en';
+                const varNames = _inferBodyVarNamesFromTpl(tpl);
+                const tplVars = varNames.map(() => '');
+                const headerType = _getTemplateHeaderType(tpl);
+                onUpdate({ templateName: tn, templateLanguage: lang, templateVars: tplVars, templateHeaderType: headerType, templateHeaderUrl: '', description: `Template: ${tn}` });
+              }}>
                 <option value="">Select a template…</option>
-                {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (<option key={tp.name} value={tp.name}>{tp.name} ({tp.language})</option>))}
+                {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (
+                  <option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>
+                ))}
               </select>
             </div>
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Language</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateLanguage || 'en'} onChange={(e) => onUpdate({ templateLanguage: e.target.value })} /></div>
+            {d.templateName && (<>
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs">
+                <span className="font-semibold text-emerald-800">Language:</span>
+                <span className="text-emerald-600 ml-1 font-mono">{d.templateLanguage || 'en'}</span>
+                <span className="text-emerald-400 ml-2">(auto-detected)</span>
+              </div>
+              {/* Variable slots */}
+              {(d.templateVars || []).length > 0 && (
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 mb-2 block">Body Variables ({(d.templateVars || []).length})</label>
+                  {(d.templateVars || []).map((v, i) => (
+                    <div key={i} className="flex items-center gap-2 mb-2">
+                      <span className="text-xs text-slate-400 font-mono w-10 flex-shrink-0">{`{{${i+1}}}`}</span>
+                      <input className="flex-1 border rounded-lg px-3 py-1.5 text-sm" value={v} onChange={(e) => { const nv = [...(d.templateVars || [])]; nv[i] = e.target.value; onUpdate({ templateVars: nv }); }} placeholder="e.g. {{ order_number }}" />
+                    </div>
+                  ))}
+                  <PlatformVariableSelector onInsert={(v) => { const nv = [...(d.templateVars || [])]; const ei = nv.findIndex(x => !x); if (ei >= 0) { nv[ei] = v; onUpdate({ templateVars: nv }); } }} />
+                </div>
+              )}
+              {/* Header URL */}
+              {d.templateHeaderType && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(d.templateHeaderType) && (
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Header {d.templateHeaderType.toLowerCase()} URL</label>
+                  <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateHeaderUrl || ''} onChange={(e) => onUpdate({ templateHeaderUrl: e.target.value })} placeholder={`https://example.com/file.${d.templateHeaderType === 'IMAGE' ? 'jpg' : d.templateHeaderType === 'VIDEO' ? 'mp4' : 'pdf'}`} />
+                  <div className="text-[10px] text-slate-400 mt-1">This template requires a {d.templateHeaderType.toLowerCase()} header</div>
+                </div>
+              )}
+            </>)}
           </>)}
+
+          {/* ── Confirmation Flow extras ── */}
+          {d.actionType === 'order_confirmation_flow' && d.templateName && (<>
+            <div className="border-t pt-3 mt-2">
+              <div className="text-xs font-bold text-slate-600 mb-2">Confirmation Flow Settings</div>
+              <div>
+                <label className="text-xs font-semibold text-slate-500 mb-1 block">Entry gate mode</label>
+                <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.ocEntryGateMode || 'all'} onChange={(e) => onUpdate({ ocEntryGateMode: e.target.value })}>
+                  <option value="all">All orders</option>
+                  <option value="tag_or_online_store">Only tagged / online store orders</option>
+                </select>
+              </div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocConfirmTitles || ''} onChange={(e) => onUpdate({ ocConfirmTitles: e.target.value })} /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocChangeTitles || ''} onChange={(e) => onUpdate({ ocChangeTitles: e.target.value })} /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocTalkTitles || ''} onChange={(e) => onUpdate({ ocTalkTitles: e.target.value })} /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocConfirmAudioUrl || ''} onChange={(e) => onUpdate({ ocConfirmAudioUrl: e.target.value })} placeholder="https://…" /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocChangeAudioUrl || ''} onChange={(e) => onUpdate({ ocChangeAudioUrl: e.target.value })} placeholder="https://…" /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocTalkAudioUrl || ''} onChange={(e) => onUpdate({ ocTalkAudioUrl: e.target.value })} placeholder="https://…" /></div>
+              <div className="mt-2 flex items-center gap-3">
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={d.ocSendItems !== false} onChange={(e) => onUpdate({ ocSendItems: e.target.checked })} /> Send order items</label>
+                {d.ocSendItems !== false && (<div className="flex items-center gap-2"><span className="text-xs text-slate-500">Max items</span><input type="number" className="w-16 border rounded px-2 py-1 text-sm" value={d.ocMaxItems || 10} min={1} max={30} onChange={(e) => onUpdate({ ocMaxItems: Number(e.target.value) || 10 })} /></div>)}
+              </div>
+            </div>
+          </>)}
+
+          {/* ── Buttons ── */}
           {d.actionType === 'send_buttons' && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
               <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.buttonsText || ''} onChange={(e) => onUpdate({ buttonsText: e.target.value, description: 'Buttons: ' + e.target.value.slice(0, 30) })} placeholder="Message body…" />
-              <div className="flex justify-end mt-1 mb-2">
-                <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmojiBtn: !d._showEmojiBtn })}>😀</button>
-              </div>
-              {d._showEmojiBtn && (
-                <div className="mb-3 border rounded-xl overflow-hidden shadow-sm">
-                  <EmojiPicker width="100%" height={300} onEmojiClick={(ev) => onUpdate({ buttonsText: (d.buttonsText || '') + ev.emoji })} />
-                </div>
-              )}
+              <div className="flex justify-end mt-1 mb-2"><button type="button" className="text-xl opacity-70 hover:opacity-100" onClick={() => onUpdate({ _showEmojiBtn: !d._showEmojiBtn })}>😀</button></div>
+              {d._showEmojiBtn && (<div className="mb-3 border rounded-xl overflow-hidden shadow-sm"><EmojiPicker width="100%" height={300} onEmojiClick={(ev) => onUpdate({ buttonsText: (d.buttonsText || '') + ev.emoji })} /></div>)}
               <PlatformVariableSelector onInsert={(v) => onUpdate({ buttonsText: (d.buttonsText || '') + v })} />
             </div>
             <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Buttons (one per line)</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none font-mono" value={d.buttonsLines || ''} onChange={(e) => onUpdate({ buttonsLines: e.target.value })} placeholder={"Confirm ✅\nChange order\nTalk to agent"} />
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Buttons (id|title per line)</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none font-mono" value={d.buttonsLines || ''} onChange={(e) => onUpdate({ buttonsLines: e.target.value })} placeholder={"confirm|Confirm ✅\nchange|Change order\ntalk|Talk to agent"} />
             </div>
           </>)}
+
+          {/* ── List ── */}
+          {d.actionType === 'send_list' && (<>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.listText || ''} onChange={(e) => onUpdate({ listText: e.target.value, description: 'List: ' + e.target.value.slice(0, 30) })} placeholder="Message body…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ listText: (d.listText || '') + v })} />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Button text</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.listButtonText || 'Choose'} onChange={(e) => onUpdate({ listButtonText: e.target.value })} /></div>
+              <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Section title</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.listSectionTitle || ''} onChange={(e) => onUpdate({ listSectionTitle: e.target.value })} placeholder="Options" /></div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Rows (id|title|description per line)</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-24 resize-none font-mono" value={d.listRowsLines || ''} onChange={(e) => onUpdate({ listRowsLines: e.target.value })} placeholder={"opt_1|Option One|Description\nopt_2|Option Two"} />
+            </div>
+          </>)}
+
+          {/* ── Image ── */}
           {d.actionType === 'send_image' && (<>
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Image URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.imageUrl || ''} onChange={(e) => onUpdate({ imageUrl: e.target.value, description: 'Image' })} placeholder="https://…" /></div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
               <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.caption || ''} onChange={(e) => onUpdate({ caption: e.target.value })} />
-              <div className="flex justify-end mt-1 mb-2">
-                <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmojiCap: !d._showEmojiCap })}>😀</button>
-              </div>
-              {d._showEmojiCap && (
-                <div className="mb-3 border rounded-xl overflow-hidden shadow-sm">
-                  <EmojiPicker width="100%" height={300} onEmojiClick={(ev) => onUpdate({ caption: (d.caption || '') + ev.emoji })} />
-                </div>
-              )}
               <PlatformVariableSelector onInsert={(v) => onUpdate({ caption: (d.caption || '') + v })} />
             </div>
           </>)}
+
+          {/* ── Video ── */}
+          {d.actionType === 'send_video' && (<>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Video URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.videoUrl || ''} onChange={(e) => onUpdate({ videoUrl: e.target.value, description: 'Video' })} placeholder="https://…" /></div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.caption || ''} onChange={(e) => onUpdate({ caption: e.target.value })} />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ caption: (d.caption || '') + v })} />
+            </div>
+          </>)}
+
+          {/* ── Audio ── */}
           {d.actionType === 'send_audio' && (
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Audio URL</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.audioUrl || ''} onChange={(e) => onUpdate({ audioUrl: e.target.value, description: 'Audio' })} placeholder="https://…" /></div>
           )}
+
+          {/* ── Tag / Remove Tag ── */}
           {(d.actionType === 'shopify_tag' || d.actionType === 'shopify_remove_tag') && (
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">{d.actionType === 'shopify_remove_tag' ? 'Tag to remove' : 'Tag to add'}</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.tag || ''} onChange={(e) => onUpdate({ tag: e.target.value, description: `Tag: ${e.target.value}` })} placeholder="e.g. VIP, confirmed" /></div>
           )}
+
+          {/* ── Order Status Lookup ── */}
+          {d.actionType === 'shopify_order_status' && (
+            <div className="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
+              <div className="font-semibold mb-1">Order Status Lookup</div>
+              <div className="text-xs">Automatically looks up the customer's latest orders from Shopify and sends the status in Arabic. No configuration needed.</div>
+            </div>
+          )}
+
+          {/* ── Catalog Item ── */}
+          {d.actionType === 'send_catalog_item' && (<>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Product retailer ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.catalogItemRetailerId || ''} onChange={(e) => onUpdate({ catalogItemRetailerId: e.target.value, description: `Catalog: ${e.target.value}` })} placeholder="e.g. SKU-001" /></div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogItemCaption || ''} onChange={(e) => onUpdate({ catalogItemCaption: e.target.value })} placeholder="Product description…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ catalogItemCaption: (d.catalogItemCaption || '') + v })} />
+            </div>
+          </>)}
+
+          {/* ── Catalog Set ── */}
+          {d.actionType === 'send_catalog_set' && (<>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Catalog set ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.catalogSetId || ''} onChange={(e) => onUpdate({ catalogSetId: e.target.value, description: `Set: ${e.target.value}` })} placeholder="e.g. summer_2024" /></div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogSetCaption || ''} onChange={(e) => onUpdate({ catalogSetCaption: e.target.value })} placeholder="Collection description…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ catalogSetCaption: (d.catalogSetCaption || '') + v })} />
+            </div>
+          </>)}
+
+          {/* ── Last Order Items + Audio ── */}
+          {d.actionType === 'send_last_order_catalog_items' && (<>
+            <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-sm text-pink-700">
+              <div className="font-semibold mb-1">Last Order Catalog Items</div>
+              <div className="text-xs">Sends the customer's last order items as interactive catalog product cards.</div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Max items to send</label>
+              <input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" value={d.lastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpdate({ lastOrderItemsMax: Number(e.target.value) || 10 })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Audio URL (optional)</label>
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.lastOrderAudioUrl || ''} onChange={(e) => onUpdate({ lastOrderAudioUrl: e.target.value })} placeholder="https://… (voice note to accompany)" />
+            </div>
+          </>)}
+
+          {/* ── Assign Agent ── */}
           {d.actionType === 'assign_agent' && (
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Agent name</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.agent || ''} onChange={(e) => onUpdate({ agent: e.target.value, description: `Assign: ${e.target.value}` })} placeholder="e.g. support-team" /></div>
+          )}
+
+          {/* ── Close / Exit ── */}
+          {d.actionType === 'close_conversation' && (
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-600">Marks the conversation as resolved. No config needed.</div>
+          )}
+          {d.actionType === 'exit' && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-sm text-rose-600">Stops the workflow here. No further actions will execute.</div>
           )}
         </>)}
 
@@ -1205,23 +1518,95 @@ export default function FlowBuilder() {
     for (const a of acts) {
       const aId = uid();
       const at = String(a.type || '').toLowerCase();
-      let actionType = 'send_whatsapp_text';
-      let label = 'Send Text';
-      if (at.includes('template')) { actionType = 'send_whatsapp_template'; label = 'Send Template'; }
-      else if (at === 'exit') { actionType = 'exit'; label = 'Stop'; }
-      else if (at.includes('tag')) { actionType = 'shopify_tag'; label = 'Tag Customer'; }
-      else if (at === 'delay') { actionType = 'delay'; label = 'Delay'; }
 
       if (at === 'delay') {
         nodes.push(rfNode(aId, 'delayFlow', 0, yPos, { minutes: a.minutes || 10 }));
       } else {
+        // Map rule action type → flow actionType + label + data
+        let actionType = 'send_whatsapp_text';
+        let label = 'Send Text';
+        const extra = {};
+        if (at.includes('template') && !at.includes('confirmation') && !at.includes('order')) {
+          actionType = 'send_whatsapp_template'; label = 'Send Template';
+          extra.templateName = a.template_name || '';
+          extra.templateLanguage = a.language || 'en';
+          // Restore template vars from components
+          const bodyComp = (a.components || []).find(c => c?.type === 'body');
+          extra.templateVars = (bodyComp?.parameters || []).map(p => p?.text || '');
+          const headerComp = (a.components || []).find(c => c?.type === 'header');
+          if (headerComp?.parameters?.[0]) {
+            const hp = headerComp.parameters[0];
+            if (hp.image) { extra.templateHeaderType = 'IMAGE'; extra.templateHeaderUrl = hp.image.link || ''; }
+            else if (hp.video) { extra.templateHeaderType = 'VIDEO'; extra.templateHeaderUrl = hp.video.link || ''; }
+            else if (hp.document) { extra.templateHeaderType = 'DOCUMENT'; extra.templateHeaderUrl = hp.document.link || ''; }
+          }
+        } else if (at === 'order_confirmation_flow') {
+          actionType = 'order_confirmation_flow'; label = 'Confirmation Flow';
+          extra.templateName = a.template_name || '';
+          extra.templateLanguage = a.language || 'en';
+          const bodyComp = (a.components || []).find(c => c?.type === 'body');
+          extra.templateVars = (bodyComp?.parameters || []).map(p => p?.text || '');
+          extra.ocEntryGateMode = a.entry_gate_mode || 'all';
+          extra.ocConfirmTitles = (a.confirm_titles || []).join('\n');
+          extra.ocChangeTitles = (a.change_titles || []).join('\n');
+          extra.ocTalkTitles = (a.talk_titles || []).join('\n');
+          extra.ocConfirmAudioUrl = a.confirm_audio_url || '';
+          extra.ocChangeAudioUrl = a.change_audio_url || '';
+          extra.ocTalkAudioUrl = a.talk_audio_url || '';
+          extra.ocSendItems = a.send_items !== false;
+          extra.ocMaxItems = a.max_items || 10;
+        } else if (at === 'send_buttons') {
+          actionType = 'send_buttons'; label = 'Send Buttons';
+          extra.buttonsText = a.text || '';
+          extra.buttonsLines = (a.buttons || []).map(b => `${b.id}|${b.title}`).join('\n');
+        } else if (at === 'send_list') {
+          actionType = 'send_list'; label = 'Send List';
+          extra.listText = a.text || '';
+          extra.listButtonText = a.button_text || 'Choose';
+          const sec = (a.sections || [])[0] || {};
+          extra.listSectionTitle = sec.title || '';
+          extra.listRowsLines = (sec.rows || []).map(r => `${r.id}|${r.title}${r.description ? '|' + r.description : ''}`).join('\n');
+        } else if (at === 'send_image') {
+          actionType = 'send_image'; label = 'Send Image';
+          extra.imageUrl = a.image_url || ''; extra.caption = a.caption || '';
+        } else if (at === 'send_video') {
+          actionType = 'send_video'; label = 'Send Video';
+          extra.videoUrl = a.video_url || ''; extra.caption = a.caption || '';
+        } else if (at === 'send_audio' || at === 'send_audio_url') {
+          actionType = 'send_audio'; label = 'Send Audio';
+          extra.audioUrl = a.audio_url || '';
+        } else if (at === 'add_tag' || (at.includes('tag') && !at.includes('remove'))) {
+          actionType = 'shopify_tag'; label = 'Tag Customer';
+          extra.tag = a.tag || '';
+        } else if (at === 'remove_tag' || (at.includes('remove') && at.includes('tag'))) {
+          actionType = 'shopify_remove_tag'; label = 'Remove Tag';
+          extra.tag = a.tag || '';
+        } else if (at === 'shopify_order_status') {
+          actionType = 'shopify_order_status'; label = 'Order Status';
+        } else if (at === 'send_catalog_item') {
+          actionType = 'send_catalog_item'; label = 'Catalog Item';
+          extra.catalogItemRetailerId = a.retailer_id || ''; extra.catalogItemCaption = a.caption || '';
+        } else if (at === 'send_catalog_set') {
+          actionType = 'send_catalog_set'; label = 'Catalog Set';
+          extra.catalogSetId = a.set_id || ''; extra.catalogSetCaption = a.caption || '';
+        } else if (at === 'send_last_order_catalog_items') {
+          actionType = 'send_last_order_catalog_items'; label = 'Last Order Items';
+          extra.lastOrderItemsMax = a.max_items || 10;
+        } else if (at === 'assign_agent') {
+          actionType = 'assign_agent'; label = 'Assign Agent';
+          extra.agent = a.agent || '';
+        } else if (at === 'close_conversation') {
+          actionType = 'close_conversation'; label = 'Close';
+        } else if (at === 'exit') {
+          actionType = 'exit'; label = 'Stop';
+        }
+
+        const catEntry = ACTION_CATALOG.find(c => c.type === actionType);
         nodes.push(rfNode(aId, 'actionFlow', 0, yPos, {
-          actionType, actionLabel: label,
+          actionType, actionLabel: catEntry?.label || label,
           text: a.text || '',
-          templateName: a.template_name || '',
-          templateLanguage: a.language || 'en',
-          tag: a.tag || '',
-          description: a.preview || a.text?.slice(0, 50) || a.template_name || '',
+          description: a.preview || a.text?.slice(0, 50) || a.template_name || label,
+          ...extra,
         }));
       }
       edges.push(rfEdge(lastId, aId));

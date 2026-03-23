@@ -929,6 +929,58 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
           } else if (at === 'exit') {
             actions.push({ type: 'exit' });
           }
+          // Collect button_actions from buttonReply child nodes
+          const childIds = target.data?.buttonChildIds || [];
+          if (childIds.length > 0 && actions.length > 0) {
+            const lastAction = actions[actions.length - 1];
+            const btnActions = [];
+            for (const cid of childIds) {
+              const childNode = nodes.find(n => n.id === cid && n.type === 'buttonReply');
+              if (!childNode) continue;
+              const cd = childNode.data || {};
+              if (!cd.replyActionType) continue;
+              const btnAction = { button_id: cd.buttonId || '', button_text: cd.buttonText || '', action: { type: cd.replyActionType } };
+              const ra = cd.replyActionType;
+              if (ra === 'send_whatsapp_text') { btnAction.action.text = cd.replyText || ''; btnAction.action.to = '{{ phone }}'; }
+              else if (ra === 'send_whatsapp_template') {
+                btnAction.action.template_name = cd.replyTemplateName || '';
+                btnAction.action.language = cd.replyTemplateLanguage || 'en';
+                btnAction.action.to = '{{ phone }}';
+                const rvars = Array.isArray(cd.replyTemplateVars) ? cd.replyTemplateVars : [];
+                const rbp = rvars.filter(v => String(v || '').trim()).map(v => ({ type: 'text', text: String(v) }));
+                if (rbp.length) btnAction.action.components = [{ type: 'body', parameters: rbp }];
+              }
+              else if (ra === 'send_catalog_set') { btnAction.action.to = '{{ phone }}'; btnAction.action.set_id = cd.replyCatalogSetId || ''; btnAction.action.caption = cd.replyCatalogSetCaption || ''; }
+              else if (ra === 'send_catalog_item') { btnAction.action.to = '{{ phone }}'; btnAction.action.retailer_id = cd.replyCatalogItemRetailerId || ''; btnAction.action.caption = cd.replyCatalogItemCaption || ''; }
+              else if (ra === 'send_audio') { btnAction.action.to = '{{ phone }}'; btnAction.action.audio_url = cd.replyAudioUrl || ''; }
+              else if (ra === 'send_image') { btnAction.action.to = '{{ phone }}'; btnAction.action.image_url = cd.replyImageUrl || ''; btnAction.action.caption = cd.replyImageCaption || ''; }
+              else if (ra === 'send_video') { btnAction.action.to = '{{ phone }}'; btnAction.action.video_url = cd.replyVideoUrl || ''; btnAction.action.caption = cd.replyVideoCaption || ''; }
+              else if (ra === 'send_list') {
+                btnAction.action.to = '{{ phone }}'; btnAction.action.text = cd.replyListText || '';
+                btnAction.action.button_text = cd.replyListButtonText || 'Choose';
+                const rlRows = String(cd.replyListRowsLines || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
+                const rows = rlRows.map(ln => { const p = ln.split('|'); const id = p[0]?.trim(); const title = p[1]?.trim(); const desc = p.slice(2).join('|').trim(); if (!id || !title) return null; const row = { id, title }; if (desc) row.description = desc; return row; }).filter(Boolean);
+                if (rows.length) btnAction.action.sections = [{ ...(cd.replyListSectionTitle ? { title: cd.replyListSectionTitle } : {}), rows }];
+              }
+              else if (ra === 'send_buttons') {
+                btnAction.action.to = '{{ phone }}'; btnAction.action.text = cd.replyButtonsText || '';
+                const blines = String(cd.replyButtonsLines || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
+                const btns = blines.map((ln, i) => { const parts = ln.split('|'); let id = parts[0]?.trim(); let title = parts.slice(1).join('|').trim(); if (!title && id) { title = id; id = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24) || `btn_${i+1}`; } return id && title ? { id, title } : null; }).filter(Boolean);
+                if (btns.length) btnAction.action.buttons = btns;
+              }
+              else if (ra === 'send_last_order_catalog_items') { btnAction.action.to = '{{ phone }}'; btnAction.action.max_items = Number(cd.replyLastOrderItemsMax || 10); }
+              else if (ra === 'shopify_order_status') { /* no config needed */ }
+              else if (ra === 'shopify_tag') { btnAction.action.tag = cd.replyTag || ''; }
+              else if (ra === 'shopify_remove_tag') { btnAction.action.tag = cd.replyTag || ''; }
+              else if (ra === 'assign_agent') { btnAction.action.agent = cd.replyAgent || ''; }
+              else if (ra === 'close_conversation') { /* no config */ }
+              else if (ra === 'exit') { /* no config */ }
+              btnActions.push(btnAction);
+            }
+            if (btnActions.length > 0) {
+              lastAction.button_actions = btnActions;
+            }
+          }
           collectActions(target.id, visited);
         }
       }
@@ -1711,7 +1763,6 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           </>)}
 
-
           {/* ── Assign Agent ── */}
           {d.actionType === 'assign_agent' && (
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Agent name</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.agent || ''} onChange={(e) => onUpdate({ agent: e.target.value, description: `Assign: ${e.target.value}` })} placeholder="e.g. support-team" /></div>
@@ -1734,7 +1785,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
         {t === 'buttonReply' && (<>
           <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-200">
             <div className="text-xs font-bold text-indigo-700 mb-1">When customer clicks</div>
-            <div className="text-sm font-semibold text-slate-800">“{d.buttonText || 'Button'}”</div>
+            <div className="text-sm font-semibold text-slate-800">"{d.buttonText || 'Button'}"</div>
           </div>
           <div>
             <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply action</label>
@@ -1753,7 +1804,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               })}
             </select>
           </div>
-          {/* Reply text for send_whatsapp_text */}
+          {/* ── Send Text ── */}
           {d.replyActionType === 'send_whatsapp_text' && (
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply message</label>
@@ -1761,18 +1812,135 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               <PlatformVariableSelector onInsert={(v) => onUpdate({ replyText: (d.replyText || '') + v })} />
             </div>
           )}
-          {/* Reply template for send_whatsapp_template */}
-          {d.replyActionType === 'send_whatsapp_template' && (
+          {/* ── Send Template ── */}
+          {d.replyActionType === 'send_whatsapp_template' && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply template</label>
-              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyTemplateName || ''} onChange={(e) => onUpdate({ replyTemplateName: e.target.value })}>
+              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyTemplateName || ''} onChange={(e) => {
+                const tn = e.target.value;
+                const tpl = (templates || []).find(t2 => t2.name === tn);
+                const lang = tpl?.language || 'en';
+                const varNames = _inferBodyVarNamesFromTpl(tpl);
+                const tplVars = varNames.map(() => '');
+                onUpdate({ replyTemplateName: tn, replyTemplateLanguage: lang, replyTemplateVars: tplVars });
+              }}>
                 <option value="">Select a template…</option>
                 {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (
                   <option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>
                 ))}
               </select>
             </div>
+            {d.replyTemplateName && (d.replyTemplateVars || []).length > 0 && (
+              <div>
+                <label className="text-xs font-semibold text-slate-500 mb-2 block">Body Variables ({(d.replyTemplateVars || []).length})</label>
+                {(d.replyTemplateVars || []).map((v, i) => (
+                  <div key={i} className="flex items-center gap-2 mb-2">
+                    <span className="text-xs text-slate-400 font-mono w-10 flex-shrink-0">{`{{${i+1}}}`}</span>
+                    <input className="flex-1 border rounded-lg px-3 py-1.5 text-sm" value={v} onChange={(e) => { const nv = [...(d.replyTemplateVars || [])]; nv[i] = e.target.value; onUpdate({ replyTemplateVars: nv }); }} placeholder="e.g. {{ order_number }}" />
+                  </div>
+                ))}
+                <PlatformVariableSelector onInsert={(v) => { const nv = [...(d.replyTemplateVars || [])]; const ei = nv.findIndex(x => !x); if (ei >= 0) { nv[ei] = v; onUpdate({ replyTemplateVars: nv }); } }} />
+              </div>
+            )}
+          </>)}
+          {/* ── Send Catalog Set ── */}
+          {d.replyActionType === 'send_catalog_set' && (<>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Catalog set ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyCatalogSetId || ''} onChange={(e) => onUpdate({ replyCatalogSetId: e.target.value })} placeholder="e.g. summer_2024" /></div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyCatalogSetCaption || ''} onChange={(e) => onUpdate({ replyCatalogSetCaption: e.target.value })} placeholder="Collection description…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyCatalogSetCaption: (d.replyCatalogSetCaption || '') + v })} />
+            </div>
+          </>)}
+          {/* ── Send Catalog Item ── */}
+          {d.replyActionType === 'send_catalog_item' && (<>
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Product retailer ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyCatalogItemRetailerId || ''} onChange={(e) => onUpdate({ replyCatalogItemRetailerId: e.target.value })} placeholder="e.g. SKU-001" /></div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyCatalogItemCaption || ''} onChange={(e) => onUpdate({ replyCatalogItemCaption: e.target.value })} placeholder="Product description…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyCatalogItemCaption: (d.replyCatalogItemCaption || '') + v })} />
+            </div>
+          </>)}
+          {/* ── Send Audio ── */}
+          {d.replyActionType === 'send_audio' && (
+            <GcsMediaUpload label="Audio" accept="audio/*,.ogg,.m4a,.opus" value={d.replyAudioUrl || ''} onChange={(url) => onUpdate({ replyAudioUrl: url })} />
           )}
+          {/* ── Send Image ── */}
+          {d.replyActionType === 'send_image' && (<>
+            <GcsMediaUpload label="Image" accept="image/*" value={d.replyImageUrl || ''} onChange={(url) => onUpdate({ replyImageUrl: url })} />
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyImageCaption || ''} onChange={(e) => onUpdate({ replyImageCaption: e.target.value })} />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyImageCaption: (d.replyImageCaption || '') + v })} />
+            </div>
+          </>)}
+          {/* ── Send Video ── */}
+          {d.replyActionType === 'send_video' && (<>
+            <GcsMediaUpload label="Video" accept="video/*" value={d.replyVideoUrl || ''} onChange={(url) => onUpdate({ replyVideoUrl: url })} />
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyVideoCaption || ''} onChange={(e) => onUpdate({ replyVideoCaption: e.target.value })} />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyVideoCaption: (d.replyVideoCaption || '') + v })} />
+            </div>
+          </>)}
+          {/* ── Send List ── */}
+          {d.replyActionType === 'send_list' && (<>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.replyListText || ''} onChange={(e) => onUpdate({ replyListText: e.target.value })} placeholder="Message body…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyListText: (d.replyListText || '') + v })} />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Button text</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyListButtonText || 'Choose'} onChange={(e) => onUpdate({ replyListButtonText: e.target.value })} /></div>
+              <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Section title</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyListSectionTitle || ''} onChange={(e) => onUpdate({ replyListSectionTitle: e.target.value })} placeholder="Options" /></div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Rows (id|title|description per line)</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-24 resize-none font-mono" value={d.replyListRowsLines || ''} onChange={(e) => onUpdate({ replyListRowsLines: e.target.value })} placeholder={"opt_1|Option One|Description\nopt_2|Option Two"} />
+            </div>
+          </>)}
+          {/* ── Send Buttons ── */}
+          {d.replyActionType === 'send_buttons' && (<>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.replyButtonsText || ''} onChange={(e) => onUpdate({ replyButtonsText: e.target.value })} placeholder="Message body…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyButtonsText: (d.replyButtonsText || '') + v })} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Buttons (id|title per line)</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none font-mono" value={d.replyButtonsLines || ''} onChange={(e) => onUpdate({ replyButtonsLines: e.target.value })} placeholder={"confirm|Confirm ✅\nchange|Change order"} />
+            </div>
+          </>)}
+          {/* ── Last Order Items ── */}
+          {d.replyActionType === 'send_last_order_catalog_items' && (<>
+            <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-sm text-pink-700">
+              <div className="font-semibold mb-1">Last Order Catalog Items</div>
+              <div className="text-xs">Sends the customer's last order items as catalog cards.</div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Max items to send</label>
+              <input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyLastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpdate({ replyLastOrderItemsMax: Number(e.target.value) || 10 })} />
+            </div>
+          </>)}
+          {/* ── Order Status Lookup ── */}
+          {d.replyActionType === 'shopify_order_status' && (
+            <div className="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
+              <div className="font-semibold mb-1">Order Status Lookup</div>
+              <div className="text-xs">Automatically looks up the customer's latest orders and sends the status. No configuration needed.</div>
+            </div>
+          )}
+          {/* ── Tag / Remove Tag ── */}
+          {(d.replyActionType === 'shopify_tag' || d.replyActionType === 'shopify_remove_tag') && (
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">{d.replyActionType === 'shopify_remove_tag' ? 'Tag to remove' : 'Tag to add'}</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyTag || ''} onChange={(e) => onUpdate({ replyTag: e.target.value })} placeholder="e.g. VIP, confirmed" /></div>
+          )}
+          {/* ── Order Confirmation Flow ── */}
+          {d.replyActionType === 'order_confirmation_flow' && (
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-700">
+              <div className="font-semibold mb-1">Confirmation Flow</div>
+              <div className="text-xs">Multi-step order confirmation with buttons. Configure this as a top-level action for full control.</div>
+            </div>
+          )}
+          {/* ── Close / Exit / Assign ── */}
           {d.replyActionType === 'close_conversation' && (
             <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-600">Marks conversation as resolved.</div>
           )}

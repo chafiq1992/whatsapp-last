@@ -9271,6 +9271,128 @@ class MessageProcessor:
             except Exception:
                 pass
 
+            # Flow Builder button_actions: check if there's a pending button reply action for this user
+            try:
+                reply_id_fb = str((message_obj or {}).get("interactive_id") or "").strip()
+                reply_title_fb = str((message_obj or {}).get("interactive_title") or "").strip()
+                if reply_id_fb or reply_title_fb:
+                    ws_fb = _coerce_workspace(ws)
+                    rds = getattr(self.redis_manager, "redis_client", None)
+                    if rds:
+                        fb_key = f"flow_builder:button_actions:{ws_fb}:{user_id}"
+                        fb_raw = await rds.get(fb_key)
+                        if fb_raw:
+                            import json as _json
+                            fb_data = _json.loads(fb_raw) if isinstance(fb_raw, (str, bytes, bytearray)) else fb_raw
+                            if isinstance(fb_data, list):
+                                matched_action = None
+                                for ba in fb_data:
+                                    if not isinstance(ba, dict):
+                                        continue
+                                    ba_id = str(ba.get("button_id") or "").strip()
+                                    ba_text = str(ba.get("button_text") or "").strip()
+                                    if (ba_id and ba_id == reply_id_fb) or (ba_text and ba_text.lower() == reply_title_fb.lower()):
+                                        matched_action = ba.get("action")
+                                        break
+                                if isinstance(matched_action, dict):
+                                    # Remove the pending button_actions (one-shot)
+                                    await rds.delete(fb_key)
+                                    # Execute the matched button reply action
+                                    fb_at = str(matched_action.get("type") or "").strip().lower()
+                                    fb_ctx = dict(ctx)
+                                    if fb_at in ("send_text", "send_whatsapp_text"):
+                                        msg = self._render_template(str(matched_action.get("text") or ""), fb_ctx).strip()
+                                        if msg:
+                                            await self.process_outgoing_message({
+                                                "user_id": self._render_template(str(matched_action.get("to") or "{{ phone }}"), fb_ctx).strip() or user_id,
+                                                "type": "text", "from_me": True, "message": msg,
+                                                "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
+                                            })
+                                    elif fb_at in ("send_template", "send_whatsapp_template"):
+                                        tname = self._render_template(str(matched_action.get("template_name") or ""), fb_ctx).strip()
+                                        if tname:
+                                            lang = str(matched_action.get("language") or "en").strip() or "en"
+                                            comps = self._render_template_components(matched_action.get("components") or [], fb_ctx)
+                                            await self.process_outgoing_message({
+                                                "user_id": self._render_template(str(matched_action.get("to") or "{{ phone }}"), fb_ctx).strip() or user_id,
+                                                "type": "text", "from_me": True,
+                                                "message": f"[template] {tname}",
+                                                "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
+                                                "template_name": tname, "template_language": lang, "template_components": comps,
+                                            })
+                                    elif fb_at in ("send_audio", "send_audio_url"):
+                                        audio_url = str(matched_action.get("audio_url") or "").strip()
+                                        if audio_url:
+                                            await self.process_outgoing_message({
+                                                "user_id": user_id, "type": "audio", "from_me": True,
+                                                "message": audio_url, "url": audio_url,
+                                                "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
+                                            })
+                                    elif fb_at in ("send_image",):
+                                        img_url = str(matched_action.get("image_url") or "").strip()
+                                        if img_url:
+                                            await self.process_outgoing_message({
+                                                "user_id": user_id, "type": "image", "from_me": True,
+                                                "message": img_url, "url": img_url,
+                                                "caption": str(matched_action.get("caption") or ""),
+                                                "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
+                                            })
+                                    elif fb_at in ("send_video",):
+                                        vid_url = str(matched_action.get("video_url") or "").strip()
+                                        if vid_url:
+                                            await self.process_outgoing_message({
+                                                "user_id": user_id, "type": "video", "from_me": True,
+                                                "message": vid_url, "url": vid_url,
+                                                "caption": str(matched_action.get("caption") or ""),
+                                                "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
+                                            })
+                                    elif fb_at == "close_conversation":
+                                        try:
+                                            meta = await self.db_manager.get_conversation_meta(user_id)
+                                            tags = list((meta or {}).get("tags") or [])
+                                            if "Done" not in tags:
+                                                tags.append("Done")
+                                                await self.db_manager.set_conversation_tags(user_id, tags)
+                                        except Exception:
+                                            pass
+                                    elif fb_at == "assign_agent":
+                                        try:
+                                            agent = str(matched_action.get("agent") or "").strip()
+                                            if agent:
+                                                await self.db_manager.set_conversation_meta(user_id, {"assigned_agent": agent})
+                                        except Exception:
+                                            pass
+                                    elif fb_at == "shopify_order_status":
+                                        try:
+                                            await self._send_order_status_for_user(user_id=user_id, ws=ws_fb)
+                                        except Exception:
+                                            pass
+                                    elif fb_at in ("shopify_tag",):
+                                        tag = str(matched_action.get("tag") or "").strip()
+                                        if tag:
+                                            try:
+                                                meta = await self.db_manager.get_conversation_meta(user_id)
+                                                tags = list((meta or {}).get("tags") or [])
+                                                if tag not in tags:
+                                                    tags.append(tag)
+                                                    await self.db_manager.set_conversation_tags(user_id, tags)
+                                            except Exception:
+                                                pass
+                                    elif fb_at in ("shopify_remove_tag",):
+                                        tag = str(matched_action.get("tag") or "").strip()
+                                        if tag:
+                                            try:
+                                                meta = await self.db_manager.get_conversation_meta(user_id)
+                                                tags = list((meta or {}).get("tags") or [])
+                                                tags = [t for t in tags if t != tag]
+                                                await self.db_manager.set_conversation_tags(user_id, tags)
+                                            except Exception:
+                                                pass
+                                    # Button reply handled; skip normal rule matching
+                                    return
+            except Exception:
+                pass
+
             for rule in rules:
                 try:
                     if not isinstance(rule, dict):
@@ -9700,6 +9822,17 @@ class MessageProcessor:
                                         pass
                                 except Exception:
                                     pass
+                        # Flow Builder button_actions: store pending reply actions for this user
+                        try:
+                            ba_list = act.get("button_actions")
+                            if isinstance(ba_list, list) and len(ba_list) > 0:
+                                rds = getattr(self.redis_manager, "redis_client", None)
+                                if rds:
+                                    import json as _json
+                                    fb_key = f"flow_builder:button_actions:{_coerce_workspace(ws)}:{user_id}"
+                                    await rds.setex(fb_key, 24 * 3600, _json.dumps(ba_list))
+                        except Exception:
+                            pass
                 except Exception as exc:
                     print(f"automation rule failed: {exc}")
                     continue

@@ -10240,6 +10240,19 @@ class MessageProcessor:
                             except Exception:
                                 pass
 
+                        # Flow Builder button_actions: store pending reply actions (same as _run_simple_automations)
+                        try:
+                            ba_list = act.get("button_actions")
+                            if isinstance(ba_list, list) and len(ba_list) > 0 and to_id:
+                                rds = getattr(self.redis_manager, "redis_client", None)
+                                if rds:
+                                    import json as _json
+                                    fb_key = f"flow_builder:button_actions:{_coerce_workspace(ws)}:{to_id}"
+                                    await rds.setex(fb_key, 24 * 3600, _json.dumps(ba_list))
+                                    _log.info("shopify_automation ws=%s rule=%s stored %d button_actions for user=%s", ws, rule_id, len(ba_list), to_id)
+                        except Exception:
+                            pass
+
                         # After any Shopify send action, schedule confirmation_wtp2/wtp3 follow-up rules
                         if to_id and at in ("send_template", "send_whatsapp_template", "order_confirmation_flow"):
                             try:
@@ -12242,6 +12255,41 @@ async def test_media_upload(file: UploadFile = File(...)):
     except Exception as e:
         print(f"❌ Test upload error: {e}")
         return {"error": str(e), "status": "failed"}
+
+
+# ───────────────────────── Admin Media Upload (GCS) ─────────────────────────
+@app.post("/admin/upload-media")
+async def admin_upload_media(
+    file: UploadFile = File(...),
+):
+    """Upload a media file to GCS and return the public URL.
+
+    Used by the Flow Builder GcsMediaUpload component (audio, image, video
+    header uploads, button-reply media, etc.).
+    """
+    try:
+        MEDIA_DIR.mkdir(exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        suffix = Path(file.filename or "media").suffix or ".bin"
+        filename = f"admin_upload_{timestamp}_{uuid.uuid4().hex[:8]}{suffix}"
+        file_path = MEDIA_DIR / filename
+
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty file")
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        # Upload to GCS
+        gcs_url = await upload_file_to_gcs(str(file_path))
+        if not gcs_url:
+            raise HTTPException(status_code=500, detail="GCS upload returned empty URL")
+        return {"url": gcs_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ admin/upload-media error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ───────────────────────── Internal Notes Upload (no WhatsApp send) ─────────────────────────

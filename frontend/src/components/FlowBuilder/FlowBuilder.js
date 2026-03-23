@@ -11,7 +11,7 @@ import {
   ShoppingCart, MessageSquare, ScanLine, Zap,
   SplitSquareHorizontal, Timer, Ban,
   ChevronRight, X, List, Package, Search,
-  CheckCircle, FileText,
+  CheckCircle, FileText, BarChart2, MousePointerClick,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 
@@ -213,6 +213,19 @@ function _getTemplateHeaderType(tpl) {
   } catch { return ''; }
 }
 
+function _getTemplateButtons(tpl) {
+  try {
+    const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+    const btnComp = comps.find(c => String(c?.type || '').toUpperCase() === 'BUTTONS');
+    if (!btnComp || !Array.isArray(btnComp.buttons)) return [];
+    return btnComp.buttons.map((b, i) => ({
+      id: String(b?.id || b?.text || `btn_${i}`).toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24) || `btn_${i}`,
+      text: String(b?.text || b?.id || `Button ${i + 1}`),
+      type: String(b?.type || 'QUICK_REPLY').toUpperCase(),
+    }));
+  } catch { return []; }
+}
+
 const ACTION_CATEGORIES = [
   { id: 'whatsapp', label: 'WhatsApp Messaging', icon: <MessageSquare className="w-3.5 h-3.5" />, color: 'green' },
   { id: 'shopify',  label: 'Shopify Actions',    icon: <ShoppingCart className="w-3.5 h-3.5" />,  color: 'emerald' },
@@ -330,7 +343,7 @@ function rfEdge(source, target, sourceHandle, label) {
 /* ═══════════════════════════════════════════════════════════
    Saved flows list — shows existing flows created in this tab
    ═══════════════════════════════════════════════════════════ */
-function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading }) {
+function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading, stats }) {
   return (
     <div className="h-full flex flex-col bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-slate-50 via-white to-indigo-50">
       {/* Header bar */}
@@ -378,35 +391,52 @@ function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading }) {
           </div>
         ) : (
           <div className="grid gap-3 max-w-4xl">
-            {flows.map((f) => (
-              <div
-                key={f.id}
-                className="p-4 rounded-xl border border-slate-200 bg-white flex items-center justify-between hover:border-blue-300 hover:shadow-sm transition-all cursor-pointer group"
-                onClick={() => onSelect(f)}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <div className="text-sm font-semibold text-slate-800 group-hover:text-blue-600 transition-colors truncate">{f.name || f.id}</div>
-                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${f.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
-                      {f.enabled ? 'Active' : 'Inactive'}
-                    </span>
+            {flows.map((f) => {
+              const s = (stats || {})[f.id] || {};
+              const triggers = s.triggers || 0;
+              const msgs = s.messages_sent || 0;
+              const lastTs = s.last_trigger_ts;
+              return (
+                <div
+                  key={f.id}
+                  className="p-4 rounded-xl border border-slate-200 bg-white flex items-center justify-between hover:border-blue-300 hover:shadow-sm transition-all cursor-pointer group"
+                  onClick={() => onSelect(f)}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="text-sm font-semibold text-slate-800 group-hover:text-blue-600 transition-colors truncate">{f.name || f.id}</div>
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${f.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                        {f.enabled ? 'Active' : 'Inactive'}
+                      </span>
+                      {triggers > 0 && (
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100 flex items-center gap-1">
+                          <BarChart2 className="w-2.5 h-2.5" /> {triggers.toLocaleString()} triggers
+                        </span>
+                      )}
+                      {msgs > 0 && (
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-100 flex items-center gap-1">
+                          <MessageSquare className="w-2.5 h-2.5" /> {msgs.toLocaleString()} sent
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-1 flex items-center gap-3">
+                      <span className="truncate">Trigger: {f.trigger?.source || 'whatsapp'} / {f.trigger?.event || 'incoming'}</span>
+                      {lastTs && <span className="flex-shrink-0">Last run: {new Date(lastTs).toLocaleDateString()}</span>}
+                    </div>
                   </div>
-                  <div className="text-xs text-slate-400 mt-1 truncate">
-                    Trigger: {f.trigger?.source || 'whatsapp'} / {f.trigger?.event || 'incoming'}
+                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="p-2 rounded-lg text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition-colors"
+                      onClick={() => onDelete(f.id)}
+                      title="Delete flow"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                    <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-blue-400 transition-colors" />
                   </div>
                 </div>
-                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    className="p-2 rounded-lg text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition-colors"
-                    onClick={() => onDelete(f.id)}
-                    title="Delete flow"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                  <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-blue-400 transition-colors" />
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -417,7 +447,7 @@ function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading }) {
 /* ═══════════════════════════════════════════════════════════
    MAIN FlowBuilder component
    ═══════════════════════════════════════════════════════════ */
-function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, allRules }) {
+function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, allRules, flowStats }) {
   const [nodes, setNodes] = useState(initialFlow?.nodes || []);
   const [edges, setEdges] = useState(initialFlow?.edges || []);
   const [flowName, setFlowName] = useState(initialFlow?.meta?.name || '');
@@ -427,6 +457,9 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [sidePanel, setSidePanel] = useState(null); // 'trigger_picker' | 'step_picker' | 'node_editor'
   const [addAfterNodeId, setAddAfterNodeId] = useState(null);
+
+  // Current flow-level stats (triggers, messages_sent)
+  const flowStat = flowStats || {};
 
   const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [nodes, selectedNodeId]);
   const currentTriggerNode = useMemo(() => nodes.find(n => n.type === 'startTrigger' && n.data?.configured), [nodes]);
@@ -602,9 +635,81 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       });
     }
 
+    // FIX 1: Do NOT auto-select the new step node
     setSidePanel(null);
     setAddAfterNodeId(null);
+    setSelectedNodeId(null);
   }, [addAfterNodeId, nodes]);
+
+  /* ── Spawn button child nodes from a template ────────── */
+  const spawnButtonChildNodes = useCallback((actionNodeId, buttonDefs) => {
+    setNodes(prev => {
+      const actionNode = prev.find(n => n.id === actionNodeId);
+      if (!actionNode) return prev;
+
+      // Remove any old button-reply children
+      const oldChildIds = actionNode.data?.buttonChildIds || [];
+      const withoutOld = prev.filter(n => !oldChildIds.includes(n.id));
+
+      if (!buttonDefs || buttonDefs.length === 0) {
+        // Patch action node to remove buttonChildIds
+        return withoutOld.map(n => n.id === actionNodeId
+          ? { ...n, data: { ...n.data, buttonChildIds: [], buttonDefs: [] } }
+          : n
+        );
+      }
+
+      const ax = actionNode.position.x;
+      const ay = actionNode.position.y;
+      const total = buttonDefs.length;
+      const spread = 220;
+      const startX = ax - ((total - 1) * spread) / 2;
+
+      const newChildIds = [];
+      const newChildNodes = buttonDefs.map((btn, i) => {
+        const childId = uid();
+        newChildIds.push(childId);
+        return rfNode(childId, 'buttonReply', startX + i * spread, ay + 320, {
+          buttonText: btn.text,
+          buttonId: btn.id,
+          buttonIndex: i,
+          replyActionType: '',
+          replyActionLabel: '',
+          replyText: '',
+          replyTemplateName: '',
+        });
+      });
+
+      const patched = withoutOld.map(n => n.id === actionNodeId
+        ? { ...n, data: { ...n.data, buttonChildIds: newChildIds, buttonDefs } }
+        : n
+      );
+      return [...patched, ...newChildNodes];
+    });
+
+    setEdges(prev => {
+      // Get fresh action node data from latest node state snapshot (we use updater above)
+      // Remove old button edges from this action node
+      const withoutOld = prev.filter(e => !(e.source === actionNodeId && String(e.sourceHandle || '').startsWith('btn_')));
+      return withoutOld;
+    });
+
+    // Add new edges in a separate update after nodes settle
+    setTimeout(() => {
+      setNodes(currentNodes => {
+        const actionNode = currentNodes.find(n => n.id === actionNodeId);
+        if (!actionNode) return currentNodes;
+        const childIds = actionNode.data?.buttonChildIds || [];
+        setEdges(prev => {
+          const withoutOld = prev.filter(e => !(e.source === actionNodeId && String(e.sourceHandle || '').startsWith('btn_')));
+          const newEdges = childIds.map((childId, i) => rfEdge(actionNodeId, childId, `btn_${i}`));
+          return [...withoutOld, ...newEdges];
+        });
+        return currentNodes;
+      });
+    }, 0);
+  }, []);
+
 
   /* ── Configure trigger ──────────────────────────────── */
   const configureTrigger = useCallback((source, event, label) => {
@@ -641,7 +746,13 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       if (n.id !== nodeId) return n;
       return { ...n, data: { ...n.data, ...patch } };
     }));
-  }, []);
+    // When template name changes, auto-spawn or remove button child nodes
+    if ('templateName' in patch) {
+      const tpl = (templates || []).find(t => t.name === patch.templateName);
+      const btns = _getTemplateButtons(tpl);
+      spawnButtonChildNodes(nodeId, btns);
+    }
+  }, [templates, spawnButtonChildNodes]);
 
   /* ── Delete a node ──────────────────────────────────── */
   const deleteNode = useCallback((nodeId) => {
@@ -877,6 +988,21 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             onChange={(e) => setFlowName(e.target.value)}
             placeholder="Untitled flow…"
           />
+          {/* Metrics badges */}
+          {(flowStat.triggers > 0 || flowStat.messages_sent > 0) && (
+            <div className="flex items-center gap-1.5">
+              {flowStat.triggers > 0 && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100 flex items-center gap-1">
+                  <BarChart2 className="w-2.5 h-2.5" /> {flowStat.triggers.toLocaleString()} triggers
+                </span>
+              )}
+              {flowStat.messages_sent > 0 && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-100 flex items-center gap-1">
+                  <MessageSquare className="w-2.5 h-2.5" /> {flowStat.messages_sent.toLocaleString()} sent
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -957,6 +1083,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
                 onSelectTrigger={configureTrigger}
                 triggerSource={currentTriggerNode?.data.source}
                 triggerEvent={currentTriggerNode?.data.event}
+                onSpawnButtons={(btns) => spawnButtonChildNodes(selectedNode.id, btns)}
               />
             )}
           </div>
@@ -1128,7 +1255,7 @@ function PlatformVariableSelector({ onInsert }) {
   );
 }
 
-function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelectTrigger, triggerSource, triggerEvent }) {
+function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelectTrigger, triggerSource, triggerEvent, onSpawnButtons }) {
   const d = node.data || {};
   const t = node.type;
   const [customField, setCustomField] = React.useState('');
@@ -1138,7 +1265,13 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
   return (
     <>
       <div className="flex items-center justify-between p-4 border-b">
-        <h3 className="font-semibold text-slate-800">{t === 'startTrigger' ? 'Edit Trigger' : t === 'conditionFlow' ? 'Edit Condition' : t === 'delayFlow' ? 'Edit Delay' : 'Edit Action'}</h3>
+        <h3 className="font-semibold text-slate-800">
+          {t === 'startTrigger' ? 'Edit Trigger'
+            : t === 'conditionFlow' ? 'Edit Condition'
+            : t === 'delayFlow' ? 'Edit Delay'
+            : t === 'buttonReply' ? 'Button Reply Action'
+            : 'Edit Action'}
+        </h3>
         <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="w-4 h-4" /></button>
       </div>
       <div className="p-4 space-y-4 flex-1 overflow-y-auto">
@@ -1427,6 +1560,61 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
         {t === 'delayFlow' && (
           <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Wait (minutes)</label><input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" value={d.minutes || 10} min={1} onChange={(e) => onUpdate({ minutes: Math.max(1, Number(e.target.value) || 1) })} /></div>
         )}
+
+        {/* ── Button Reply node editor ── */}
+        {t === 'buttonReply' && (<>
+          <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-200">
+            <div className="text-xs font-bold text-indigo-700 mb-1">When customer clicks</div>
+            <div className="text-sm font-semibold text-slate-800">“{d.buttonText || 'Button'}”</div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply action</label>
+            <select
+              className="w-full border rounded-lg px-3 py-2 text-sm bg-white"
+              value={d.replyActionType || ''}
+              onChange={(e) => {
+                const cat = ACTION_CATALOG.find(a => a.type === e.target.value);
+                onUpdate({ replyActionType: e.target.value, replyActionLabel: cat?.label || e.target.value });
+              }}
+            >
+              <option value="">-- No reply action --</option>
+              {ACTION_CATEGORIES.map(cat => {
+                const items = ACTION_CATALOG.filter(a => a.cat === cat.id);
+                return (<optgroup key={cat.id} label={cat.label}>{items.map(a => (<option key={a.id} value={a.type}>{a.label}</option>))}</optgroup>);
+              })}
+            </select>
+          </div>
+          {/* Reply text for send_whatsapp_text */}
+          {d.replyActionType === 'send_whatsapp_text' && (
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply message</label>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-24 resize-none" value={d.replyText || ''} onChange={(e) => onUpdate({ replyText: e.target.value })} placeholder="Message to send when this button is clicked…" />
+              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyText: (d.replyText || '') + v })} />
+            </div>
+          )}
+          {/* Reply template for send_whatsapp_template */}
+          {d.replyActionType === 'send_whatsapp_template' && (
+            <div>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply template</label>
+              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyTemplateName || ''} onChange={(e) => onUpdate({ replyTemplateName: e.target.value })}>
+                <option value="">Select a template…</option>
+                {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (
+                  <option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {d.replyActionType === 'close_conversation' && (
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-600">Marks conversation as resolved.</div>
+          )}
+          {d.replyActionType === 'assign_agent' && (
+            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Agent name</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyAgent || ''} onChange={(e) => onUpdate({ replyAgent: e.target.value })} placeholder="e.g. support-team" /></div>
+          )}
+          {d.replyActionType === 'exit' && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-sm text-rose-600">Stops the workflow for this button branch.</div>
+          )}
+        </>)}
+
       </div>
       {t !== 'startTrigger' && (
         <div className="p-4 border-t"><button className="w-full px-4 py-2.5 rounded-lg text-sm font-medium text-rose-600 border border-rose-200 hover:bg-rose-50 transition-colors flex items-center justify-center gap-2" onClick={onDelete}><Trash2 className="w-4 h-4" /> Delete this step</button></div>
@@ -1444,6 +1632,8 @@ export default function FlowBuilder() {
   const [loading, setLoading] = useState(true);
   const [editingFlow, setEditingFlow] = useState(null); // the flow graph being edited
   const [templates, setTemplates] = useState([]);
+  const [stats, setStats] = useState({}); // per-rule stats from /automation/rules/stats
+  const [editingRuleId, setEditingRuleId] = useState(null); // rule id being edited
 
   const loadRules = useCallback(async () => {
     setLoading(true);
@@ -1466,10 +1656,20 @@ export default function FlowBuilder() {
     }
   }, []);
 
+  const loadStats = useCallback(async () => {
+    try {
+      const res = await api.get('/automation/rules/stats');
+      setStats((res?.data?.stats && typeof res.data.stats === 'object') ? res.data.stats : {});
+    } catch {
+      setStats({});
+    }
+  }, []);
+
   useEffect(() => {
     loadRules();
     loadTemplates();
-  }, [loadRules, loadTemplates]);
+    loadStats();
+  }, [loadRules, loadTemplates, loadStats]);
 
   /* ── Build a blank flow (empty canvas) ──────────────── */
   const newBlankFlow = useCallback(() => {
@@ -1649,16 +1849,19 @@ export default function FlowBuilder() {
     if (template) {
       const flow = template.build();
       setEditingFlow(flow);
+      setEditingRuleId(null);
       setView('canvas');
     } else if (rule) {
       const flow = openRuleAsFlow(rule);
       setEditingFlow(flow);
+      setEditingRuleId(rule.id || null);
       setView('canvas');
     }
   }, [openRuleAsFlow]);
 
   const handleNewFlow = useCallback(() => {
     setEditingFlow(newBlankFlow());
+    setEditingRuleId(null);
     setView('canvas');
   }, [newBlankFlow]);
 
@@ -1686,6 +1889,7 @@ export default function FlowBuilder() {
           allRules={rules}
           onBack={handleBack}
           onSaveToBackend={saveToBackend}
+          flowStats={editingRuleId ? (stats[editingRuleId] || {}) : {}}
         />
       </ReactFlowProvider>
     );
@@ -1698,6 +1902,7 @@ export default function FlowBuilder() {
       onSelect={handleSelectFlow}
       onNewFlow={handleNewFlow}
       onDelete={handleDeleteFlow}
+      stats={stats}
     />
   );
 }

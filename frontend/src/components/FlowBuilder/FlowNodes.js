@@ -2,7 +2,7 @@ import React from 'react';
 import { Handle, Position } from '@xyflow/react';
 import {
   ShoppingCart, MessageSquare, ScanLine, Activity, Plus,
-  SplitSquareHorizontal, Timer, Ban, Zap,
+  SplitSquareHorizontal, Timer, Ban, Zap, MousePointerClick,
 } from 'lucide-react';
 
 /* ── colour map ─────────────────────────────────────────── */
@@ -19,6 +19,21 @@ const TRIGGER_ICONS = {
   retargeting: <Activity className="w-5 h-5" />,
 };
 
+/* ── Metrics badge ──────────────────────────────────────── */
+function MetricsBadge({ metrics }) {
+  if (!metrics) return null;
+  const runs = metrics.runs || 0;
+  const triggers = metrics.triggers || 0;
+  const count = runs || triggers;
+  if (!count) return null;
+  return (
+    <div className="absolute -top-2.5 -right-2.5 flex items-center gap-1 bg-slate-800 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full shadow-lg z-10 border border-slate-700">
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+      {count.toLocaleString()}
+    </div>
+  );
+}
+
 /* ── Start trigger placeholder ──────────────────────────── */
 export function StartTriggerNode({ data }) {
   const isConfigured = data?.configured;
@@ -27,6 +42,7 @@ export function StartTriggerNode({ data }) {
       className="relative cursor-pointer group"
       onClick={() => data?.onSelect?.()}
     >
+      <MetricsBadge metrics={data?.metrics} />
       {isConfigured ? (
         <div className={`rounded-2xl shadow-lg border-2 ${TRIGGER_COLOURS[data.source]?.border || 'border-emerald-300'} ${TRIGGER_COLOURS[data.source]?.bg || 'bg-emerald-50'} p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02]`}>
           <div className="flex items-center gap-3 mb-3">
@@ -67,6 +83,7 @@ export function ConditionFlowNode({ data }) {
       className="relative cursor-pointer group"
       onClick={() => data?.onSelect?.()}
     >
+      <MetricsBadge metrics={data?.metrics} />
       <Handle type="target" position={Position.Top} className="!w-3 !h-3 !bg-amber-500 !border-2 !border-white !shadow" />
       <div className="rounded-2xl shadow-lg border-2 border-amber-300 bg-amber-50 p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02]">
         <div className="flex items-center gap-3 mb-3">
@@ -103,11 +120,15 @@ export function ConditionFlowNode({ data }) {
 export function ActionFlowNode({ data }) {
   const actionLabel = data?.actionLabel || data?.label || 'Action';
   const isExit = data?.actionType === 'exit';
+  const buttonChildIds = data?.buttonChildIds || [];
+  const buttonDefs = data?.buttonDefs || []; // [{id, text}]
+
   return (
     <div
       className="relative cursor-pointer group"
       onClick={() => data?.onSelect?.()}
     >
+      <MetricsBadge metrics={data?.metrics} />
       <Handle type="target" position={Position.Top} className="!w-3 !h-3 !bg-blue-500 !border-2 !border-white !shadow" />
       <div className={`rounded-2xl shadow-lg border-2 p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02] ${isExit ? 'border-rose-300 bg-rose-50' : 'border-blue-300 bg-blue-50'}`}>
         <div className="flex items-center gap-3 mb-3">
@@ -122,11 +143,40 @@ export function ActionFlowNode({ data }) {
         {data.description && (
           <div className="text-xs text-slate-500 bg-white/60 rounded-lg px-3 py-2 mb-2">{data.description}</div>
         )}
-        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-medium">
-          Click to configure
-        </div>
+        {buttonDefs.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            {buttonDefs.map((btn, i) => (
+              <span key={i} className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200 font-medium">
+                {btn.text || btn.id}
+              </span>
+            ))}
+          </div>
+        )}
+        {!buttonDefs.length && (
+          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-medium">
+            Click to configure
+          </div>
+        )}
       </div>
-      <Handle type="source" position={Position.Bottom} className="!w-3 !h-3 !bg-blue-500 !border-2 !border-white !shadow" />
+      {/* Default bottom handle — only shown when no button children */}
+      {buttonChildIds.length === 0 && (
+        <Handle type="source" position={Position.Bottom} className="!w-3 !h-3 !bg-blue-500 !border-2 !border-white !shadow" />
+      )}
+      {/* Per-button source handles */}
+      {buttonChildIds.length > 0 && buttonDefs.map((btn, i) => {
+        const total = buttonDefs.length;
+        const pct = total === 1 ? 50 : 20 + (i / (total - 1)) * 60;
+        return (
+          <Handle
+            key={`btn_${i}`}
+            type="source"
+            position={Position.Bottom}
+            id={`btn_${i}`}
+            className="!w-2.5 !h-2.5 !bg-indigo-500 !border-2 !border-white !shadow"
+            style={{ left: `${pct}%` }}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -154,6 +204,7 @@ export function DelayFlowNode({ data }) {
       className="relative cursor-pointer group"
       onClick={() => data?.onSelect?.()}
     >
+      <MetricsBadge metrics={data?.metrics} />
       <Handle type="target" position={Position.Top} className="!w-3 !h-3 !bg-violet-500 !border-2 !border-white !shadow" />
       <div className="rounded-2xl shadow-lg border-2 border-violet-300 bg-violet-50 p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02]">
         <div className="flex items-center gap-3 mb-3">
@@ -173,10 +224,41 @@ export function DelayFlowNode({ data }) {
   );
 }
 
+/* ── Button Reply node ───────────────────────────────────── */
+export function ButtonReplyNode({ data }) {
+  const btnText = data?.buttonText || 'Button';
+  const hasAction = !!data?.replyActionType;
+  return (
+    <div
+      className="relative cursor-pointer group"
+      onClick={() => data?.onSelect?.()}
+    >
+      <MetricsBadge metrics={data?.metrics} />
+      <Handle type="target" position={Position.Top} className="!w-3 !h-3 !bg-indigo-400 !border-2 !border-white !shadow" />
+      <div className="rounded-xl shadow-md border-2 border-indigo-300 bg-indigo-50 px-4 py-3 min-w-[200px] transition-all hover:shadow-lg hover:scale-[1.02]">
+        <div className="flex items-center gap-2 mb-1.5">
+          <div className="p-1.5 rounded-lg bg-white shadow-sm text-indigo-600">
+            <MousePointerClick className="w-4 h-4" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-[9px] font-bold uppercase tracking-widest text-indigo-400 mb-0">Button Reply</div>
+            <div className="text-xs font-semibold text-slate-800 truncate">"{btnText}"</div>
+          </div>
+        </div>
+        <div className={`text-[10px] px-2 py-1 rounded-lg font-medium ${hasAction ? 'bg-indigo-100 text-indigo-700' : 'bg-white/60 text-slate-400 italic'}`}>
+          {hasAction ? `→ ${data.replyActionLabel || data.replyActionType}` : 'Click to set reply action'}
+        </div>
+      </div>
+      <Handle type="source" position={Position.Bottom} className="!w-3 !h-3 !bg-indigo-400 !border-2 !border-white !shadow" />
+    </div>
+  );
+}
+
 export const flowNodeTypes = {
   startTrigger:  StartTriggerNode,
   conditionFlow: ConditionFlowNode,
   actionFlow:    ActionFlowNode,
   addStep:       AddStepNode,
   delayFlow:     DelayFlowNode,
+  buttonReply:   ButtonReplyNode,
 };

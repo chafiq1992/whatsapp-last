@@ -477,12 +477,15 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
 
   const onNodeSelect = useCallback((nodeId) => {
     setSelectedNodeId(nodeId);
-    const n = nodes.find(nd => nd.id === nodeId);
-    if (n && n.type !== 'addStep') {
-      setSidePanel('node_editor');
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes]);
+    // Use setNodes updater to read fresh nodes (avoids stale closure)
+    setNodes(currentNodes => {
+      const n = currentNodes.find(nd => nd.id === nodeId);
+      if (n && n.type !== 'addStep' && n.type !== 'addStepFlow') {
+        setSidePanel('node_editor');
+      }
+      return currentNodes; // no mutation
+    });
+  }, []);
 
   /* Inject callbacks into nodes */
   const nodesWithCallbacks = useMemo(() => {
@@ -493,7 +496,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         onSelect: () => {
           if (n.type === 'startTrigger' && !n.data.configured) {
             onTriggerSelect();
-          } else if (n.type === 'addStep') {
+          } else if (n.type === 'addStep' || n.type === 'addStepFlow') {
             onAddStepClick(n.id);
           } else {
             onNodeSelect(n.id);
@@ -647,16 +650,9 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       const actionNode = prev.find(n => n.id === actionNodeId);
       if (!actionNode) return prev;
 
-      // Remove any old button-reply children AND any addStep children below them
+      // Remove any old button-reply children
       const oldChildIds = actionNode.data?.buttonChildIds || [];
-      // Also collect addStep nodes that were children of button reply nodes
-      const oldAddStepIds = prev
-        .filter(n => n.type === 'addStepFlow' && oldChildIds.some(bid => {
-          // addStep nodes have id format `add_${buttonId}`
-          return n.id === `add_${bid}`;
-        }))
-        .map(n => n.id);
-      const withoutOld = prev.filter(n => !oldChildIds.includes(n.id) && !oldAddStepIds.includes(n.id));
+      const withoutOld = prev.filter(n => !oldChildIds.includes(n.id));
 
       if (!buttonDefs || buttonDefs.length === 0) {
         // Patch action node to remove buttonChildIds
@@ -675,29 +671,23 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       const newChildIds = [];
       const newChildNodes = buttonDefs.map((btn, i) => {
         const childId = uid();
-        const addStepId = `add_${childId}`;
         newChildIds.push(childId);
-        return [
-          rfNode(childId, 'buttonReply', startX + i * spread, ay + 320, {
-            buttonText: btn.text,
-            buttonId: btn.id,
-            buttonIndex: i,
-            replyActionType: '',
-            replyActionLabel: '',
-            replyText: '',
-            replyTemplateName: '',
-          }),
-          rfNode(addStepId, 'addStepFlow', startX + i * spread, ay + 500, {}),
-        ];
+        return rfNode(childId, 'buttonReply', startX + i * spread, ay + 320, {
+          buttonText: btn.text,
+          buttonId: btn.id,
+          buttonIndex: i,
+          replyActionType: '',
+          replyActionLabel: '',
+          replyText: '',
+          replyTemplateName: '',
+        });
       });
 
       const patched = withoutOld.map(n => n.id === actionNodeId
         ? { ...n, data: { ...n.data, buttonChildIds: newChildIds, buttonDefs } }
         : n
       );
-      // Flatten the array of arrays from buttonDefs.map
-      const allNewNodes = newChildNodes.flat();
-      return [...patched, ...allNewNodes];
+      return [...patched, ...newChildNodes];
     });
 
     setEdges(prev => {
@@ -1570,11 +1560,12 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               )}
               {/* Header URL */}
               {d.templateHeaderType && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(d.templateHeaderType) && (
-                <div>
-                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Header {d.templateHeaderType.toLowerCase()} URL</label>
-                  <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.templateHeaderUrl || ''} onChange={(e) => onUpdate({ templateHeaderUrl: e.target.value })} placeholder={`https://example.com/file.${d.templateHeaderType === 'IMAGE' ? 'jpg' : d.templateHeaderType === 'VIDEO' ? 'mp4' : 'pdf'}`} />
-                  <div className="text-[10px] text-slate-400 mt-1">This template requires a {d.templateHeaderType.toLowerCase()} header</div>
-                </div>
+                <GcsMediaUpload
+                  label={`Header ${d.templateHeaderType.toLowerCase()}`}
+                  accept={d.templateHeaderType === 'IMAGE' ? 'image/*' : d.templateHeaderType === 'VIDEO' ? 'video/*' : '*/*'}
+                  value={d.templateHeaderUrl || ''}
+                  onChange={(url) => onUpdate({ templateHeaderUrl: url })}
+                />
               )}
             </>)}
           </>)}

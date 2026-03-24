@@ -660,9 +660,29 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       const actionNode = prev.find(n => n.id === actionNodeId);
       if (!actionNode) return prev;
 
-      // Remove any old button-reply children
+      // Remove any old button-reply children AND their addStep children
       const oldChildIds = actionNode.data?.buttonChildIds || [];
-      const withoutOld = prev.filter(n => !oldChildIds.includes(n.id));
+      const oldAddStepIds = actionNode.data?.addStepChildIds || [];
+      const allOldIds = [...oldChildIds, ...oldAddStepIds];
+      // Also remove any actionFlow nodes chained below button replies
+      const chainedActionIds = new Set();
+      const findChainedActions = (startIds, allNodes) => {
+        const queue = [...startIds];
+        while (queue.length) {
+          const nid = queue.shift();
+          const n = allNodes.find(x => x.id === nid);
+          if (!n) continue;
+          // Find edges from this node
+          if (n.data?.actionChildIds) {
+            for (const cid of n.data.actionChildIds) {
+              if (!chainedActionIds.has(cid)) { chainedActionIds.add(cid); queue.push(cid); }
+            }
+          }
+        }
+      };
+      findChainedActions(oldChildIds, prev);
+      const removeSet = new Set([...allOldIds, ...chainedActionIds]);
+      const withoutOld = prev.filter(n => !removeSet.has(n.id));
 
       if (!buttonDefs || buttonDefs.length === 0) {
         // Patch action node to remove buttonChildIds
@@ -679,24 +699,30 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       const startX = ax - ((total - 1) * spread) / 2;
 
       const newChildIds = [];
-      const newChildNodes = buttonDefs.map((btn, i) => {
+      const newAddStepIds = [];
+      const newChildNodes = [];
+      buttonDefs.forEach((btn, i) => {
         const childId = uid();
+        const addStepId = uid();
         newChildIds.push(childId);
-        return rfNode(childId, 'buttonReply', startX + i * spread, ay + 320, {
+        newAddStepIds.push(addStepId);
+        newChildNodes.push(rfNode(childId, 'buttonReply', startX + i * spread, ay + 320, {
           buttonText: btn.text,
           buttonId: btn.id,
           buttonIndex: i,
           replyActions: [],
-          // Legacy single-action fields kept for backward compat
+          addStepChildId: addStepId,
           replyActionType: '',
           replyActionLabel: '',
           replyText: '',
           replyTemplateName: '',
-        });
+        }));
+        // Add an addStep node below each button reply
+        newChildNodes.push(rfNode(addStepId, 'addStep', startX + i * spread, ay + 500, {}));
       });
 
       const patched = withoutOld.map(n => n.id === actionNodeId
-        ? { ...n, data: { ...n.data, buttonChildIds: newChildIds, buttonDefs } }
+        ? { ...n, data: { ...n.data, buttonChildIds: newChildIds, addStepChildIds: newAddStepIds, buttonDefs } }
         : n
       );
       return [...patched, ...newChildNodes];
@@ -709,7 +735,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       return withoutOld;
     });
 
-    // Add new edges in a separate update after nodes settle
+    // Add new edges (buttonReply edges + addStep edges) in a separate update after nodes settle
     setTimeout(() => {
       setNodes(currentNodes => {
         const actionNode = currentNodes.find(n => n.id === actionNodeId);
@@ -717,8 +743,16 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         const childIds = actionNode.data?.buttonChildIds || [];
         setEdges(prev => {
           const withoutOld = prev.filter(e => !(e.source === actionNodeId && String(e.sourceHandle || '').startsWith('btn_')));
-          const newEdges = childIds.map((childId, i) => rfEdge(actionNodeId, childId, `btn_${i}`));
-          return [...withoutOld, ...newEdges];
+          const btnEdges = childIds.map((childId, i) => rfEdge(actionNodeId, childId, `btn_${i}`));
+          // Also add edges from each buttonReply to its addStep child
+          const addStepEdges = [];
+          for (const cid of childIds) {
+            const btnNode = currentNodes.find(n => n.id === cid);
+            if (btnNode?.data?.addStepChildId) {
+              addStepEdges.push(rfEdge(cid, btnNode.data.addStepChildId));
+            }
+          }
+          return [...withoutOld, ...btnEdges, ...addStepEdges];
         });
         return currentNodes;
       });
@@ -981,7 +1015,8 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
           } else if (at === 'exit') {
             actions.push({ type: 'exit' });
           }
-          // Collect button_actions from buttonReply child nodes (multi-action support)
+          // Collect button_actions from buttonReply child nodes
+          // Sources: (1) inline replyActions[] data, (2) chained actionFlow nodes below the buttonReply
           const childIds = target.data?.buttonChildIds || [];
           if (childIds.length > 0 && actions.length > 0) {
             const lastAction = actions[actions.length - 1];
@@ -990,18 +1025,54 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
               const childNode = nodes.find(n => n.id === cid && n.type === 'buttonReply');
               if (!childNode) continue;
               const cd = childNode.data || {};
+              const allSerializedActions = [];
+
+              // (1) Inline replyActions[] from the editor panel
               const multiActions = Array.isArray(cd.replyActions) && cd.replyActions.length > 0 ? cd.replyActions : null;
               if (multiActions) {
-                const serialized = multiActions.map(ra => _serializeOneReplyAction(ra)).filter(Boolean);
-                if (serialized.length) {
-                  btnActions.push({ button_id: cd.buttonId || '', button_text: cd.buttonText || '', actions: serialized });
-                }
+                multiActions.forEach(ra => { const s = _serializeOneReplyAction(ra); if (s) allSerializedActions.push(s); });
               } else if (cd.replyActionType) {
-                // Legacy single-action
-                const singleAction = _serializeOneReplyAction(cd);
-                if (singleAction) {
-                  btnActions.push({ button_id: cd.buttonId || '', button_text: cd.buttonText || '', action: singleAction });
+                const s = _serializeOneReplyAction(cd); if (s) allSerializedActions.push(s);
+              }
+
+              // (2) Walk chained actionFlow nodes below this buttonReply via edges
+              const walkActionChain = (startNodeId, visitedChain = new Set()) => {
+                if (visitedChain.has(startNodeId)) return;
+                visitedChain.add(startNodeId);
+                const outEdges = edges.filter(e => e.source === startNodeId);
+                for (const ce of outEdges) {
+                  const chainTarget = nodes.find(n => n.id === ce.target);
+                  if (!chainTarget || chainTarget.type === 'addStep') continue;
+                  if (chainTarget.type === 'actionFlow') {
+                    const cad = chainTarget.data || {};
+                    const chainAction = _serializeOneReplyAction({
+                      replyActionType: cad.actionType || '',
+                      replyActionLabel: cad.actionLabel || '',
+                      replyText: cad.text || '',
+                      replyTemplateName: cad.templateName || '',
+                      replyTemplateLanguage: cad.templateLanguage || '',
+                      replyTag: cad.tag || '',
+                      replyAgent: cad.agent || '',
+                      replyAudioUrl: cad.audioUrl || '',
+                      replyImageUrl: cad.imageUrl || '',
+                      replyImageCaption: cad.caption || '',
+                      replyVideoUrl: cad.videoUrl || '',
+                      replyVideoCaption: cad.caption || '',
+                      replyCatalogSetId: cad.catalogSetId || '',
+                      replyCatalogSetCaption: cad.catalogSetCaption || '',
+                      replyCatalogItemRetailerId: cad.catalogItemRetailerId || '',
+                      replyCatalogItemCaption: cad.catalogItemCaption || '',
+                      replyLastOrderItemsMax: cad.lastOrderItemsMax || 10,
+                    });
+                    if (chainAction) allSerializedActions.push(chainAction);
+                    walkActionChain(chainTarget.id, visitedChain);
+                  }
                 }
+              };
+              walkActionChain(cid);
+
+              if (allSerializedActions.length) {
+                btnActions.push({ button_id: cd.buttonId || '', button_text: cd.buttonText || '', actions: allSerializedActions });
               }
             }
             if (btnActions.length > 0) {

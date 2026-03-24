@@ -227,7 +227,9 @@ export function DelayFlowNode({ data }) {
 /* ── Button Reply node ───────────────────────────────────── */
 export function ButtonReplyNode({ data }) {
   const btnText = data?.buttonText || 'Button';
-  const hasAction = !!data?.replyActionType;
+  const multiActions = Array.isArray(data?.replyActions) ? data.replyActions : [];
+  const hasAction = multiActions.length > 0 || !!data?.replyActionType;
+  const actionCount = multiActions.length || (data?.replyActionType ? 1 : 0);
   return (
     <div
       className="relative cursor-pointer group"
@@ -246,7 +248,9 @@ export function ButtonReplyNode({ data }) {
           </div>
         </div>
         <div className={`text-[10px] px-2 py-1 rounded-lg font-medium ${hasAction ? 'bg-indigo-100 text-indigo-700' : 'bg-white/60 text-slate-400 italic'}`}>
-          {hasAction ? `→ ${data.replyActionLabel || data.replyActionType}` : 'Click to set reply action'}
+          {hasAction
+            ? actionCount > 1 ? `⚡ ${actionCount} actions` : `→ ${multiActions[0]?.replyActionLabel || data.replyActionLabel || data.replyActionType || 'Action'}`
+            : 'Click to set reply action'}
         </div>
       </div>
       <Handle type="source" position={Position.Bottom} className="!w-3 !h-3 !bg-indigo-400 !border-2 !border-white !shadow" />

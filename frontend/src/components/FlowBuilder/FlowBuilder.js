@@ -16,12 +16,12 @@ import {
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 
-/* ═══════════════════════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    Rich Trigger / Action / Condition catalogs
    Real variables from Shopify, WhatsApp, and Delivery APIs
-   ═══════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 const SHOPIFY_EVENTS = [
-  // ── Orders ──
+  // â”€â”€ Orders â”€â”€
   { id: 'orders/paid', label: 'Order Paid', cat: 'Orders', variables: [
     { key: 'order_number', label: 'Order Number' }, { key: 'id', label: 'Order ID' },
     { key: 'total_price', label: 'Total Price', type: 'number' }, { key: 'subtotal_price', label: 'Subtotal', type: 'number' },
@@ -52,7 +52,7 @@ const SHOPIFY_EVENTS = [
   { id: 'orders/fulfilled', label: 'Order Fulfilled', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
   { id: 'orders/partially_fulfilled', label: 'Order Partially Fulfilled', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
   { id: 'refunds/create', label: 'Refund Created', cat: 'Orders', variables: 'SAME_AS:orders/paid' },
-  // ── Fulfillments ──
+  // â”€â”€ Fulfillments â”€â”€
   { id: 'fulfillments/create', label: 'Fulfillment Created', cat: 'Fulfillments', variables: [
     { key: 'tracking_number', label: 'Tracking Number' }, { key: 'tracking_url', label: 'Tracking URL' },
     { key: 'tracking_company', label: 'Shipping Carrier' }, { key: 'status', label: 'Fulfillment Status' },
@@ -63,7 +63,7 @@ const SHOPIFY_EVENTS = [
     { key: 'line_items[].title', label: 'Fulfilled Items' }, { key: 'line_items[].quantity', label: 'Fulfilled Qty', type: 'number' },
   ]},
   { id: 'fulfillments/update', label: 'Fulfillment Updated', cat: 'Fulfillments', variables: 'SAME_AS:fulfillments/create' },
-  // ── Customers ──
+  // â”€â”€ Customers â”€â”€
   { id: 'customers/create', label: 'New Customer', cat: 'Customers', variables: [
     { key: 'id', label: 'Customer ID' }, { key: 'first_name', label: 'First Name' }, { key: 'last_name', label: 'Last Name' },
     { key: 'email', label: 'Email' }, { key: 'phone', label: 'Phone' },
@@ -75,7 +75,7 @@ const SHOPIFY_EVENTS = [
     { key: 'created_at', label: 'Created At' }, { key: 'note', label: 'Customer Note' },
   ]},
   { id: 'customers/update', label: 'Customer Updated', cat: 'Customers', variables: 'SAME_AS:customers/create' },
-  // ── Checkouts ──
+  // â”€â”€ Checkouts â”€â”€
   { id: 'checkouts/update', label: 'Abandoned Checkout', cat: 'Checkouts', variables: [
     { key: 'id', label: 'Checkout ID' }, { key: 'token', label: 'Checkout Token' },
     { key: 'abandoned_checkout_url', label: 'Recovery URL' },
@@ -87,7 +87,7 @@ const SHOPIFY_EVENTS = [
     { key: 'line_items[].price', label: 'Item Price', type: 'number' },
     { key: 'shipping_address.city', label: 'Shipping City' }, { key: 'currency', label: 'Currency' },
   ]},
-  // ── Draft Orders ──
+  // â”€â”€ Draft Orders â”€â”€
   { id: 'draft_orders/create', label: 'Draft Order Created', cat: 'Draft Orders', variables: [
     { key: 'id', label: 'Draft ID' }, { key: 'name', label: 'Draft Name' },
     { key: 'invoice_url', label: 'Invoice URL' }, { key: 'status', label: 'Status' },
@@ -96,7 +96,7 @@ const SHOPIFY_EVENTS = [
     { key: 'customer.email', label: 'Email' }, { key: 'note', label: 'Note' },
   ]},
   { id: 'draft_orders/update', label: 'Draft Order Updated', cat: 'Draft Orders', variables: 'SAME_AS:draft_orders/create' },
-  // ── Products ──
+  // â”€â”€ Products â”€â”€
   { id: 'products/create', label: 'Product Created', cat: 'Products', variables: [
     { key: 'id', label: 'Product ID' }, { key: 'title', label: 'Product Title' },
     { key: 'vendor', label: 'Vendor' }, { key: 'product_type', label: 'Product Type' },
@@ -191,7 +191,7 @@ function getVariablesForTrigger(source, event) {
   const all = source === 'shopify' ? SHOPIFY_EVENTS : source === 'whatsapp' ? WHATSAPP_EVENTS : DELIVERY_EVENTS;
   const ev = all.find(e => e.id === event);
   const vars = Array.isArray(ev?.variables) ? ev.variables : [];
-  return [...vars, { key: '__custom__', label: '✏️ Custom variable…' }];
+  return [...vars, { key: '__custom__', label: 'âœï¸ Custom variableâ€¦' }];
 }
 
 /* Helper: infer body variable placeholder names from a WhatsApp template */
@@ -227,6 +227,14 @@ function _getTemplateButtons(tpl) {
   } catch { return []; }
 }
 
+function _getTemplateBodyText(tpl) {
+  try {
+    const comps = Array.isArray(tpl?.components) ? tpl.components : [];
+    const body = comps.find(c => String(c?.type || '').toUpperCase() === 'BODY');
+    return body?.text || '';
+  } catch { return ''; }
+}
+
 const ACTION_CATEGORIES = [
   { id: 'whatsapp', label: 'WhatsApp Messaging', icon: <MessageSquare className="w-3.5 h-3.5" />, color: 'green' },
   { id: 'shopify',  label: 'Shopify Actions',    icon: <ShoppingCart className="w-3.5 h-3.5" />,  color: 'emerald' },
@@ -235,7 +243,7 @@ const ACTION_CATEGORIES = [
 ];
 
 const ACTION_CATALOG = [
-  // ── WhatsApp Messaging ──
+  // â”€â”€ WhatsApp Messaging â”€â”€
   { id: 'send_text',         label: 'Send Text Message',       icon: <MessageSquare className="w-4 h-4 text-blue-500" />,    type: 'send_whatsapp_text',            cat: 'whatsapp', desc: 'Send a plain WhatsApp text with variables' },
   { id: 'send_template',     label: 'Send WhatsApp Template',  icon: <FileText className="w-4 h-4 text-emerald-500" />,      type: 'send_whatsapp_template',        cat: 'whatsapp', desc: 'Send an approved template message' },
   { id: 'send_buttons',      label: 'Send Button Message',     icon: <MessageSquare className="w-4 h-4 text-indigo-500" />,  type: 'send_buttons',                  cat: 'whatsapp', desc: 'Interactive message with reply buttons' },
@@ -243,24 +251,24 @@ const ACTION_CATALOG = [
   { id: 'send_image',        label: 'Send Image',              icon: <MessageSquare className="w-4 h-4 text-pink-500" />,    type: 'send_image',                    cat: 'whatsapp', desc: 'Send an image with optional caption' },
   { id: 'send_video',        label: 'Send Video',              icon: <MessageSquare className="w-4 h-4 text-rose-500" />,    type: 'send_video',                    cat: 'whatsapp', desc: 'Send a video with optional caption' },
   { id: 'send_audio',        label: 'Send Audio',              icon: <MessageSquare className="w-4 h-4 text-violet-500" />,  type: 'send_audio',                    cat: 'whatsapp', desc: 'Send a voice message or audio file' },
-  // ── Shopify Actions ──
+  // â”€â”€ Shopify Actions â”€â”€
   { id: 'tag_customer',      label: 'Tag Customer',            icon: <Zap className="w-4 h-4 text-amber-500" />,             type: 'shopify_tag',                   cat: 'shopify',  desc: 'Add a tag to the Shopify customer' },
   { id: 'remove_tag',        label: 'Remove Tag',              icon: <Zap className="w-4 h-4 text-orange-500" />,            type: 'shopify_remove_tag',            cat: 'shopify',  desc: 'Remove a tag from the Shopify customer' },
   { id: 'order_confirm',     label: 'Confirmation Flow',       icon: <CheckCircle className="w-4 h-4 text-emerald-500" />,   type: 'order_confirmation_flow',       cat: 'shopify',  desc: 'Multi-step order confirmation with buttons' },
   { id: 'order_status',      label: 'Order Status Lookup',     icon: <Search className="w-4 h-4 text-sky-500" />,            type: 'shopify_order_status',           cat: 'shopify',  desc: 'Look up and send order status to customer' },
-  // ── Catalog & Orders ──
+  // â”€â”€ Catalog & Orders â”€â”€
   { id: 'catalog_item',      label: 'Send Catalog Item',       icon: <Package className="w-4 h-4 text-indigo-500" />,        type: 'send_catalog_item',             cat: 'catalog',  desc: 'Send a single product from your catalog' },
   { id: 'catalog_set',       label: 'Send Catalog Set',        icon: <Package className="w-4 h-4 text-purple-500" />,        type: 'send_catalog_set',              cat: 'catalog',  desc: 'Send a product set from your catalog' },
   { id: 'last_order_items',  label: 'Last Order Items + Audio', icon: <ShoppingCart className="w-4 h-4 text-pink-500" />,     type: 'send_last_order_catalog_items', cat: 'catalog',  desc: 'Send last order items as catalog cards + audio' },
-  // ── Workflow Control ──
+  // â”€â”€ Workflow Control â”€â”€
   { id: 'assign_agent',      label: 'Assign to Agent',         icon: <Zap className="w-4 h-4 text-cyan-500" />,              type: 'assign_agent',                  cat: 'workflow', desc: 'Route conversation to a specific agent' },
   { id: 'close_conversation',label: 'Close Conversation',      icon: <Ban className="w-4 h-4 text-slate-500" />,             type: 'close_conversation',            cat: 'workflow', desc: 'Mark conversation as resolved' },
   { id: 'exit',              label: 'Stop / Exit',             icon: <Ban className="w-4 h-4 text-rose-500" />,              type: 'exit',                          cat: 'workflow', desc: 'End the workflow here' },
 ];
 
-/* ═══════════════════════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    Pre-built flow templates (one-click install)
-   ═══════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 const FLOW_TEMPLATES = [
   {
     id: 'tpl_order_confirm',
@@ -281,7 +289,7 @@ const FLOW_TEMPLATES = [
         nodes: [
           rfNode(triggerId, 'startTrigger', 0, 0, { configured: true, source: 'shopify', label: 'Order Paid', event: 'orders/paid', description: 'Shopify: orders/paid' }),
           rfNode(condId, 'conditionFlow', 0, 200, { expression: 'total_price > 500', trueLabel: 'VIP', falseLabel: 'Skip', field: 'total_price', operator: '>', value: '500' }),
-          rfNode(actionId, 'actionFlow', -120, 420, { actionType: 'send_text', actionLabel: 'Send Text Message', text: 'مرحبا! أنت عميل VIP 🌟', description: 'Send VIP welcome text' }),
+          rfNode(actionId, 'actionFlow', -120, 420, { actionType: 'send_text', actionLabel: 'Send Text Message', text: 'Ù…Ø±Ø­Ø¨Ø§! Ø£Ù†Øª Ø¹Ù…ÙŠÙ„ VIP ðŸŒŸ', description: 'Send VIP welcome text' }),
           rfNode(addId, 'addStep', 120, 420, {}),
         ],
         edges: [
@@ -319,9 +327,9 @@ function buildTemplateFlow(event, trigLabel, actionId, actionLabel, templateName
   };
 }
 
-/* ═══════════════════════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    Helpers
-   ═══════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 let _seq = 1;
 const uid = () => 'fn_' + Date.now().toString(36) + '_' + (_seq++);
 
@@ -341,9 +349,9 @@ function rfEdge(source, target, sourceHandle, label) {
   };
 }
 
-/* ═══════════════════════════════════════════════════════════
-   Saved flows list — shows existing flows created in this tab
-   ═══════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   Saved flows list â€” shows existing flows created in this tab
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading, stats }) {
   return (
     <div className="h-full flex flex-col bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-slate-50 via-white to-indigo-50">
@@ -381,7 +389,7 @@ function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading, stats })
       {/* Flow list */}
       <div className="flex-1 overflow-auto px-6 py-4">
         {loading ? (
-          <div className="text-sm text-slate-500">Loading…</div>
+          <div className="text-sm text-slate-500">Loadingâ€¦</div>
         ) : (flows || []).length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-4 text-slate-400">
             <Zap className="w-12 h-12 text-slate-300" />
@@ -445,9 +453,9 @@ function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading, stats })
   );
 }
 
-/* ═══════════════════════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    MAIN FlowBuilder component
-   ═══════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, allRules, flowStats }) {
   const [nodes, setNodes] = useState(initialFlow?.nodes || []);
   const [edges, setEdges] = useState(initialFlow?.edges || []);
@@ -468,7 +476,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   const onNodesChange = useCallback((changes) => setNodes(nds => applyNodeChanges(changes, nds)), []);
   const onEdgesChange = useCallback((changes) => setEdges(eds => applyEdgeChanges(changes, eds)), []);
 
-  /* ── Node callbacks (injected into node data) ─────────── */
+  /* â”€â”€ Node callbacks (injected into node data) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const onTriggerSelect = useCallback(() => setSidePanel('trigger_picker'), []);
 
   const onAddStepClick = useCallback((nodeId) => {
@@ -508,7 +516,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     }));
   }, [nodes, onTriggerSelect, onAddStepClick, onNodeSelect]);
 
-  /* ── Adding steps to the flow ────────────────────────── */
+  /* â”€â”€ Adding steps to the flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const addStepToFlow = useCallback((stepType, config = {}) => {
     const parentId = addAfterNodeId;
     if (!parentId) return;
@@ -530,6 +538,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         field: config.field || '',
         operator: config.operator || '==',
         value: config.value || '',
+        conditions: config.conditions || [],
       });
       const addTrue = rfNode(uid(), 'addStep', px - 120, py + 280, {});
       const addFalse = rfNode(uid(), 'addStep', px + 120, py + 280, {});
@@ -549,8 +558,8 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         if (sourceNode) {
           newEdges.push(rfEdge(sourceNode, newId, sourceHandle));
         }
-        newEdges.push(rfEdge(newId, addTrue.id, 'true', '✓ Yes'));
-        newEdges.push(rfEdge(newId, addFalse.id, 'false', '✗ No'));
+        newEdges.push(rfEdge(newId, addTrue.id, 'true', 'âœ“ Yes'));
+        newEdges.push(rfEdge(newId, addFalse.id, 'false', 'âœ— No'));
         return [...clean, ...newEdges];
       });
     } else if (stepType === 'delay') {
@@ -609,9 +618,9 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         lastOrderAudioUrl: config.lastOrderAudioUrl || '',
         // Confirmation flow
         ocEntryGateMode: config.ocEntryGateMode || 'all',
-        ocConfirmTitles: config.ocConfirmTitles || 'تأكيد الطلب\nتاكيد الطلب',
-        ocChangeTitles: config.ocChangeTitles || 'تغيير المعلومات\nتغير المعلومات',
-        ocTalkTitles: config.ocTalkTitles || 'تكلم مع العميل',
+        ocConfirmTitles: config.ocConfirmTitles || 'ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø·Ù„Ø¨\nØªØ§ÙƒÙŠØ¯ Ø§Ù„Ø·Ù„Ø¨',
+        ocChangeTitles: config.ocChangeTitles || 'ØªØºÙŠÙŠØ± Ø§Ù„Ù…Ø¹Ù„ÙˆÙ…Ø§Øª\nØªØºÙŠØ± Ø§Ù„Ù…Ø¹Ù„ÙˆÙ…Ø§Øª',
+        ocTalkTitles: config.ocTalkTitles || 'ØªÙƒÙ„Ù… Ù…Ø¹ Ø§Ù„Ø¹Ù…ÙŠÙ„',
         ocConfirmAudioUrl: config.ocConfirmAudioUrl || '',
         ocChangeAudioUrl: config.ocChangeAudioUrl || '',
         ocTalkAudioUrl: config.ocTalkAudioUrl || '',
@@ -645,7 +654,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     setSelectedNodeId(null);
   }, [addAfterNodeId, nodes]);
 
-  /* ── Spawn button child nodes from a template ────────── */
+  /* â”€â”€ Spawn button child nodes from a template â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const spawnButtonChildNodes = useCallback((actionNodeId, buttonDefs) => {
     setNodes(prev => {
       const actionNode = prev.find(n => n.id === actionNodeId);
@@ -677,6 +686,8 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
           buttonText: btn.text,
           buttonId: btn.id,
           buttonIndex: i,
+          replyActions: [],
+          // Legacy single-action fields kept for backward compat
           replyActionType: '',
           replyActionLabel: '',
           replyText: '',
@@ -715,7 +726,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   }, []);
 
 
-  /* ── Configure trigger ──────────────────────────────── */
+  /* â”€â”€ Configure trigger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const configureTrigger = useCallback((source, event, label) => {
     const triggerNode = nodes.find(n => n.type === 'startTrigger');
     if (!triggerNode) return;
@@ -744,7 +755,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     setSidePanel(null);
   }, [nodes, edges]);
 
-  /* ── Update node data ───────────────────────────────── */
+  /* â”€â”€ Update node data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const updateNodeData = useCallback((nodeId, patch) => {
     setNodes(prev => prev.map(n => {
       if (n.id !== nodeId) return n;
@@ -758,7 +769,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     }
   }, [templates, spawnButtonChildNodes]);
 
-  /* ── Delete a node ──────────────────────────────────── */
+  /* â”€â”€ Delete a node â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const deleteNode = useCallback((nodeId) => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node || node.type === 'startTrigger') return;
@@ -795,9 +806,37 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     setSelectedNodeId(null);
   }, [nodes, edges]);
 
-  /* ═══════════════════════════════════════════════════════
-     Convert flow graph → automation rule JSON
-     ═══════════════════════════════════════════════════════ */
+  /* Helper: serialize one reply action (from multi-action array entry or legacy fields) */
+  const _serializeOneReplyAction = (cd) => {
+    const ra = cd.replyActionType || cd.actionType || '';
+    if (!ra) return null;
+    const a = { type: ra };
+    if (ra === 'send_whatsapp_text') { a.text = cd.replyText || cd.text || ''; a.to = '{{ phone }}'; }
+    else if (ra === 'send_whatsapp_template') {
+      a.template_name = cd.replyTemplateName || cd.templateName || '';
+      a.language = cd.replyTemplateLanguage || cd.templateLanguage || 'en';
+      a.to = '{{ phone }}';
+      const rvars = Array.isArray(cd.replyTemplateVars || cd.templateVars) ? (cd.replyTemplateVars || cd.templateVars) : [];
+      const rbp = rvars.filter(v => String(v || '').trim()).map(v => ({ type: 'text', text: String(v) }));
+      if (rbp.length) a.components = [{ type: 'body', parameters: rbp }];
+    }
+    else if (ra === 'send_catalog_set') { a.to = '{{ phone }}'; a.set_id = cd.replyCatalogSetId || ''; a.caption = cd.replyCatalogSetCaption || ''; }
+    else if (ra === 'send_catalog_item') { a.to = '{{ phone }}'; a.retailer_id = cd.replyCatalogItemRetailerId || ''; a.caption = cd.replyCatalogItemCaption || ''; }
+    else if (ra === 'send_audio') { a.to = '{{ phone }}'; a.audio_url = cd.replyAudioUrl || ''; }
+    else if (ra === 'send_image') { a.to = '{{ phone }}'; a.image_url = cd.replyImageUrl || ''; a.caption = cd.replyImageCaption || ''; }
+    else if (ra === 'send_video') { a.to = '{{ phone }}'; a.video_url = cd.replyVideoUrl || ''; a.caption = cd.replyVideoCaption || ''; }
+    else if (ra === 'send_last_order_catalog_items') { a.to = '{{ phone }}'; a.max_items = Number(cd.replyLastOrderItemsMax || 10); }
+    else if (ra === 'shopify_order_status') { /* no config needed */ }
+    else if (ra === 'shopify_tag') { a.tag = cd.replyTag || cd.tag || ''; }
+    else if (ra === 'shopify_remove_tag') { a.tag = cd.replyTag || cd.tag || ''; }
+    else if (ra === 'assign_agent') { a.agent = cd.replyAgent || cd.agent || ''; }
+    else if (ra === 'close_conversation' || ra === 'exit') { /* no config */ }
+    return a;
+  };
+
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+     Convert flow graph â†’ automation rule JSON
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   const flowToRule = useCallback(() => {
     const triggerNode = nodes.find(n => n.type === 'startTrigger' && n.data.configured);
     if (!triggerNode) return null;
@@ -829,15 +868,27 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
 
         if (target.type === 'conditionFlow') {
           const d = target.data;
-          const field = String(d.field || '').trim();
-          const op = String(d.operator || '==').trim();
-          const val = String(d.value || '').trim();
-          if (field) {
+          const multiConds = Array.isArray(d.conditions) && d.conditions.length > 0 ? d.conditions : null;
+          if (multiConds) {
             condition = {
-              match: 'expression',
-              expression: `{{ ${field} }} ${op} ${val}`,
-              field, operator: op, value: val,
+              match: 'all',
+              conditions: multiConds.map(c => ({
+                field: String(c.field || '').trim(),
+                operator: String(c.operator || '==').trim(),
+                value: String(c.value || '').trim(),
+              })).filter(c => c.field),
             };
+          } else {
+            const field = String(d.field || '').trim();
+            const op = String(d.operator || '==').trim();
+            const val = String(d.value || '').trim();
+            if (field) {
+              condition = {
+                match: 'expression',
+                expression: `{{ ${field} }} ${op} ${val}`,
+                field, operator: op, value: val,
+              };
+            }
           }
           // Follow the "true" branch for actions
           collectActions(target.id, visited);
@@ -930,7 +981,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
           } else if (at === 'exit') {
             actions.push({ type: 'exit' });
           }
-          // Collect button_actions from buttonReply child nodes
+          // Collect button_actions from buttonReply child nodes (multi-action support)
           const childIds = target.data?.buttonChildIds || [];
           if (childIds.length > 0 && actions.length > 0) {
             const lastAction = actions[actions.length - 1];
@@ -939,44 +990,19 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
               const childNode = nodes.find(n => n.id === cid && n.type === 'buttonReply');
               if (!childNode) continue;
               const cd = childNode.data || {};
-              if (!cd.replyActionType) continue;
-              const btnAction = { button_id: cd.buttonId || '', button_text: cd.buttonText || '', action: { type: cd.replyActionType } };
-              const ra = cd.replyActionType;
-              if (ra === 'send_whatsapp_text') { btnAction.action.text = cd.replyText || ''; btnAction.action.to = '{{ phone }}'; }
-              else if (ra === 'send_whatsapp_template') {
-                btnAction.action.template_name = cd.replyTemplateName || '';
-                btnAction.action.language = cd.replyTemplateLanguage || 'en';
-                btnAction.action.to = '{{ phone }}';
-                const rvars = Array.isArray(cd.replyTemplateVars) ? cd.replyTemplateVars : [];
-                const rbp = rvars.filter(v => String(v || '').trim()).map(v => ({ type: 'text', text: String(v) }));
-                if (rbp.length) btnAction.action.components = [{ type: 'body', parameters: rbp }];
+              const multiActions = Array.isArray(cd.replyActions) && cd.replyActions.length > 0 ? cd.replyActions : null;
+              if (multiActions) {
+                const serialized = multiActions.map(ra => _serializeOneReplyAction(ra)).filter(Boolean);
+                if (serialized.length) {
+                  btnActions.push({ button_id: cd.buttonId || '', button_text: cd.buttonText || '', actions: serialized });
+                }
+              } else if (cd.replyActionType) {
+                // Legacy single-action
+                const singleAction = _serializeOneReplyAction(cd);
+                if (singleAction) {
+                  btnActions.push({ button_id: cd.buttonId || '', button_text: cd.buttonText || '', action: singleAction });
+                }
               }
-              else if (ra === 'send_catalog_set') { btnAction.action.to = '{{ phone }}'; btnAction.action.set_id = cd.replyCatalogSetId || ''; btnAction.action.caption = cd.replyCatalogSetCaption || ''; }
-              else if (ra === 'send_catalog_item') { btnAction.action.to = '{{ phone }}'; btnAction.action.retailer_id = cd.replyCatalogItemRetailerId || ''; btnAction.action.caption = cd.replyCatalogItemCaption || ''; }
-              else if (ra === 'send_audio') { btnAction.action.to = '{{ phone }}'; btnAction.action.audio_url = cd.replyAudioUrl || ''; }
-              else if (ra === 'send_image') { btnAction.action.to = '{{ phone }}'; btnAction.action.image_url = cd.replyImageUrl || ''; btnAction.action.caption = cd.replyImageCaption || ''; }
-              else if (ra === 'send_video') { btnAction.action.to = '{{ phone }}'; btnAction.action.video_url = cd.replyVideoUrl || ''; btnAction.action.caption = cd.replyVideoCaption || ''; }
-              else if (ra === 'send_list') {
-                btnAction.action.to = '{{ phone }}'; btnAction.action.text = cd.replyListText || '';
-                btnAction.action.button_text = cd.replyListButtonText || 'Choose';
-                const rlRows = String(cd.replyListRowsLines || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
-                const rows = rlRows.map(ln => { const p = ln.split('|'); const id = p[0]?.trim(); const title = p[1]?.trim(); const desc = p.slice(2).join('|').trim(); if (!id || !title) return null; const row = { id, title }; if (desc) row.description = desc; return row; }).filter(Boolean);
-                if (rows.length) btnAction.action.sections = [{ ...(cd.replyListSectionTitle ? { title: cd.replyListSectionTitle } : {}), rows }];
-              }
-              else if (ra === 'send_buttons') {
-                btnAction.action.to = '{{ phone }}'; btnAction.action.text = cd.replyButtonsText || '';
-                const blines = String(cd.replyButtonsLines || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
-                const btns = blines.map((ln, i) => { const parts = ln.split('|'); let id = parts[0]?.trim(); let title = parts.slice(1).join('|').trim(); if (!title && id) { title = id; id = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24) || `btn_${i+1}`; } return id && title ? { id, title } : null; }).filter(Boolean);
-                if (btns.length) btnAction.action.buttons = btns;
-              }
-              else if (ra === 'send_last_order_catalog_items') { btnAction.action.to = '{{ phone }}'; btnAction.action.max_items = Number(cd.replyLastOrderItemsMax || 10); }
-              else if (ra === 'shopify_order_status') { /* no config needed */ }
-              else if (ra === 'shopify_tag') { btnAction.action.tag = cd.replyTag || ''; }
-              else if (ra === 'shopify_remove_tag') { btnAction.action.tag = cd.replyTag || ''; }
-              else if (ra === 'assign_agent') { btnAction.action.agent = cd.replyAgent || ''; }
-              else if (ra === 'close_conversation') { /* no config */ }
-              else if (ra === 'exit') { /* no config */ }
-              btnActions.push(btnAction);
             }
             if (btnActions.length > 0) {
               lastAction.button_actions = btnActions;
@@ -1005,7 +1031,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     return rule;
   }, [nodes, edges, flowName, flowEnabled, flowId]);
 
-  /* ── Save flow ──────────────────────────────────────── */
+  /* â”€â”€ Save flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const saveFlow = useCallback(async (enable) => {
     if (enable !== undefined) setFlowEnabled(enable);
     const rule = flowToRule();
@@ -1023,9 +1049,42 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     }
   }, [flowToRule, flowId, onSaveToBackend]);
 
-  /* ═══════════════════════════════════════════════════════
+  /* â”€â”€ Insert a step between two nodes by clicking an edge â”€â”€ */
+  const onEdgeClick = useCallback((event, edge) => {
+    event.stopPropagation();
+    const sourceNode = nodes.find(n => n.id === edge.source);
+    const targetNode = nodes.find(n => n.id === edge.target);
+    if (!sourceNode || !targetNode) return;
+    // If target is already an addStep, just use it
+    if (targetNode.type === 'addStep') {
+      setAddAfterNodeId(targetNode.id);
+      setSidePanel('step_picker');
+      return;
+    }
+    // Insert a new addStep between source and target
+    const addId = uid();
+    const midX = (sourceNode.position.x + targetNode.position.x) / 2;
+    const midY = (sourceNode.position.y + targetNode.position.y) / 2;
+    const addNode = rfNode(addId, 'addStep', midX, midY, {});
+    setNodes(prev => [...prev, addNode]);
+    setEdges(prev => {
+      const withoutEdge = prev.filter(e => e.id !== edge.id);
+      return [
+        ...withoutEdge,
+        rfEdge(edge.source, addId, edge.sourceHandle),
+        rfEdge(addId, edge.target),
+      ];
+    });
+    // Immediately open the step picker for the new addStep
+    setTimeout(() => {
+      setAddAfterNodeId(addId);
+      setSidePanel('step_picker');
+    }, 50);
+  }, [nodes]);
+
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      RENDER
-     ═══════════════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   return (
     <div className="flex flex-col h-full w-full bg-slate-50">
       {/* Toolbar */}
@@ -1042,7 +1101,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             className="text-base font-semibold text-slate-800 border-none bg-transparent focus:outline-none focus:ring-0 min-w-0 flex-1 placeholder-slate-300"
             value={flowName}
             onChange={(e) => setFlowName(e.target.value)}
-            placeholder="Untitled flow…"
+            placeholder="Untitled flowâ€¦"
           />
           {/* Metrics badges */}
           {(flowStat.triggers > 0 || flowStat.messages_sent > 0) && (
@@ -1067,7 +1126,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             disabled={saving}
           >
             <Save className="w-4 h-4" />
-            {saving ? 'Saving…' : 'Save draft'}
+            {saving ? 'Savingâ€¦' : 'Save draft'}
           </button>
           <button
             className={`px-4 py-2 rounded-lg text-sm font-semibold text-white flex items-center gap-2 transition-all disabled:opacity-50 ${
@@ -1097,6 +1156,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             minZoom={0.3}
             maxZoom={1.5}
             onPaneClick={() => { setSidePanel(null); setSelectedNodeId(null); }}
+            onEdgeClick={onEdgeClick}
           >
             <Background color="#e2e8f0" gap={20} size={1} />
             <Controls className="bg-white shadow-xl border border-slate-200 rounded-lg overflow-hidden" />
@@ -1159,12 +1219,12 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   );
 }
 
-/* ═══════════════════════════════════════════════════════════
-   Flow Drafter — AI-powered draft generation chat
-   ═══════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   Flow Drafter â€” AI-powered draft generation chat
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, triggerEvent }) {
   const [open, setOpen] = React.useState(false);
-  const [messages, setMessages] = React.useState([{ role: 'assistant', text: 'Hi! Describe the flow you want and I\'ll draft it for you. ✨' }]);
+  const [messages, setMessages] = React.useState([{ role: 'assistant', text: 'Hi! Describe the flow you want and I\'ll draft it for you. âœ¨' }]);
   const [input, setInput] = React.useState('');
   const [loading, setLoading] = React.useState(false);
   const bottomRef = React.useRef(null);
@@ -1200,13 +1260,13 @@ function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, trig
         }));
         setNodes(newNodes);
         setEdges(newEdges);
-        setMessages(prev => [...prev, { role: 'assistant', text: `✅ Draft created with ${newNodes.length} nodes! Review the canvas and edit as needed.` }]);
+        setMessages(prev => [...prev, { role: 'assistant', text: `âœ… Draft created with ${newNodes.length} nodes! Review the canvas and edit as needed.` }]);
       } else {
-        setMessages(prev => [...prev, { role: 'assistant', text: '⚠️ No flow was generated. Try being more specific.' }]);
+        setMessages(prev => [...prev, { role: 'assistant', text: 'âš ï¸ No flow was generated. Try being more specific.' }]);
       }
     } catch (err) {
       const detail = err?.response?.data?.detail || err.message || 'Unknown error';
-      setMessages(prev => [...prev, { role: 'assistant', text: `❌ ${detail}` }]);
+      setMessages(prev => [...prev, { role: 'assistant', text: `âŒ ${detail}` }]);
     } finally {
       setLoading(false);
     }
@@ -1254,7 +1314,7 @@ function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, trig
         {loading && (
           <div className="flex justify-start">
             <div className="bg-white border border-slate-200 text-slate-500 px-4 py-3 rounded-2xl rounded-bl-md shadow-sm flex items-center gap-2 text-sm">
-              <Loader2 className="w-4 h-4 animate-spin text-violet-500" /> Generating flow…
+              <Loader2 className="w-4 h-4 animate-spin text-violet-500" /> Generating flowâ€¦
             </div>
           </div>
         )}
@@ -1269,7 +1329,7 @@ function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, trig
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendPrompt()}
-            placeholder="Describe your flow…"
+            placeholder="Describe your flowâ€¦"
             disabled={loading}
           />
           <button
@@ -1280,15 +1340,15 @@ function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, trig
             <Send className="w-4 h-4" />
           </button>
         </div>
-        <p className="text-[10px] text-slate-400 mt-1.5 text-center">Drafts only — review before saving</p>
+        <p className="text-[10px] text-slate-400 mt-1.5 text-center">Drafts only â€” review before saving</p>
       </div>
     </div>
   );
 }
 
-/* ═══════════════════════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    Side panels
-   ═══════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 function TriggerPickerPanel({ onClose, onSelectTrigger }) {
   const [search, setSearch] = React.useState('');
@@ -1303,7 +1363,7 @@ function TriggerPickerPanel({ onClose, onSelectTrigger }) {
         <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="w-4 h-4" /></button>
       </div>
       <div className="px-4 pt-3 pb-1">
-        <input className="w-full border rounded-lg px-3 py-2 text-sm placeholder-slate-400 focus:ring-2 focus:ring-blue-200 outline-none" placeholder="Search triggers…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <input className="w-full border rounded-lg px-3 py-2 text-sm placeholder-slate-400 focus:ring-2 focus:ring-blue-200 outline-none" placeholder="Search triggersâ€¦" value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
       <div className="p-4 space-y-4 overflow-y-auto flex-1">
         <div>
@@ -1449,9 +1509,9 @@ function PlatformVariableSelector({ onInsert }) {
 }
 
 
-/* ═══════════════════════════════════════════════════════════
-   GcsMediaUpload — drag-and-drop upload to GCS
-   ═══════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   GcsMediaUpload â€” drag-and-drop upload to GCS
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 function GcsMediaUpload({ label, accept, value, onChange }) {
   const [uploading, setUploading] = React.useState(false);
   const [err, setErr] = React.useState('');
@@ -1465,7 +1525,7 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
       fd.append('file', file);
       const res = await api.post('/admin/upload-media', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
       if (res?.data?.url) { onChange(res.data.url); }
-      else setErr('Upload failed — no URL returned');
+      else setErr('Upload failed â€” no URL returned');
     } catch (e) {
       setErr(String(e?.response?.data?.detail || e?.message || 'Upload failed'));
     } finally {
@@ -1488,13 +1548,13 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
         {uploading ? (
           <div className="flex items-center justify-center gap-2 text-indigo-600 text-sm">
             <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
-            Uploading…
+            Uploadingâ€¦
           </div>
         ) : (
           <div className="text-slate-500 text-xs">
-            <div className="text-2xl mb-1">☁️</div>
+            <div className="text-2xl mb-1">â˜ï¸</div>
             <span className="font-medium text-indigo-600">Click or drag</span> to upload {label.toLowerCase()}<br/>
-            <span className="text-[10px] text-slate-400">Max 50 MB · Uploads to GCS</span>
+            <span className="text-[10px] text-slate-400">Max 50 MB Â· Uploads to GCS</span>
           </div>
         )}
       </div>
@@ -1503,19 +1563,19 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
         className="w-full border rounded-lg px-3 py-2 text-sm"
         value={value || ''}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Or paste URL directly…"
+        placeholder="Or paste URL directlyâ€¦"
       />
       {err && <div className="text-xs text-rose-600 mt-1">{err}</div>}
       {value && !uploading && (
-        <div className="text-[10px] text-emerald-600 truncate">✓ {value}</div>
+        <div className="text-[10px] text-emerald-600 truncate">âœ“ {value}</div>
       )}
     </div>
   );
 }
 
-/* ═══════════════════════════════════════════════════════════
-   VariableSearchPicker — searchable, source-aware variable picker
-   ═══════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   VariableSearchPicker â€” searchable, source-aware variable picker
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 const ALL_VARIABLES_BY_SOURCE = {
   whatsapp: [
     { label: 'Customer name', value: '{{customer_name}}' },
@@ -1541,6 +1601,7 @@ const ALL_VARIABLES_BY_SOURCE = {
     { label: 'Last order date', value: '{{last_order_date}}' },
     { label: 'Total orders', value: '{{total_orders}}' },
     { label: 'Total spent', value: '{{total_spent}}' },
+    { label: 'Last order items images', value: '{{last_order_line_items_images}}' },
   ],
   delivery: [
     { label: 'Delivery status', value: '{{delivery_status}}' },
@@ -1578,7 +1639,7 @@ function VariableSearchPicker({ onInsert }) {
           </div>
           <input
             className="w-full border rounded-lg px-2 py-1.5 text-xs mb-2"
-            placeholder="Search variables…"
+            placeholder="Search variablesâ€¦"
             value={q}
             onChange={e => setQ(e.target.value)}
             autoFocus
@@ -1626,7 +1687,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             <div className="font-semibold text-emerald-800 mb-1">Current trigger</div>
             <div className="text-emerald-600">{d.source}: {d.event || d.label}</div>
           </div>
-          <button className="w-full px-4 py-2.5 rounded-lg border border-slate-200 text-sm hover:bg-slate-50" onClick={() => onSelectTrigger && onSelectTrigger(d.source, d.event, d.label)}>Change trigger…</button>
+          <button className="w-full px-4 py-2.5 rounded-lg border border-slate-200 text-sm hover:bg-slate-50" onClick={() => onSelectTrigger && onSelectTrigger(d.source, d.event, d.label)}>Change triggerâ€¦</button>
           <div>
             <div className="text-xs font-semibold text-slate-500 mb-1">Available variables ({trigVars.filter(v => v.key !== '__custom__').length}):</div>
             <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
@@ -1638,50 +1699,121 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
         </>)}
 
         {t === 'conditionFlow' && (<>
+          {/* Quick filter presets */}
           <div>
-            <label className="text-xs font-semibold text-slate-500 mb-1 block">Variable to check</label>
-            <select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={d.field || ''} onChange={(e) => {
-              const f = e.target.value;
-              if (f === '__custom__') { setCustomField(''); onUpdate({ field: '' }); return; }
-              const vDef = trigVars.find(v => v.key === f);
-              onUpdate({ field: f, fieldLabel: vDef?.label || f, expression: `${vDef?.label || f} ${d.operator || '=='} ${d.value || ''}` });
-            }}>
-              <option value="">— Select a variable —</option>
-              {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
-            </select>
-            {(d.field === '__custom__' || customField !== '') && (
-              <input className="w-full border rounded-lg px-3 py-2 text-sm mt-2" placeholder="Custom variable key…" value={customField} onChange={(e) => { setCustomField(e.target.value); onUpdate({ field: e.target.value, fieldLabel: e.target.value, expression: `${e.target.value} ${d.operator || '=='} ${d.value || ''}` }); }} />
-            )}
+            <div className="text-xs font-bold text-slate-600 mb-2">Quick Filters</div>
+            <div className="flex flex-wrap gap-1.5">
+              <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors font-medium" onClick={() => {
+                const conds = [...(d.conditions || []), { field: 'tags', operator: 'contains', value: '' }];
+                onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
+              }}>ðŸ·ï¸ Tag contains</button>
+              <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors font-medium" onClick={() => {
+                const conds = [...(d.conditions || []), { field: 'source_name', operator: '==', value: 'web' }];
+                onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
+              }}>ðŸŒ Online Store Only</button>
+              <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 transition-colors font-medium" onClick={() => {
+                const conds = [...(d.conditions || []), { field: 'source_name', operator: '!=', value: 'draft_orders' }];
+                onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
+              }}>ðŸš« Exclude Drafts</button>
+            </div>
           </div>
-          <div className="grid grid-cols-2 gap-2">
+
+          {/* Multi-condition rows */}
+          {Array.isArray(d.conditions) && d.conditions.length > 0 ? (<>
+            <div className="text-xs font-bold text-slate-600 mb-1">Conditions (AND)</div>
+            {d.conditions.map((cond, ci) => (
+              <div key={ci} className="p-3 rounded-lg border border-slate-200 bg-slate-50 space-y-2 relative">
+                {d.conditions.length > 1 && (
+                  <button type="button" className="absolute top-1 right-1 p-1 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded transition-colors" onClick={() => {
+                    const conds = d.conditions.filter((_, i) => i !== ci);
+                    onUpdate({ conditions: conds, expression: conds.length ? `${conds.length} condition(s)` : '' });
+                  }}><X className="w-3 h-3" /></button>
+                )}
+                <select className="w-full border rounded-lg px-3 py-1.5 text-sm bg-white" value={cond.field || ''} onChange={(e) => {
+                  const conds = [...d.conditions];
+                  conds[ci] = { ...conds[ci], field: e.target.value };
+                  onUpdate({ conditions: conds });
+                }}>
+                  <option value="">â€” Select variable â€”</option>
+                  {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
+                </select>
+                <div className="grid grid-cols-2 gap-2">
+                  <select className="border rounded-lg px-2 py-1.5 text-sm" value={cond.operator || '=='} onChange={(e) => {
+                    const conds = [...d.conditions]; conds[ci] = { ...conds[ci], operator: e.target.value }; onUpdate({ conditions: conds });
+                  }}>
+                    <option value="==">equals</option><option value="!=">not equals</option>
+                    <option value=">">greater than</option><option value=">=">greater or equal</option>
+                    <option value="<">less than</option><option value="<=">less or equal</option>
+                    <option value="contains">contains</option><option value="not_contains">does not contain</option>
+                    <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
+                    <option value="is_empty">is empty</option><option value="is_not_empty">is not empty</option>
+                    <option value="matches">regex matches</option>
+                    <option value="in">is in list</option><option value="not_in">is not in list</option>
+                  </select>
+                  <input className="border rounded-lg px-2 py-1.5 text-sm" value={cond.value || ''} onChange={(e) => {
+                    const conds = [...d.conditions]; conds[ci] = { ...conds[ci], value: e.target.value }; onUpdate({ conditions: conds });
+                  }} placeholder="Valueâ€¦" />
+                </div>
+                {ci < d.conditions.length - 1 && <div className="text-center text-[10px] font-bold text-amber-500 uppercase tracking-wider">AND</div>}
+              </div>
+            ))}
+            <button type="button" className="w-full px-3 py-2 text-xs font-medium text-amber-700 border border-dashed border-amber-300 rounded-lg hover:bg-amber-50 transition-colors flex items-center justify-center gap-1" onClick={() => {
+              const conds = [...(d.conditions || []), { field: '', operator: '==', value: '' }];
+              onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
+            }}><Plus className="w-3 h-3" /> Add condition</button>
+          </>) : (<>
+            {/* Single condition (backward compat) */}
             <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Operator</label>
-              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.operator || '=='} onChange={(e) => onUpdate({ operator: e.target.value, expression: `${d.fieldLabel || d.field || ''} ${e.target.value} ${d.value || ''}` })}>
-                <option value="==">equals</option><option value="!=">not equals</option>
-                <option value=">">greater than</option><option value=">=">greater or equal</option>
-                <option value="<">less than</option><option value="<=">less or equal</option>
-                <option value="contains">contains</option><option value="not_contains">does not contain</option>
-                <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
-                <option value="is_empty">is empty</option><option value="is_not_empty">is not empty</option>
-                <option value="matches">regex matches</option>
-                <option value="in">is in list (comma separated)</option>
-                <option value="not_in">is not in list</option>
-                <option value="is_true">is exactly true</option>
-                <option value="is_false">is exactly false</option>
+              <label className="text-xs font-semibold text-slate-500 mb-1 block">Variable to check</label>
+              <select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={d.field || ''} onChange={(e) => {
+                const f = e.target.value;
+                if (f === '__custom__') { setCustomField(''); onUpdate({ field: '' }); return; }
+                const vDef = trigVars.find(v => v.key === f);
+                onUpdate({ field: f, fieldLabel: vDef?.label || f, expression: `${vDef?.label || f} ${d.operator || '=='} ${d.value || ''}` });
+              }}>
+                <option value="">â€” Select a variable â€”</option>
+                {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
               </select>
+              {(d.field === '__custom__' || customField !== '') && (
+                <input className="w-full border rounded-lg px-3 py-2 text-sm mt-2" placeholder="Custom variable keyâ€¦" value={customField} onChange={(e) => { setCustomField(e.target.value); onUpdate({ field: e.target.value, fieldLabel: e.target.value, expression: `${e.target.value} ${d.operator || '=='} ${d.value || ''}` }); }} />
+              )}
             </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Value</label>
-              <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.value || ''} onChange={(e) => onUpdate({ value: e.target.value, expression: `${d.fieldLabel || d.field || ''} ${d.operator || '=='} ${e.target.value}` })} placeholder="e.g. 150, VIP, Casablanca" />
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs font-semibold text-slate-500 mb-1 block">Operator</label>
+                <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.operator || '=='} onChange={(e) => onUpdate({ operator: e.target.value, expression: `${d.fieldLabel || d.field || ''} ${e.target.value} ${d.value || ''}` })}>
+                  <option value="==">equals</option><option value="!=">not equals</option>
+                  <option value=">">greater than</option><option value=">=">greater or equal</option>
+                  <option value="<">less than</option><option value="<=">less or equal</option>
+                  <option value="contains">contains</option><option value="not_contains">does not contain</option>
+                  <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
+                  <option value="is_empty">is empty</option><option value="is_not_empty">is not empty</option>
+                  <option value="matches">regex matches</option>
+                  <option value="in">is in list (comma separated)</option>
+                  <option value="not_in">is not in list</option>
+                  <option value="is_true">is exactly true</option>
+                  <option value="is_false">is exactly false</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-500 mb-1 block">Value</label>
+                <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.value || ''} onChange={(e) => onUpdate({ value: e.target.value, expression: `${d.fieldLabel || d.field || ''} ${d.operator || '=='} ${e.target.value}` })} placeholder="e.g. 150, VIP, Casablanca" />
+              </div>
             </div>
-          </div>
+            <button type="button" className="text-xs text-amber-600 font-medium hover:underline" onClick={() => {
+              const initial = d.field ? [{ field: d.field, operator: d.operator || '==', value: d.value || '' }] : [];
+              onUpdate({ conditions: initial, expression: initial.length ? `${initial.length} condition(s)` : '' });
+            }}>â†‘ Switch to multi-condition mode</button>
+          </>)}
           <div className="grid grid-cols-2 gap-2">
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">True label</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.trueLabel || ''} onChange={(e) => onUpdate({ trueLabel: e.target.value })} /></div>
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">False label</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.falseLabel || ''} onChange={(e) => onUpdate({ falseLabel: e.target.value })} /></div>
           </div>
           {d.expression && (
             <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
-              <span className="font-semibold">Summary:</span> If <span className="font-mono font-semibold">{d.fieldLabel || d.field}</span> {d.operator} <span className="font-mono font-semibold">{d.value}</span>
+              <span className="font-semibold">Summary:</span> {Array.isArray(d.conditions) && d.conditions.length > 0
+                ? d.conditions.filter(c => c.field).map((c, i) => `${c.field} ${c.operator} ${c.value}`).join(' AND ')
+                : <>If <span className="font-mono font-semibold">{d.fieldLabel || d.field}</span> {d.operator} <span className="font-mono font-semibold">{d.value}</span></>}
             </div>
           )}
         </>)}
@@ -1697,20 +1829,20 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </select>
           </div>
 
-          {/* ── Send Text ── */}
+          {/* â”€â”€ Send Text â”€â”€ */}
           {d.actionType === 'send_whatsapp_text' && (
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Message text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-28 resize-none" value={d.text || ''} onChange={(e) => onUpdate({ text: e.target.value, description: e.target.value.slice(0, 50) + (e.target.value.length > 50 ? '…' : '') })} placeholder="Type your message… Click variables below to insert" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-28 resize-none" value={d.text || ''} onChange={(e) => onUpdate({ text: e.target.value, description: e.target.value.slice(0, 50) + (e.target.value.length > 50 ? 'â€¦' : '') })} placeholder="Type your messageâ€¦ Click variables below to insert" />
               <div className="flex justify-end mt-1 mb-2">
-                <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmoji: !d._showEmoji })}>😀</button>
+                <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmoji: !d._showEmoji })}>ðŸ˜€</button>
               </div>
               {d._showEmoji && (<div className="mb-3 border rounded-xl overflow-hidden shadow-sm"><EmojiPicker width="100%" height={300} onEmojiClick={(ev) => insertVar(ev.emoji)} /></div>)}
               <PlatformVariableSelector onInsert={insertVar} />
             </div>
           )}
 
-          {/* ── Send Template (RICH) ── */}
+          {/* â”€â”€ Send Template (RICH) â”€â”€ */}
           {(d.actionType === 'send_whatsapp_template' || d.actionType === 'order_confirmation_flow') && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Template</label>
@@ -1723,7 +1855,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                 const headerType = _getTemplateHeaderType(tpl);
                 onUpdate({ templateName: tn, templateLanguage: lang, templateVars: tplVars, templateHeaderType: headerType, templateHeaderUrl: '', description: `Template: ${tn}` });
               }}>
-                <option value="">Select a template…</option>
+                <option value="">Select a templateâ€¦</option>
                 {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (
                   <option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>
                 ))}
@@ -1735,6 +1867,28 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                 <span className="text-emerald-600 ml-1 font-mono">{d.templateLanguage || 'en'}</span>
                 <span className="text-emerald-400 ml-2">(auto-detected)</span>
               </div>
+              {/* Template message preview */}
+              {(() => {
+                const selTpl = (templates || []).find(t2 => t2.name === d.templateName);
+                const bodyText = _getTemplateBodyText(selTpl);
+                const btns = _getTemplateButtons(selTpl);
+                if (!bodyText && !btns.length) return null;
+                return (
+                  <div className="p-3 rounded-xl bg-white border border-slate-200 shadow-sm">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2">ðŸ“„ Template Preview</div>
+                    {bodyText && (
+                      <div className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-slate-50 rounded-lg p-3 border border-slate-100" dangerouslySetInnerHTML={{ __html: bodyText.replace(/\{\{(\d+)\}\}/g, '<span style="background:#dbeafe;color:#2563eb;padding:1px 6px;border-radius:4px;font-weight:600;font-size:11px">{{$1}}</span>') }} />
+                    )}
+                    {btns.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {btns.map((b, i) => (
+                          <span key={i} className="px-2.5 py-1 rounded-full text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200">{b.text}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {/* Variable slots */}
               {(d.templateVars || []).length > 0 && (
                 <div>
@@ -1748,19 +1902,39 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                   <PlatformVariableSelector onInsert={(v) => { const nv = [...(d.templateVars || [])]; const ei = nv.findIndex(x => !x); if (ei >= 0) { nv[ei] = v; onUpdate({ templateVars: nv }); } }} />
                 </div>
               )}
-              {/* Header URL */}
+              {/* Header â€” variant selector (URL upload or Last Order Images) */}
               {d.templateHeaderType && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(d.templateHeaderType) && (
-                <GcsMediaUpload
-                  label={`Header ${d.templateHeaderType.toLowerCase()}`}
-                  accept={d.templateHeaderType === 'IMAGE' ? 'image/*' : d.templateHeaderType === 'VIDEO' ? 'video/*' : '*/*'}
-                  value={d.templateHeaderUrl || ''}
-                  onChange={(url) => onUpdate({ templateHeaderUrl: url })}
-                />
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-slate-500 block">Header {d.templateHeaderType.toLowerCase()} source</label>
+                  {d.templateHeaderType === 'IMAGE' && (
+                    <div className="flex gap-2">
+                      <button type="button" className={`flex-1 px-3 py-2 text-xs rounded-lg border font-medium transition-colors ${(d.templateHeaderVariant || 'url') === 'url' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-200'}`} onClick={() => onUpdate({ templateHeaderVariant: 'url', templateHeaderUrl: '' })}>
+                        â˜ï¸ Upload / URL
+                      </button>
+                      <button type="button" className={`flex-1 px-3 py-2 text-xs rounded-lg border font-medium transition-colors ${d.templateHeaderVariant === 'last_order_images' ? 'bg-pink-50 border-pink-300 text-pink-700' : 'bg-white border-slate-200 text-slate-500 hover:border-pink-200'}`} onClick={() => onUpdate({ templateHeaderVariant: 'last_order_images', templateHeaderUrl: '{{ last_order_line_items_images }}' })}>
+                        ðŸ›’ Last Order Images
+                      </button>
+                    </div>
+                  )}
+                  {d.templateHeaderVariant === 'last_order_images' ? (
+                    <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-xs text-pink-700">
+                      <div className="font-semibold mb-1">ðŸ“¸ Using last order line item images</div>
+                      <div>The header image will automatically use the product images from the customer's last order, just like the Confirmation workflow.</div>
+                    </div>
+                  ) : (
+                    <GcsMediaUpload
+                      label={`Header ${d.templateHeaderType.toLowerCase()}`}
+                      accept={d.templateHeaderType === 'IMAGE' ? 'image/*' : d.templateHeaderType === 'VIDEO' ? 'video/*' : '*/*'}
+                      value={d.templateHeaderUrl || ''}
+                      onChange={(url) => onUpdate({ templateHeaderUrl: url })}
+                    />
+                  )}
+                </div>
               )}
             </>)}
           </>)}
 
-          {/* ── Confirmation Flow extras ── */}
+          {/* â”€â”€ Confirmation Flow extras â”€â”€ */}
           {d.actionType === 'order_confirmation_flow' && d.templateName && (<>
             <div className="border-t pt-3 mt-2">
               <div className="text-xs font-bold text-slate-600 mb-2">Confirmation Flow Settings</div>
@@ -1774,9 +1948,9 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocConfirmTitles || ''} onChange={(e) => onUpdate({ ocConfirmTitles: e.target.value })} /></div>
               <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocChangeTitles || ''} onChange={(e) => onUpdate({ ocChangeTitles: e.target.value })} /></div>
               <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocTalkTitles || ''} onChange={(e) => onUpdate({ ocTalkTitles: e.target.value })} /></div>
-              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocConfirmAudioUrl || ''} onChange={(e) => onUpdate({ ocConfirmAudioUrl: e.target.value })} placeholder="https://…" /></div>
-              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocChangeAudioUrl || ''} onChange={(e) => onUpdate({ ocChangeAudioUrl: e.target.value })} placeholder="https://…" /></div>
-              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocTalkAudioUrl || ''} onChange={(e) => onUpdate({ ocTalkAudioUrl: e.target.value })} placeholder="https://…" /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocConfirmAudioUrl || ''} onChange={(e) => onUpdate({ ocConfirmAudioUrl: e.target.value })} placeholder="https://â€¦" /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocChangeAudioUrl || ''} onChange={(e) => onUpdate({ ocChangeAudioUrl: e.target.value })} placeholder="https://â€¦" /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocTalkAudioUrl || ''} onChange={(e) => onUpdate({ ocTalkAudioUrl: e.target.value })} placeholder="https://â€¦" /></div>
               <div className="mt-2 flex items-center gap-3">
                 <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={d.ocSendItems !== false} onChange={(e) => onUpdate({ ocSendItems: e.target.checked })} /> Send order items</label>
                 {d.ocSendItems !== false && (<div className="flex items-center gap-2"><span className="text-xs text-slate-500">Max items</span><input type="number" className="w-16 border rounded px-2 py-1 text-sm" value={d.ocMaxItems || 10} min={1} max={30} onChange={(e) => onUpdate({ ocMaxItems: Number(e.target.value) || 10 })} /></div>)}
@@ -1784,26 +1958,26 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           </>)}
 
-          {/* ── Buttons ── */}
+          {/* â”€â”€ Buttons â”€â”€ */}
           {d.actionType === 'send_buttons' && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.buttonsText || ''} onChange={(e) => onUpdate({ buttonsText: e.target.value, description: 'Buttons: ' + e.target.value.slice(0, 30) })} placeholder="Message body…" />
-              <div className="flex justify-end mt-1 mb-2"><button type="button" className="text-xl opacity-70 hover:opacity-100" onClick={() => onUpdate({ _showEmojiBtn: !d._showEmojiBtn })}>😀</button></div>
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.buttonsText || ''} onChange={(e) => onUpdate({ buttonsText: e.target.value, description: 'Buttons: ' + e.target.value.slice(0, 30) })} placeholder="Message bodyâ€¦" />
+              <div className="flex justify-end mt-1 mb-2"><button type="button" className="text-xl opacity-70 hover:opacity-100" onClick={() => onUpdate({ _showEmojiBtn: !d._showEmojiBtn })}>ðŸ˜€</button></div>
               {d._showEmojiBtn && (<div className="mb-3 border rounded-xl overflow-hidden shadow-sm"><EmojiPicker width="100%" height={300} onEmojiClick={(ev) => onUpdate({ buttonsText: (d.buttonsText || '') + ev.emoji })} /></div>)}
               <PlatformVariableSelector onInsert={(v) => onUpdate({ buttonsText: (d.buttonsText || '') + v })} />
             </div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Buttons (id|title per line)</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none font-mono" value={d.buttonsLines || ''} onChange={(e) => onUpdate({ buttonsLines: e.target.value })} placeholder={"confirm|Confirm ✅\nchange|Change order\ntalk|Talk to agent"} />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none font-mono" value={d.buttonsLines || ''} onChange={(e) => onUpdate({ buttonsLines: e.target.value })} placeholder={"confirm|Confirm âœ…\nchange|Change order\ntalk|Talk to agent"} />
             </div>
           </>)}
 
-          {/* ── List ── */}
+          {/* â”€â”€ List â”€â”€ */}
           {d.actionType === 'send_list' && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.listText || ''} onChange={(e) => onUpdate({ listText: e.target.value, description: 'List: ' + e.target.value.slice(0, 30) })} placeholder="Message body…" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.listText || ''} onChange={(e) => onUpdate({ listText: e.target.value, description: 'List: ' + e.target.value.slice(0, 30) })} placeholder="Message bodyâ€¦" />
               <PlatformVariableSelector onInsert={(v) => onUpdate({ listText: (d.listText || '') + v })} />
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -1816,7 +1990,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           </>)}
 
-          {/* ── Image ── */}
+          {/* â”€â”€ Image â”€â”€ */}
           {d.actionType === 'send_image' && (<>
             <GcsMediaUpload
               label="Image"
@@ -1831,7 +2005,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           </>)}
 
-          {/* ── Video ── */}
+          {/* â”€â”€ Video â”€â”€ */}
           {d.actionType === 'send_video' && (<>
             <GcsMediaUpload
               label="Video"
@@ -1846,7 +2020,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           </>)}
 
-          {/* ── Audio ── */}
+          {/* â”€â”€ Audio â”€â”€ */}
           {d.actionType === 'send_audio' && (
             <GcsMediaUpload
               label="Audio"
@@ -1856,12 +2030,12 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             />
           )}
 
-          {/* ── Tag / Remove Tag ── */}
+          {/* â”€â”€ Tag / Remove Tag â”€â”€ */}
           {(d.actionType === 'shopify_tag' || d.actionType === 'shopify_remove_tag') && (
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">{d.actionType === 'shopify_remove_tag' ? 'Tag to remove' : 'Tag to add'}</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.tag || ''} onChange={(e) => onUpdate({ tag: e.target.value, description: `Tag: ${e.target.value}` })} placeholder="e.g. VIP, confirmed" /></div>
           )}
 
-          {/* ── Order Status Lookup ── */}
+          {/* â”€â”€ Order Status Lookup â”€â”€ */}
           {d.actionType === 'shopify_order_status' && (
             <div className="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
               <div className="font-semibold mb-1">Order Status Lookup</div>
@@ -1869,27 +2043,27 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           )}
 
-          {/* ── Catalog Item ── */}
+          {/* â”€â”€ Catalog Item â”€â”€ */}
           {d.actionType === 'send_catalog_item' && (<>
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Product retailer ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.catalogItemRetailerId || ''} onChange={(e) => onUpdate({ catalogItemRetailerId: e.target.value, description: `Catalog: ${e.target.value}` })} placeholder="e.g. SKU-001" /></div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogItemCaption || ''} onChange={(e) => onUpdate({ catalogItemCaption: e.target.value })} placeholder="Product description…" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogItemCaption || ''} onChange={(e) => onUpdate({ catalogItemCaption: e.target.value })} placeholder="Product descriptionâ€¦" />
               <PlatformVariableSelector onInsert={(v) => onUpdate({ catalogItemCaption: (d.catalogItemCaption || '') + v })} />
             </div>
           </>)}
 
-          {/* ── Catalog Set ── */}
+          {/* â”€â”€ Catalog Set â”€â”€ */}
           {d.actionType === 'send_catalog_set' && (<>
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Catalog set ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.catalogSetId || ''} onChange={(e) => onUpdate({ catalogSetId: e.target.value, description: `Set: ${e.target.value}` })} placeholder="e.g. summer_2024" /></div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogSetCaption || ''} onChange={(e) => onUpdate({ catalogSetCaption: e.target.value })} placeholder="Collection description…" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogSetCaption || ''} onChange={(e) => onUpdate({ catalogSetCaption: e.target.value })} placeholder="Collection descriptionâ€¦" />
               <PlatformVariableSelector onInsert={(v) => onUpdate({ catalogSetCaption: (d.catalogSetCaption || '') + v })} />
             </div>
           </>)}
 
-          {/* ── Last Order Items ── */}
+          {/* â”€â”€ Last Order Items â”€â”€ */}
           {d.actionType === 'send_last_order_catalog_items' && (<>
             <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-sm text-pink-700">
               <div className="font-semibold mb-1">Last Order Catalog Items</div>
@@ -1901,12 +2075,12 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             </div>
           </>)}
 
-          {/* ── Assign Agent ── */}
+          {/* â”€â”€ Assign Agent â”€â”€ */}
           {d.actionType === 'assign_agent' && (
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Agent name</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.agent || ''} onChange={(e) => onUpdate({ agent: e.target.value, description: `Assign: ${e.target.value}` })} placeholder="e.g. support-team" /></div>
           )}
 
-          {/* ── Close / Exit ── */}
+          {/* â”€â”€ Close / Exit â”€â”€ */}
           {d.actionType === 'close_conversation' && (
             <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-600">Marks the conversation as resolved. No config needed.</div>
           )}
@@ -1919,176 +2093,77 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Wait (minutes)</label><input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" value={d.minutes || 10} min={1} onChange={(e) => onUpdate({ minutes: Math.max(1, Number(e.target.value) || 1) })} /></div>
         )}
 
-        {/* ── Button Reply node editor ── */}
+        {/* â”€â”€ Button Reply node editor (MULTI-ACTION) â”€â”€ */}
         {t === 'buttonReply' && (<>
           <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-200">
             <div className="text-xs font-bold text-indigo-700 mb-1">When customer clicks</div>
             <div className="text-sm font-semibold text-slate-800">"{d.buttonText || 'Button'}"</div>
           </div>
-          <div>
-            <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply action</label>
-            <select
-              className="w-full border rounded-lg px-3 py-2 text-sm bg-white"
-              value={d.replyActionType || ''}
-              onChange={(e) => {
-                const cat = ACTION_CATALOG.find(a => a.type === e.target.value);
-                onUpdate({ replyActionType: e.target.value, replyActionLabel: cat?.label || e.target.value });
-              }}
-            >
-              <option value="">-- No reply action --</option>
-              {ACTION_CATEGORIES.map(cat => {
-                const items = ACTION_CATALOG.filter(a => a.cat === cat.id);
-                return (<optgroup key={cat.id} label={cat.label}>{items.map(a => (<option key={a.id} value={a.type}>{a.label}</option>))}</optgroup>);
-              })}
-            </select>
-          </div>
-          {/* ── Send Text ── */}
-          {d.replyActionType === 'send_whatsapp_text' && (
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply message</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-24 resize-none" value={d.replyText || ''} onChange={(e) => onUpdate({ replyText: e.target.value })} placeholder="Message to send when this button is clicked…" />
-              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyText: (d.replyText || '') + v })} />
-            </div>
-          )}
-          {/* ── Send Template ── */}
-          {d.replyActionType === 'send_whatsapp_template' && (<>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply template</label>
-              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyTemplateName || ''} onChange={(e) => {
-                const tn = e.target.value;
-                const tpl = (templates || []).find(t2 => t2.name === tn);
-                const lang = tpl?.language || 'en';
-                const varNames = _inferBodyVarNamesFromTpl(tpl);
-                const tplVars = varNames.map(() => '');
-                onUpdate({ replyTemplateName: tn, replyTemplateLanguage: lang, replyTemplateVars: tplVars });
-              }}>
-                <option value="">Select a template…</option>
-                {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (
-                  <option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>
-                ))}
-              </select>
-            </div>
-            {d.replyTemplateName && (d.replyTemplateVars || []).length > 0 && (
-              <div>
-                <label className="text-xs font-semibold text-slate-500 mb-2 block">Body Variables ({(d.replyTemplateVars || []).length})</label>
-                {(d.replyTemplateVars || []).map((v, i) => (
-                  <div key={i} className="flex items-center gap-2 mb-2">
-                    <span className="text-xs text-slate-400 font-mono w-10 flex-shrink-0">{`{{${i+1}}}`}</span>
-                    <input className="flex-1 border rounded-lg px-3 py-1.5 text-sm" value={v} onChange={(e) => { const nv = [...(d.replyTemplateVars || [])]; nv[i] = e.target.value; onUpdate({ replyTemplateVars: nv }); }} placeholder="e.g. {{ order_number }}" />
+
+          {/* Multi-action list */}
+          {(() => {
+            const actions = Array.isArray(d.replyActions) ? d.replyActions : [];
+            const hasLegacy = !actions.length && d.replyActionType;
+
+            const updateAction = (idx, patch) => {
+              const next = [...actions]; next[idx] = { ...next[idx], ...patch }; onUpdate({ replyActions: next });
+            };
+            const removeAction = (idx) => { onUpdate({ replyActions: actions.filter((_, i) => i !== idx) }); };
+            const addAction = () => { onUpdate({ replyActions: [...actions, { replyActionType: '', replyActionLabel: '' }] }); };
+
+            const renderActionConfig = (a, onUpd) => {
+              const ra = a.replyActionType;
+              if (!ra) return null;
+              const catE = ACTION_CATALOG.find(c => c.type === ra);
+              return (
+                <div className="pl-2 space-y-2">
+                  <div className="text-[10px] font-semibold text-slate-400">{catE?.label || ra}</div>
+                  {ra === 'send_whatsapp_text' && <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none" value={a.replyText || ''} onChange={(e) => onUpd({ replyText: e.target.value })} placeholder="Reply messageâ€¦" />}
+                  {ra === 'send_whatsapp_template' && <select className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTemplateName || ''} onChange={(e) => { const tpl2 = (templates || []).find(t2 => t2.name === e.target.value); onUpd({ replyTemplateName: e.target.value, replyTemplateLanguage: tpl2?.language || 'en' }); }}><option value="">Select templateâ€¦</option>{(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (<option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>))}</select>}
+                  {(ra === 'shopify_tag' || ra === 'shopify_remove_tag') && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTag || ''} onChange={(e) => onUpd({ replyTag: e.target.value })} placeholder="Tagâ€¦" />}
+                  {ra === 'assign_agent' && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyAgent || ''} onChange={(e) => onUpd({ replyAgent: e.target.value })} placeholder="Agent nameâ€¦" />}
+                  {ra === 'send_last_order_catalog_items' && <input type="number" className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyLastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpd({ replyLastOrderItemsMax: Number(e.target.value) || 10 })} />}
+                  {(ra === 'close_conversation' || ra === 'exit' || ra === 'shopify_order_status') && <div className="text-[10px] text-slate-400 italic">No config needed</div>}
+                </div>
+              );
+            };
+
+            return (
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-slate-600">Reply Actions ({actions.length || (hasLegacy ? 1 : 0)})</div>
+                {hasLegacy && (
+                  <div className="p-3 rounded-lg border border-indigo-200 bg-indigo-50/50 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-indigo-700">Action 1 (legacy)</span>
+                      <button type="button" className="text-xs text-indigo-600 hover:underline" onClick={() => {
+                        onUpdate({ replyActions: [{ replyActionType: d.replyActionType, replyActionLabel: d.replyActionLabel || '', replyText: d.replyText || '', replyTemplateName: d.replyTemplateName || '', replyTag: d.replyTag || '', replyAgent: d.replyAgent || '' }] });
+                      }}>Convert to multi-action</button>
+                    </div>
+                    <div className="text-sm text-slate-700">{d.replyActionLabel || d.replyActionType}</div>
+                  </div>
+                )}
+                {actions.map((a, idx) => (
+                  <div key={idx} className="p-3 rounded-lg border border-slate-200 bg-white space-y-2 relative group">
+                    <button type="button" className="absolute top-1 right-1 p-1 text-slate-300 hover:text-rose-500 rounded opacity-0 group-hover:opacity-100 transition-all" onClick={() => removeAction(idx)}><X className="w-3 h-3" /></button>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">#{idx + 1}</span>
+                      <select className="flex-1 border rounded-lg px-2 py-1.5 text-sm bg-white" value={a.replyActionType || ''} onChange={(e) => {
+                        const cat = ACTION_CATALOG.find(c => c.type === e.target.value);
+                        updateAction(idx, { replyActionType: e.target.value, replyActionLabel: cat?.label || e.target.value });
+                      }}>
+                        <option value="">â€” Select action â€”</option>
+                        {ACTION_CATEGORIES.map(cat => { const items = ACTION_CATALOG.filter(ac => ac.cat === cat.id); return (<optgroup key={cat.id} label={cat.label}>{items.map(ac => (<option key={ac.id} value={ac.type}>{ac.label}</option>))}</optgroup>); })}
+                      </select>
+                    </div>
+                    {renderActionConfig(a, (patch) => updateAction(idx, patch))}
                   </div>
                 ))}
-                <PlatformVariableSelector onInsert={(v) => { const nv = [...(d.replyTemplateVars || [])]; const ei = nv.findIndex(x => !x); if (ei >= 0) { nv[ei] = v; onUpdate({ replyTemplateVars: nv }); } }} />
+                <button type="button" className="w-full px-3 py-2 text-xs font-medium text-indigo-700 border border-dashed border-indigo-300 rounded-lg hover:bg-indigo-50 transition-colors flex items-center justify-center gap-1" onClick={addAction}><Plus className="w-3 h-3" /> Add action</button>
               </div>
-            )}
-          </>)}
-          {/* ── Send Catalog Set ── */}
-          {d.replyActionType === 'send_catalog_set' && (<>
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Catalog set ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyCatalogSetId || ''} onChange={(e) => onUpdate({ replyCatalogSetId: e.target.value })} placeholder="e.g. summer_2024" /></div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyCatalogSetCaption || ''} onChange={(e) => onUpdate({ replyCatalogSetCaption: e.target.value })} placeholder="Collection description…" />
-              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyCatalogSetCaption: (d.replyCatalogSetCaption || '') + v })} />
-            </div>
-          </>)}
-          {/* ── Send Catalog Item ── */}
-          {d.replyActionType === 'send_catalog_item' && (<>
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Product retailer ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyCatalogItemRetailerId || ''} onChange={(e) => onUpdate({ replyCatalogItemRetailerId: e.target.value })} placeholder="e.g. SKU-001" /></div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyCatalogItemCaption || ''} onChange={(e) => onUpdate({ replyCatalogItemCaption: e.target.value })} placeholder="Product description…" />
-              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyCatalogItemCaption: (d.replyCatalogItemCaption || '') + v })} />
-            </div>
-          </>)}
-          {/* ── Send Audio ── */}
-          {d.replyActionType === 'send_audio' && (
-            <GcsMediaUpload label="Audio" accept="audio/*,.ogg,.m4a,.opus" value={d.replyAudioUrl || ''} onChange={(url) => onUpdate({ replyAudioUrl: url })} />
-          )}
-          {/* ── Send Image ── */}
-          {d.replyActionType === 'send_image' && (<>
-            <GcsMediaUpload label="Image" accept="image/*" value={d.replyImageUrl || ''} onChange={(url) => onUpdate({ replyImageUrl: url })} />
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyImageCaption || ''} onChange={(e) => onUpdate({ replyImageCaption: e.target.value })} />
-              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyImageCaption: (d.replyImageCaption || '') + v })} />
-            </div>
-          </>)}
-          {/* ── Send Video ── */}
-          {d.replyActionType === 'send_video' && (<>
-            <GcsMediaUpload label="Video" accept="video/*" value={d.replyVideoUrl || ''} onChange={(url) => onUpdate({ replyVideoUrl: url })} />
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.replyVideoCaption || ''} onChange={(e) => onUpdate({ replyVideoCaption: e.target.value })} />
-              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyVideoCaption: (d.replyVideoCaption || '') + v })} />
-            </div>
-          </>)}
-          {/* ── Send List ── */}
-          {d.replyActionType === 'send_list' && (<>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.replyListText || ''} onChange={(e) => onUpdate({ replyListText: e.target.value })} placeholder="Message body…" />
-              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyListText: (d.replyListText || '') + v })} />
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Button text</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyListButtonText || 'Choose'} onChange={(e) => onUpdate({ replyListButtonText: e.target.value })} /></div>
-              <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Section title</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyListSectionTitle || ''} onChange={(e) => onUpdate({ replyListSectionTitle: e.target.value })} placeholder="Options" /></div>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Rows (id|title|description per line)</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-24 resize-none font-mono" value={d.replyListRowsLines || ''} onChange={(e) => onUpdate({ replyListRowsLines: e.target.value })} placeholder={"opt_1|Option One|Description\nopt_2|Option Two"} />
-            </div>
-          </>)}
-          {/* ── Send Buttons ── */}
-          {d.replyActionType === 'send_buttons' && (<>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.replyButtonsText || ''} onChange={(e) => onUpdate({ replyButtonsText: e.target.value })} placeholder="Message body…" />
-              <PlatformVariableSelector onInsert={(v) => onUpdate({ replyButtonsText: (d.replyButtonsText || '') + v })} />
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Buttons (id|title per line)</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none font-mono" value={d.replyButtonsLines || ''} onChange={(e) => onUpdate({ replyButtonsLines: e.target.value })} placeholder={"confirm|Confirm ✅\nchange|Change order"} />
-            </div>
-          </>)}
-          {/* ── Last Order Items ── */}
-          {d.replyActionType === 'send_last_order_catalog_items' && (<>
-            <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-sm text-pink-700">
-              <div className="font-semibold mb-1">Last Order Catalog Items</div>
-              <div className="text-xs">Sends the customer's last order items as catalog cards.</div>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 mb-1 block">Max items to send</label>
-              <input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyLastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpdate({ replyLastOrderItemsMax: Number(e.target.value) || 10 })} />
-            </div>
-          </>)}
-          {/* ── Order Status Lookup ── */}
-          {d.replyActionType === 'shopify_order_status' && (
-            <div className="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
-              <div className="font-semibold mb-1">Order Status Lookup</div>
-              <div className="text-xs">Automatically looks up the customer's latest orders and sends the status. No configuration needed.</div>
-            </div>
-          )}
-          {/* ── Tag / Remove Tag ── */}
-          {(d.replyActionType === 'shopify_tag' || d.replyActionType === 'shopify_remove_tag') && (
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">{d.replyActionType === 'shopify_remove_tag' ? 'Tag to remove' : 'Tag to add'}</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyTag || ''} onChange={(e) => onUpdate({ replyTag: e.target.value })} placeholder="e.g. VIP, confirmed" /></div>
-          )}
-          {/* ── Order Confirmation Flow ── */}
-          {d.replyActionType === 'order_confirmation_flow' && (
-            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-700">
-              <div className="font-semibold mb-1">Confirmation Flow</div>
-              <div className="text-xs">Multi-step order confirmation with buttons. Configure this as a top-level action for full control.</div>
-            </div>
-          )}
-          {/* ── Close / Exit / Assign ── */}
-          {d.replyActionType === 'close_conversation' && (
-            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-600">Marks conversation as resolved.</div>
-          )}
-          {d.replyActionType === 'assign_agent' && (
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Agent name</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.replyAgent || ''} onChange={(e) => onUpdate({ replyAgent: e.target.value })} placeholder="e.g. support-team" /></div>
-          )}
-          {d.replyActionType === 'exit' && (
-            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-sm text-rose-600">Stops the workflow for this button branch.</div>
-          )}
+            );
+          })()}
         </>)}
+
 
       </div>
       {t !== 'startTrigger' && (
@@ -2098,9 +2173,9 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
   );
 }
 
-/* ═══════════════════════════════════════════════════════════
-   Root FlowBuilder — manages list vs canvas view
-   ═══════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   Root FlowBuilder â€” manages list vs canvas view
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 export default function FlowBuilder() {
   const [view, setView] = useState('list'); // list | canvas
   const [rules, setRules] = useState([]);
@@ -2146,7 +2221,7 @@ export default function FlowBuilder() {
     loadStats();
   }, [loadRules, loadTemplates, loadStats]);
 
-  /* ── Build a blank flow (empty canvas) ──────────────── */
+  /* â”€â”€ Build a blank flow (empty canvas) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const newBlankFlow = useCallback(() => {
     const trigId = uid();
     // eslint-disable-next-line no-unused-vars
@@ -2160,7 +2235,7 @@ export default function FlowBuilder() {
     };
   }, []);
 
-  /* ── Open an existing rule as a flow graph ────────────── */
+  /* â”€â”€ Open an existing rule as a flow graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const openRuleAsFlow = useCallback((rule) => {
     // If the rule was saved from FlowBuilder, it has meta.flow_graph
     const saved = rule?.meta?.flow_graph;
@@ -2171,7 +2246,7 @@ export default function FlowBuilder() {
         meta: { name: rule.name || '', enabled: !!rule.enabled, ruleId: rule.id },
       };
     }
-    // Otherwise, reconstruct a simple trigger → action graph from the rule
+    // Otherwise, reconstruct a simple trigger â†’ action graph from the rule
     const trigId = uid();
     // eslint-disable-next-line no-unused-vars
     const actionId = uid();
@@ -2197,7 +2272,7 @@ export default function FlowBuilder() {
       if (at === 'delay') {
         nodes.push(rfNode(aId, 'delayFlow', 0, yPos, { minutes: a.minutes || 10 }));
       } else {
-        // Map rule action type → flow actionType + label + data
+        // Map rule action type â†’ flow actionType + label + data
         let actionType = 'send_whatsapp_text';
         let label = 'Send Text';
         const extra = {};
@@ -2300,7 +2375,7 @@ export default function FlowBuilder() {
     };
   }, []);
 
-  /* ── Save flow to backend ───────────────────────────── */
+  /* â”€â”€ Save flow to backend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const saveToBackend = useCallback(async (rule, existingId) => {
     const isUpdate = !!existingId;
     if (isUpdate) {
@@ -2319,7 +2394,7 @@ export default function FlowBuilder() {
     } catch {}
   }, [rules]);
 
-  /* ── Handlers ───────────────────────────────────────── */
+  /* â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const handleSelectFlow = useCallback((rule, template) => {
     if (template) {
       const flow = template.build();

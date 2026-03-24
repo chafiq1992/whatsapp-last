@@ -12,7 +12,7 @@ import {
   SplitSquareHorizontal, Timer, Ban,
   ChevronRight, X, List, Package, Search,
   CheckCircle, FileText, BarChart2, MousePointerClick,
-  Sparkles, Send, Loader2,
+  Sparkles, Send, Loader2, Tag, Globe, Upload,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 
@@ -191,7 +191,7 @@ function getVariablesForTrigger(source, event) {
   const all = source === 'shopify' ? SHOPIFY_EVENTS : source === 'whatsapp' ? WHATSAPP_EVENTS : DELIVERY_EVENTS;
   const ev = all.find(e => e.id === event);
   const vars = Array.isArray(ev?.variables) ? ev.variables : [];
-  return [...vars, { key: '__custom__', label: 'âœï¸ Custom variableâ€¦' }];
+  return [...vars, { key: '__custom__', label: 'âœï¸ Custom variable...' }];
 }
 
 /* Helper: infer body variable placeholder names from a WhatsApp template */
@@ -350,7 +350,7 @@ function rfEdge(source, target, sourceHandle, label) {
 }
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   Saved flows list â€” shows existing flows created in this tab
+   Saved flows list  - shows existing flows created in this tab
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading, stats }) {
   return (
@@ -389,7 +389,7 @@ function FlowsListView({ flows, onSelect, onNewFlow, onDelete, loading, stats })
       {/* Flow list */}
       <div className="flex-1 overflow-auto px-6 py-4">
         {loading ? (
-          <div className="text-sm text-slate-500">Loadingâ€¦</div>
+          <div className="text-sm text-slate-500">Loading...</div>
         ) : (flows || []).length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-4 text-slate-400">
             <Zap className="w-12 h-12 text-slate-300" />
@@ -1101,7 +1101,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             className="text-base font-semibold text-slate-800 border-none bg-transparent focus:outline-none focus:ring-0 min-w-0 flex-1 placeholder-slate-300"
             value={flowName}
             onChange={(e) => setFlowName(e.target.value)}
-            placeholder="Untitled flowâ€¦"
+            placeholder="Untitled flow..."
           />
           {/* Metrics badges */}
           {(flowStat.triggers > 0 || flowStat.messages_sent > 0) && (
@@ -1126,7 +1126,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             disabled={saving}
           >
             <Save className="w-4 h-4" />
-            {saving ? 'Savingâ€¦' : 'Save draft'}
+            {saving ? 'Saving...' : 'Save draft'}
           </button>
           <button
             className={`px-4 py-2 rounded-lg text-sm font-semibold text-white flex items-center gap-2 transition-all disabled:opacity-50 ${
@@ -1220,7 +1220,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
 }
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   Flow Drafter â€” AI-powered draft generation chat
+   Flow Drafter  - AI-powered draft generation chat
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, triggerEvent }) {
   const [open, setOpen] = React.useState(false);
@@ -1314,7 +1314,7 @@ function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, trig
         {loading && (
           <div className="flex justify-start">
             <div className="bg-white border border-slate-200 text-slate-500 px-4 py-3 rounded-2xl rounded-bl-md shadow-sm flex items-center gap-2 text-sm">
-              <Loader2 className="w-4 h-4 animate-spin text-violet-500" /> Generating flowâ€¦
+              <Loader2 className="w-4 h-4 animate-spin text-violet-500" /> Generating flow...
             </div>
           </div>
         )}
@@ -1329,7 +1329,7 @@ function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, trig
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendPrompt()}
-            placeholder="Describe your flowâ€¦"
+            placeholder="Describe your flow..."
             disabled={loading}
           />
           <button
@@ -1340,7 +1340,7 @@ function FlowDrafterChat({ nodes, setNodes, edges, setEdges, triggerSource, trig
             <Send className="w-4 h-4" />
           </button>
         </div>
-        <p className="text-[10px] text-slate-400 mt-1.5 text-center">Drafts only â€” review before saving</p>
+        <p className="text-[10px] text-slate-400 mt-1.5 text-center">Drafts only  - review before saving</p>
       </div>
     </div>
   );
@@ -1363,7 +1363,7 @@ function TriggerPickerPanel({ onClose, onSelectTrigger }) {
         <button onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X className="w-4 h-4" /></button>
       </div>
       <div className="px-4 pt-3 pb-1">
-        <input className="w-full border rounded-lg px-3 py-2 text-sm placeholder-slate-400 focus:ring-2 focus:ring-blue-200 outline-none" placeholder="Search triggersâ€¦" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <input className="w-full border rounded-lg px-3 py-2 text-sm placeholder-slate-400 focus:ring-2 focus:ring-blue-200 outline-none" placeholder="Search triggers..." value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
       <div className="p-4 space-y-4 overflow-y-auto flex-1">
         <div>
@@ -1510,7 +1510,7 @@ function PlatformVariableSelector({ onInsert }) {
 
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   GcsMediaUpload â€” drag-and-drop upload to GCS
+   GcsMediaUpload  - drag-and-drop upload to GCS
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 function GcsMediaUpload({ label, accept, value, onChange }) {
   const [uploading, setUploading] = React.useState(false);
@@ -1525,7 +1525,7 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
       fd.append('file', file);
       const res = await api.post('/admin/upload-media', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
       if (res?.data?.url) { onChange(res.data.url); }
-      else setErr('Upload failed â€” no URL returned');
+      else setErr('Upload failed  - no URL returned');
     } catch (e) {
       setErr(String(e?.response?.data?.detail || e?.message || 'Upload failed'));
     } finally {
@@ -1548,13 +1548,13 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
         {uploading ? (
           <div className="flex items-center justify-center gap-2 text-indigo-600 text-sm">
             <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
-            Uploadingâ€¦
+            Uploading...
           </div>
         ) : (
           <div className="text-slate-500 text-xs">
             <div className="text-2xl mb-1">â˜ï¸</div>
             <span className="font-medium text-indigo-600">Click or drag</span> to upload {label.toLowerCase()}<br/>
-            <span className="text-[10px] text-slate-400">Max 50 MB Â· Uploads to GCS</span>
+            <span className="text-[10px] text-slate-400">Max 50 MB - Uploads to GCS</span>
           </div>
         )}
       </div>
@@ -1563,7 +1563,7 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
         className="w-full border rounded-lg px-3 py-2 text-sm"
         value={value || ''}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Or paste URL directlyâ€¦"
+        placeholder="Or paste URL directly..."
       />
       {err && <div className="text-xs text-rose-600 mt-1">{err}</div>}
       {value && !uploading && (
@@ -1574,7 +1574,7 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
 }
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   VariableSearchPicker â€” searchable, source-aware variable picker
+   VariableSearchPicker  - searchable, source-aware variable picker
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 const ALL_VARIABLES_BY_SOURCE = {
   whatsapp: [
@@ -1639,7 +1639,7 @@ function VariableSearchPicker({ onInsert }) {
           </div>
           <input
             className="w-full border rounded-lg px-2 py-1.5 text-xs mb-2"
-            placeholder="Search variablesâ€¦"
+            placeholder="Search variables..."
             value={q}
             onChange={e => setQ(e.target.value)}
             autoFocus
@@ -1687,7 +1687,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             <div className="font-semibold text-emerald-800 mb-1">Current trigger</div>
             <div className="text-emerald-600">{d.source}: {d.event || d.label}</div>
           </div>
-          <button className="w-full px-4 py-2.5 rounded-lg border border-slate-200 text-sm hover:bg-slate-50" onClick={() => onSelectTrigger && onSelectTrigger(d.source, d.event, d.label)}>Change triggerâ€¦</button>
+          <button className="w-full px-4 py-2.5 rounded-lg border border-slate-200 text-sm hover:bg-slate-50" onClick={() => onSelectTrigger && onSelectTrigger(d.source, d.event, d.label)}>Change trigger...</button>
           <div>
             <div className="text-xs font-semibold text-slate-500 mb-1">Available variables ({trigVars.filter(v => v.key !== '__custom__').length}):</div>
             <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
@@ -1706,15 +1706,15 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors font-medium" onClick={() => {
                 const conds = [...(d.conditions || []), { field: 'tags', operator: 'contains', value: '' }];
                 onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
-              }}>ðŸ·ï¸ Tag contains</button>
+              }}>Tag contains</button>
               <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors font-medium" onClick={() => {
                 const conds = [...(d.conditions || []), { field: 'source_name', operator: '==', value: 'web' }];
                 onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
-              }}>ðŸŒ Online Store Only</button>
+              }}>Online Store Only</button>
               <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 transition-colors font-medium" onClick={() => {
                 const conds = [...(d.conditions || []), { field: 'source_name', operator: '!=', value: 'draft_orders' }];
                 onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
-              }}>ðŸš« Exclude Drafts</button>
+              }}>Exclude Drafts</button>
             </div>
           </div>
 
@@ -1734,7 +1734,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                   conds[ci] = { ...conds[ci], field: e.target.value };
                   onUpdate({ conditions: conds });
                 }}>
-                  <option value="">â€” Select variable â€”</option>
+                  <option value=""> - Select variable  -</option>
                   {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
                 </select>
                 <div className="grid grid-cols-2 gap-2">
@@ -1752,7 +1752,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                   </select>
                   <input className="border rounded-lg px-2 py-1.5 text-sm" value={cond.value || ''} onChange={(e) => {
                     const conds = [...d.conditions]; conds[ci] = { ...conds[ci], value: e.target.value }; onUpdate({ conditions: conds });
-                  }} placeholder="Valueâ€¦" />
+                  }} placeholder="Value..." />
                 </div>
                 {ci < d.conditions.length - 1 && <div className="text-center text-[10px] font-bold text-amber-500 uppercase tracking-wider">AND</div>}
               </div>
@@ -1771,11 +1771,11 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                 const vDef = trigVars.find(v => v.key === f);
                 onUpdate({ field: f, fieldLabel: vDef?.label || f, expression: `${vDef?.label || f} ${d.operator || '=='} ${d.value || ''}` });
               }}>
-                <option value="">â€” Select a variable â€”</option>
+                <option value=""> - Select a variable  -</option>
                 {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
               </select>
               {(d.field === '__custom__' || customField !== '') && (
-                <input className="w-full border rounded-lg px-3 py-2 text-sm mt-2" placeholder="Custom variable keyâ€¦" value={customField} onChange={(e) => { setCustomField(e.target.value); onUpdate({ field: e.target.value, fieldLabel: e.target.value, expression: `${e.target.value} ${d.operator || '=='} ${d.value || ''}` }); }} />
+                <input className="w-full border rounded-lg px-3 py-2 text-sm mt-2" placeholder="Custom variable key..." value={customField} onChange={(e) => { setCustomField(e.target.value); onUpdate({ field: e.target.value, fieldLabel: e.target.value, expression: `${e.target.value} ${d.operator || '=='} ${d.value || ''}` }); }} />
               )}
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -1833,7 +1833,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           {d.actionType === 'send_whatsapp_text' && (
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Message text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-28 resize-none" value={d.text || ''} onChange={(e) => onUpdate({ text: e.target.value, description: e.target.value.slice(0, 50) + (e.target.value.length > 50 ? 'â€¦' : '') })} placeholder="Type your messageâ€¦ Click variables below to insert" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-28 resize-none" value={d.text || ''} onChange={(e) => onUpdate({ text: e.target.value, description: e.target.value.slice(0, 50) + (e.target.value.length > 50 ? '...' : '') })} placeholder="Type your message... Click variables below to insert" />
               <div className="flex justify-end mt-1 mb-2">
                 <button type="button" className="text-xl opacity-70 hover:opacity-100 transition-opacity" onClick={() => onUpdate({ _showEmoji: !d._showEmoji })}>ðŸ˜€</button>
               </div>
@@ -1855,7 +1855,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                 const headerType = _getTemplateHeaderType(tpl);
                 onUpdate({ templateName: tn, templateLanguage: lang, templateVars: tplVars, templateHeaderType: headerType, templateHeaderUrl: '', description: `Template: ${tn}` });
               }}>
-                <option value="">Select a templateâ€¦</option>
+                <option value="">Select a template...</option>
                 {(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (
                   <option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>
                 ))}
@@ -1902,23 +1902,23 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                   <PlatformVariableSelector onInsert={(v) => { const nv = [...(d.templateVars || [])]; const ei = nv.findIndex(x => !x); if (ei >= 0) { nv[ei] = v; onUpdate({ templateVars: nv }); } }} />
                 </div>
               )}
-              {/* Header â€” variant selector (URL upload or Last Order Images) */}
+              {/* Header  - variant selector (URL upload or Last Order Images) */}
               {d.templateHeaderType && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(d.templateHeaderType) && (
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-500 block">Header {d.templateHeaderType.toLowerCase()} source</label>
                   {d.templateHeaderType === 'IMAGE' && (
                     <div className="flex gap-2">
                       <button type="button" className={`flex-1 px-3 py-2 text-xs rounded-lg border font-medium transition-colors ${(d.templateHeaderVariant || 'url') === 'url' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-200'}`} onClick={() => onUpdate({ templateHeaderVariant: 'url', templateHeaderUrl: '' })}>
-                        â˜ï¸ Upload / URL
+                        Upload / URL
                       </button>
                       <button type="button" className={`flex-1 px-3 py-2 text-xs rounded-lg border font-medium transition-colors ${d.templateHeaderVariant === 'last_order_images' ? 'bg-pink-50 border-pink-300 text-pink-700' : 'bg-white border-slate-200 text-slate-500 hover:border-pink-200'}`} onClick={() => onUpdate({ templateHeaderVariant: 'last_order_images', templateHeaderUrl: '{{ last_order_line_items_images }}' })}>
-                        ðŸ›’ Last Order Images
+                        Last Order Images
                       </button>
                     </div>
                   )}
                   {d.templateHeaderVariant === 'last_order_images' ? (
                     <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-xs text-pink-700">
-                      <div className="font-semibold mb-1">ðŸ“¸ Using last order line item images</div>
+                      <div className="font-semibold mb-1">Using last order line item images</div>
                       <div>The header image will automatically use the product images from the customer's last order, just like the Confirmation workflow.</div>
                     </div>
                   ) : (
@@ -1948,9 +1948,9 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocConfirmTitles || ''} onChange={(e) => onUpdate({ ocConfirmTitles: e.target.value })} /></div>
               <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocChangeTitles || ''} onChange={(e) => onUpdate({ ocChangeTitles: e.target.value })} /></div>
               <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk button titles (one per line)</label><textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none font-mono" value={d.ocTalkTitles || ''} onChange={(e) => onUpdate({ ocTalkTitles: e.target.value })} /></div>
-              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocConfirmAudioUrl || ''} onChange={(e) => onUpdate({ ocConfirmAudioUrl: e.target.value })} placeholder="https://â€¦" /></div>
-              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocChangeAudioUrl || ''} onChange={(e) => onUpdate({ ocChangeAudioUrl: e.target.value })} placeholder="https://â€¦" /></div>
-              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocTalkAudioUrl || ''} onChange={(e) => onUpdate({ ocTalkAudioUrl: e.target.value })} placeholder="https://â€¦" /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Confirm audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocConfirmAudioUrl || ''} onChange={(e) => onUpdate({ ocConfirmAudioUrl: e.target.value })} placeholder="https://..." /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Change audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocChangeAudioUrl || ''} onChange={(e) => onUpdate({ ocChangeAudioUrl: e.target.value })} placeholder="https://..." /></div>
+              <div className="mt-2"><label className="text-xs font-semibold text-slate-500 mb-1 block">Talk audio URL</label><input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={d.ocTalkAudioUrl || ''} onChange={(e) => onUpdate({ ocTalkAudioUrl: e.target.value })} placeholder="https://..." /></div>
               <div className="mt-2 flex items-center gap-3">
                 <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={d.ocSendItems !== false} onChange={(e) => onUpdate({ ocSendItems: e.target.checked })} /> Send order items</label>
                 {d.ocSendItems !== false && (<div className="flex items-center gap-2"><span className="text-xs text-slate-500">Max items</span><input type="number" className="w-16 border rounded px-2 py-1 text-sm" value={d.ocMaxItems || 10} min={1} max={30} onChange={(e) => onUpdate({ ocMaxItems: Number(e.target.value) || 10 })} /></div>)}
@@ -1962,7 +1962,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           {d.actionType === 'send_buttons' && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.buttonsText || ''} onChange={(e) => onUpdate({ buttonsText: e.target.value, description: 'Buttons: ' + e.target.value.slice(0, 30) })} placeholder="Message bodyâ€¦" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.buttonsText || ''} onChange={(e) => onUpdate({ buttonsText: e.target.value, description: 'Buttons: ' + e.target.value.slice(0, 30) })} placeholder="Message body..." />
               <div className="flex justify-end mt-1 mb-2"><button type="button" className="text-xl opacity-70 hover:opacity-100" onClick={() => onUpdate({ _showEmojiBtn: !d._showEmojiBtn })}>ðŸ˜€</button></div>
               {d._showEmojiBtn && (<div className="mb-3 border rounded-xl overflow-hidden shadow-sm"><EmojiPicker width="100%" height={300} onEmojiClick={(ev) => onUpdate({ buttonsText: (d.buttonsText || '') + ev.emoji })} /></div>)}
               <PlatformVariableSelector onInsert={(v) => onUpdate({ buttonsText: (d.buttonsText || '') + v })} />
@@ -1977,7 +1977,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           {d.actionType === 'send_list' && (<>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Body text</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.listText || ''} onChange={(e) => onUpdate({ listText: e.target.value, description: 'List: ' + e.target.value.slice(0, 30) })} placeholder="Message bodyâ€¦" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.listText || ''} onChange={(e) => onUpdate({ listText: e.target.value, description: 'List: ' + e.target.value.slice(0, 30) })} placeholder="Message body..." />
               <PlatformVariableSelector onInsert={(v) => onUpdate({ listText: (d.listText || '') + v })} />
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -2048,7 +2048,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Product retailer ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.catalogItemRetailerId || ''} onChange={(e) => onUpdate({ catalogItemRetailerId: e.target.value, description: `Catalog: ${e.target.value}` })} placeholder="e.g. SKU-001" /></div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogItemCaption || ''} onChange={(e) => onUpdate({ catalogItemCaption: e.target.value })} placeholder="Product descriptionâ€¦" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogItemCaption || ''} onChange={(e) => onUpdate({ catalogItemCaption: e.target.value })} placeholder="Product description..." />
               <PlatformVariableSelector onInsert={(v) => onUpdate({ catalogItemCaption: (d.catalogItemCaption || '') + v })} />
             </div>
           </>)}
@@ -2058,7 +2058,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             <div><label className="text-xs font-semibold text-slate-500 mb-1 block">Catalog set ID</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.catalogSetId || ''} onChange={(e) => onUpdate({ catalogSetId: e.target.value, description: `Set: ${e.target.value}` })} placeholder="e.g. summer_2024" /></div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Caption</label>
-              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogSetCaption || ''} onChange={(e) => onUpdate({ catalogSetCaption: e.target.value })} placeholder="Collection descriptionâ€¦" />
+              <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-16 resize-none" value={d.catalogSetCaption || ''} onChange={(e) => onUpdate({ catalogSetCaption: e.target.value })} placeholder="Collection description..." />
               <PlatformVariableSelector onInsert={(v) => onUpdate({ catalogSetCaption: (d.catalogSetCaption || '') + v })} />
             </div>
           </>)}
@@ -2118,10 +2118,39 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               return (
                 <div className="pl-2 space-y-2">
                   <div className="text-[10px] font-semibold text-slate-400">{catE?.label || ra}</div>
-                  {ra === 'send_whatsapp_text' && <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none" value={a.replyText || ''} onChange={(e) => onUpd({ replyText: e.target.value })} placeholder="Reply messageâ€¦" />}
-                  {ra === 'send_whatsapp_template' && <select className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTemplateName || ''} onChange={(e) => { const tpl2 = (templates || []).find(t2 => t2.name === e.target.value); onUpd({ replyTemplateName: e.target.value, replyTemplateLanguage: tpl2?.language || 'en' }); }}><option value="">Select templateâ€¦</option>{(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (<option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>))}</select>}
-                  {(ra === 'shopify_tag' || ra === 'shopify_remove_tag') && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTag || ''} onChange={(e) => onUpd({ replyTag: e.target.value })} placeholder="Tagâ€¦" />}
-                  {ra === 'assign_agent' && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyAgent || ''} onChange={(e) => onUpd({ replyAgent: e.target.value })} placeholder="Agent nameâ€¦" />}
+                  {ra === 'send_whatsapp_text' && <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-16 resize-none" value={a.replyText || ''} onChange={(e) => onUpd({ replyText: e.target.value })} placeholder="Reply message..." />}
+                  {ra === 'send_whatsapp_template' && (<>
+                    <select className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTemplateName || ''} onChange={(e) => { const tpl2 = (templates || []).find(t2 => t2.name === e.target.value); const vn = _inferBodyVarNamesFromTpl(tpl2); onUpd({ replyTemplateName: e.target.value, replyTemplateLanguage: tpl2?.language || 'en', replyTemplateVars: vn.map(() => '') }); }}><option value="">Select template...</option>{(templates || []).filter(tp => String(tp.status || '').toLowerCase() === 'approved').map(tp => (<option key={tp.name + '_' + tp.language} value={tp.name}>{tp.name} ({tp.language})</option>))}</select>
+                    {a.replyTemplateName && (a.replyTemplateVars || []).length > 0 && (<div className="space-y-1">{(a.replyTemplateVars || []).map((v, vi) => (<div key={vi} className="flex items-center gap-1"><span className="text-[10px] text-slate-400 font-mono">{`{{${vi+1}}}`}</span><input className="flex-1 border rounded px-2 py-1 text-xs" value={v} onChange={(e) => { const nv = [...(a.replyTemplateVars || [])]; nv[vi] = e.target.value; onUpd({ replyTemplateVars: nv }); }} placeholder="Variable value" /></div>))}</div>)}
+                  </>)}
+                  {ra === 'send_audio' && <GcsMediaUpload label="Audio" accept="audio/*,.ogg,.m4a,.opus" value={a.replyAudioUrl || ''} onChange={(url) => onUpd({ replyAudioUrl: url })} />}
+                  {ra === 'send_image' && (<>
+                    <GcsMediaUpload label="Image" accept="image/*" value={a.replyImageUrl || ''} onChange={(url) => onUpd({ replyImageUrl: url })} />
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-12 resize-none" value={a.replyImageCaption || ''} onChange={(e) => onUpd({ replyImageCaption: e.target.value })} placeholder="Caption..." />
+                  </>)}
+                  {ra === 'send_video' && (<>
+                    <GcsMediaUpload label="Video" accept="video/*" value={a.replyVideoUrl || ''} onChange={(url) => onUpd({ replyVideoUrl: url })} />
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-12 resize-none" value={a.replyVideoCaption || ''} onChange={(e) => onUpd({ replyVideoCaption: e.target.value })} placeholder="Caption..." />
+                  </>)}
+                  {ra === 'send_catalog_set' && (<>
+                    <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyCatalogSetId || ''} onChange={(e) => onUpd({ replyCatalogSetId: e.target.value })} placeholder="Catalog set ID" />
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-12 resize-none" value={a.replyCatalogSetCaption || ''} onChange={(e) => onUpd({ replyCatalogSetCaption: e.target.value })} placeholder="Caption..." />
+                  </>)}
+                  {ra === 'send_catalog_item' && (<>
+                    <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyCatalogItemRetailerId || ''} onChange={(e) => onUpd({ replyCatalogItemRetailerId: e.target.value })} placeholder="Product retailer ID" />
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-12 resize-none" value={a.replyCatalogItemCaption || ''} onChange={(e) => onUpd({ replyCatalogItemCaption: e.target.value })} placeholder="Caption..." />
+                  </>)}
+                  {ra === 'send_list' && (<>
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-14 resize-none" value={a.replyListText || ''} onChange={(e) => onUpd({ replyListText: e.target.value })} placeholder="Body text..." />
+                    <div className="grid grid-cols-2 gap-1"><input className="border rounded px-2 py-1 text-xs" value={a.replyListButtonText || 'Choose'} onChange={(e) => onUpd({ replyListButtonText: e.target.value })} placeholder="Button" /><input className="border rounded px-2 py-1 text-xs" value={a.replyListSectionTitle || ''} onChange={(e) => onUpd({ replyListSectionTitle: e.target.value })} placeholder="Section" /></div>
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-xs h-14 resize-none font-mono" value={a.replyListRowsLines || ''} onChange={(e) => onUpd({ replyListRowsLines: e.target.value })} placeholder={"id|Title|Desc per line"} />
+                  </>)}
+                  {ra === 'send_buttons' && (<>
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-14 resize-none" value={a.replyButtonsText || ''} onChange={(e) => onUpd({ replyButtonsText: e.target.value })} placeholder="Body text..." />
+                    <textarea className="w-full border rounded-lg px-3 py-1.5 text-xs h-14 resize-none font-mono" value={a.replyButtonsLines || ''} onChange={(e) => onUpd({ replyButtonsLines: e.target.value })} placeholder={"id|Title per line"} />
+                  </>)}
+                  {(ra === 'shopify_tag' || ra === 'shopify_remove_tag') && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTag || ''} onChange={(e) => onUpd({ replyTag: e.target.value })} placeholder="Tag name..." />}
+                  {ra === 'assign_agent' && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyAgent || ''} onChange={(e) => onUpd({ replyAgent: e.target.value })} placeholder="Agent name..." />}
                   {ra === 'send_last_order_catalog_items' && <input type="number" className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyLastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpd({ replyLastOrderItemsMax: Number(e.target.value) || 10 })} />}
                   {(ra === 'close_conversation' || ra === 'exit' || ra === 'shopify_order_status') && <div className="text-[10px] text-slate-400 italic">No config needed</div>}
                 </div>
@@ -2151,7 +2180,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                         const cat = ACTION_CATALOG.find(c => c.type === e.target.value);
                         updateAction(idx, { replyActionType: e.target.value, replyActionLabel: cat?.label || e.target.value });
                       }}>
-                        <option value="">â€” Select action â€”</option>
+                        <option value=""> - Select action  -</option>
                         {ACTION_CATEGORIES.map(cat => { const items = ACTION_CATALOG.filter(ac => ac.cat === cat.id); return (<optgroup key={cat.id} label={cat.label}>{items.map(ac => (<option key={ac.id} value={ac.type}>{ac.label}</option>))}</optgroup>); })}
                       </select>
                     </div>
@@ -2174,7 +2203,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
 }
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   Root FlowBuilder â€” manages list vs canvas view
+   Root FlowBuilder  - manages list vs canvas view
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 export default function FlowBuilder() {
   const [view, setView] = useState('list'); // list | canvas

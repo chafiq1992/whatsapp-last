@@ -2349,60 +2349,65 @@ async def create_shopify_order(
 
 _COD_API_KEY = (os.getenv("COD_FORM_API_KEY") or "").strip()
 
-# ── COD Store Registry ──
-# Independent from WhatsApp workspaces. Format:
-#   COD_STORES=store1.myshopify.com:shpat_xxx,store2.myshopify.com:shpat_yyy
-_COD_STORE_REGISTRY: dict[str, str] = {}  # shop_domain -> access_token
+# ── COD Store OAuth Lookup ──
+# Looks up Shopify OAuth tokens by shop domain from the settings DB.
+# Completely independent from WhatsApp workspaces — uses only the shop URL.
 
-def _load_cod_store_registry() -> dict[str, str]:
-    raw = (os.getenv("COD_STORES") or "").strip()
-    if not raw:
-        return {}
-    registry: dict[str, str] = {}
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if ":" not in entry:
-            continue
-        # Split on first colon only (tokens may contain colons)
-        domain, token = entry.split(":", 1)
-        domain = domain.strip().lower()
-        token = token.strip()
-        if domain and token:
-            registry[domain] = token
-    return registry
-
-_COD_STORE_REGISTRY = _load_cod_store_registry()
-if _COD_STORE_REGISTRY:
-    logger.info("COD store registry loaded: %s", list(_COD_STORE_REGISTRY.keys()))
-
-
-def _get_cod_store_context(shop_domain: str | None) -> tuple[str, dict]:
+async def _get_cod_store_context(shop_domain: str | None) -> tuple[str, dict]:
     """Resolve Shopify Admin API base URL and auth headers for a COD store.
 
-    Uses the independent COD_STORES registry. Falls back to the default
-    env-based store config if no shop is specified or registry is empty.
+    Looks up the shop domain in the Shopify OAuth settings stored in the DB.
+    Each OAuth record (stored under key `shopify_oauth::<workspace>`) contains
+    the shop domain and access token. We scan all records to find the one
+    matching the requested shop domain.
+
+    Falls back to default env-based store config if no shop is specified.
 
     Returns: (base_url, extra_args)
     """
     shop = (shop_domain or "").strip().lower()
 
-    # Try the COD store registry first
-    if shop and shop in _COD_STORE_REGISTRY:
-        token = _COD_STORE_REGISTRY[shop]
-        base = f"https://{shop}/admin/api/{API_VERSION}"
-        extra_args = {"headers": {"X-Shopify-Access-Token": token}}
-        return base, extra_args
+    if shop:
+        # Search OAuth records in DB for matching shop domain
+        try:
+            from .main import db_manager  # type: ignore
+            async with db_manager._conn() as db:
+                if db_manager.use_postgres:
+                    rows = await db.fetch(
+                        "SELECT value FROM settings WHERE key LIKE 'shopify_oauth::%'"
+                    )
+                else:
+                    cur = await db.execute(
+                        "SELECT value FROM settings WHERE key LIKE 'shopify_oauth::%'"
+                    )
+                    rows = await cur.fetchall()
+
+                for row in (rows or []):
+                    try:
+                        raw_val = row[0] if not isinstance(row, dict) else row.get("value", row[0])
+                        obj = json.loads(raw_val) if isinstance(raw_val, str) else raw_val
+                        if not isinstance(obj, dict):
+                            continue
+                        record_shop = str(obj.get("shop") or "").strip().lower()
+                        record_token = str(obj.get("access_token") or "").strip()
+                        if record_shop == shop and record_token:
+                            base = f"https://{shop}/admin/api/{API_VERSION}"
+                            extra_args = {"headers": {"X-Shopify-Access-Token": record_token}}
+                            return base, extra_args
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.warning("COD OAuth lookup failed for %s: %s", shop, exc)
+
+        raise HTTPException(
+            status_code=404,
+            detail=f"No Shopify OAuth connection found for store '{shop}'. Please install the app on this store first.",
+        )
 
     # Fallback: use default env-based store (backward compat for single-store setups)
-    if not shop:
-        base = admin_api_base(None)
-        extra_args = _client_args(store=None)
-        return base, extra_args
-
-    raise HTTPException(
-        status_code=404,
-        detail=f"Unknown COD store '{shop}'. Add it to COD_STORES env var.",
-    )
+    base = admin_api_base(None)
+    extra_args = _client_args(store=None)
+    return base, extra_args
 
 
 
@@ -2442,7 +2447,7 @@ async def cod_storefront_create_order(
         quantity = 1
 
     # ── 3. Resolve store from COD registry ──
-    base, extra_args = _get_cod_store_context(shop)
+    base, extra_args = await _get_cod_store_context(shop)
 
     # ── 4. Build draft order payload ──
     tags = list(data.get("tags") or []) or ["cod form"]
@@ -2572,7 +2577,7 @@ async def cod_add_upsell(
     discount_amount = float(data.get("discount", 0) or 0)
 
     # ── 3. Resolve store from COD registry ──
-    base, extra_args = _get_cod_store_context(shop)
+    base, extra_args = await _get_cod_store_context(shop)
 
     # ── 4. Get existing draft order ──
     try:
@@ -2676,7 +2681,7 @@ async def cod_abandon_checkout(
         raise HTTPException(status_code=422, detail="Missing variant_id")
 
     # ── 3. Resolve store from COD registry ──
-    base, extra_args = _get_cod_store_context(shop)
+    base, extra_args = await _get_cod_store_context(shop)
 
     # ── 4. Build draft order for abandoned checkout ──
     fn, ln = _split_name(name)

@@ -1,24 +1,41 @@
 {% comment %}
   ══════════════════════════════════════════════════════════════
-  COD Quick-Order Form + Post-Purchase Upsell — Shopify Section
+  COD Quick-Order Form + Post-Purchase Upsell — Shopify Snippet
   ══════════════════════════════════════════════════════════════
   SETUP:
   1. Set COD_FORM_API_KEY env variable on your WhatsApp backend
-  2. Configure settings below OR via Shopify Theme Customizer
-  3. Add to product page: {% render 'cod-form-snippet' %}
+  2. Configure the settings below (backend URL, API key, upsell)
+  3. In Edit Code → sections/main-product.liquid, add after </product-form>:
+       {% render 'cod-form-snippet' %}
   ══════════════════════════════════════════════════════════════
 {% endcomment %}
 
+{% comment %} ─── BACKEND CONFIG ─── {% endcomment %}
 {% assign cod_backend_url = "YOUR_BACKEND_URL" %}
 {% assign cod_api_key = "YOUR_API_KEY_HERE" %}
 {% assign cod_workspace = "" %}
 
-{% comment %} Upsell settings from schema (theme customizer) {% endcomment %}
-{% assign upsell_on = section.settings.upsell_enabled %}
-{% assign upsell_product = section.settings.upsell_product %}
-{% assign upsell_headline = section.settings.upsell_headline %}
-{% assign upsell_discount = section.settings.upsell_discount %}
-{% assign upsell_timer = section.settings.upsell_timer %}
+{% comment %} ─── UPSELL CONFIG ─── {% endcomment %}
+{% comment %}
+  To enable upsell:
+  1. Set cod_upsell_enabled to true
+  2. Set cod_upsell_handle to your product's handle (the URL slug)
+     → Find it in Shopify Admin → Products → click product → look at the URL
+     → e.g., if URL is /products/my-cool-item then handle is "my-cool-item"
+  3. Set headline, discount %, and timer seconds
+{% endcomment %}
+{% assign cod_upsell_enabled = false %}
+{% assign cod_upsell_handle = "" %}
+{% assign cod_upsell_headline = "🔥 عرض خاص لك فقط!" %}
+{% assign cod_upsell_discount = 30 %}
+{% assign cod_upsell_timer = 300 %}
+
+{% comment %} Resolve upsell product from handle {% endcomment %}
+{% if cod_upsell_enabled and cod_upsell_handle != "" %}
+  {% assign upsell_product = all_products[cod_upsell_handle] %}
+{% else %}
+  {% assign upsell_product = nil %}
+{% endif %}
 
 <div class="cod-form-wrapper" dir="rtl">
 
@@ -39,7 +56,6 @@
 
       <!-- ====== FORM STATE ====== -->
       <div id="cod-form-state">
-        <!-- Product Summary Header -->
         <div class="cod-product-header">
           <div class="cod-product-row">
             <div class="cod-product-img-wrap">
@@ -60,7 +76,6 @@
           </div>
         </div>
 
-        <!-- Order Form -->
         <form id="cod-order-form" class="cod-form-body" onsubmit="return window.__codForm.submit(event)">
           <div class="cod-field">
             <div class="cod-input-wrap" id="cod-wrap-name">
@@ -125,19 +140,16 @@
       </div>
 
       <!-- ====== UPSELL STATE ====== -->
-      {% if upsell_on and upsell_product != blank %}
+      {% if cod_upsell_enabled and upsell_product != blank %}
       <div id="cod-upsell-state" class="cod-upsell cod-hidden">
-        <!-- Urgency banner -->
         <div class="cod-upsell-banner">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
           <span>عرض محدود — ينتهي خلال</span>
           <span id="cod-upsell-timer" class="cod-upsell-timer-text">05:00</span>
         </div>
 
-        <!-- Headline -->
-        <h2 class="cod-upsell-headline">{{ upsell_headline }}</h2>
+        <h2 class="cod-upsell-headline">{{ cod_upsell_headline }}</h2>
 
-        <!-- Upsell product card -->
         <div class="cod-upsell-card">
           <div class="cod-upsell-img-wrap">
             {% if upsell_product.featured_image %}
@@ -145,8 +157,8 @@
             {% else %}
               <div class="cod-upsell-img cod-upsell-img-placeholder"></div>
             {% endif %}
-            {% if upsell_discount > 0 %}
-              <div class="cod-upsell-badge">-{{ upsell_discount }}%</div>
+            {% if cod_upsell_discount > 0 %}
+              <div class="cod-upsell-badge">-{{ cod_upsell_discount }}%</div>
             {% endif %}
           </div>
 
@@ -154,17 +166,17 @@
 
           <div class="cod-upsell-pricing">
             {% assign upsell_original = upsell_product.selected_or_first_available_variant.price %}
-            {% if upsell_discount > 0 %}
-              {% assign discount_mult = 100 | minus: upsell_discount %}
+            {% if cod_upsell_discount > 0 %}
+              {% assign discount_mult = 100 | minus: cod_upsell_discount %}
               {% assign upsell_final = upsell_original | times: discount_mult | divided_by: 100 %}
               <span class="cod-upsell-price-old">{{ upsell_original | money }}</span>
               <span class="cod-upsell-price-new">{{ upsell_final | money }}</span>
             {% else %}
+              {% assign upsell_final = upsell_original %}
               <span class="cod-upsell-price-new">{{ upsell_original | money }}</span>
             {% endif %}
           </div>
 
-          <!-- Timer ring -->
           <div class="cod-timer-ring-wrap">
             <svg class="cod-timer-ring" width="72" height="72" viewBox="0 0 72 72">
               <circle cx="36" cy="36" r="32" fill="none" stroke="#f3f4f6" stroke-width="4"></circle>
@@ -174,17 +186,12 @@
           </div>
         </div>
 
-        <!-- Upsell actions -->
         <div class="cod-upsell-actions">
           <button type="button" id="cod-upsell-accept" class="cod-btn cod-btn-upsell-accept" onclick="window.__codForm.acceptUpsell()">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"></circle><circle cx="20" cy="21" r="1"></circle><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"></path></svg>
             <span id="cod-upsell-accept-text">
               أضف للطلب —
-              {% if upsell_discount > 0 %}
-                {{ upsell_final | money }}
-              {% else %}
-                {{ upsell_original | money }}
-              {% endif %}
+              {% if cod_upsell_discount > 0 %}{{ upsell_final | money }}{% else %}{{ upsell_original | money }}{% endif %}
             </span>
             <span id="cod-upsell-accept-loading" class="cod-hidden">
               <svg class="cod-spinner" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
@@ -196,7 +203,6 @@
           </button>
         </div>
 
-        <!-- Error -->
         <div id="cod-upsell-error" class="cod-error cod-hidden"></div>
       </div>
       {% endif %}
@@ -217,13 +223,10 @@
 </div>
 
 <style>
-/* ═══════ COD FORM SCOPED STYLES ═══════ */
 .cod-form-wrapper{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;direction:rtl;text-align:right;line-height:1.5}
 .cod-hidden{display:none!important}
-
-/* Button */
 .cod-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:none;cursor:pointer;font-weight:700;font-size:15px;border-radius:12px;transition:all .2s ease;font-family:inherit}
-.cod-btn-primary{width:100%;background:#059669;color:#fff;padding:16px 24px;font-size:16px;box-shadow:0 4px 14px rgba(5,150,105,.25)}
+.cod-btn-primary{width:100%;background:#059669;color:#fff;padding:16px 24px;font-size:16px;box-shadow:0 4px 14px rgba(5,150,105,.25);margin-top:12px}
 .cod-btn-primary:hover{background:#047857;transform:translateY(-1px);box-shadow:0 6px 20px rgba(5,150,105,.35)}
 .cod-btn-submit{width:100%;background:#1d4ed8;color:#fff;padding:18px 24px;font-size:16px;border-radius:16px;box-shadow:0 8px 24px rgba(29,78,216,.2);margin-top:16px}
 .cod-btn-submit:hover{background:#1e40af;transform:translateY(-1px)}
@@ -231,18 +234,12 @@
 .cod-btn-submit:disabled{background:#93c5fd;cursor:not-allowed;transform:none}
 .cod-btn-back{width:100%;background:#111827;color:#fff;padding:16px;font-size:15px;border-radius:12px}
 .cod-btn-back:hover{background:#000}
-
-/* Modal */
 .cod-modal-overlay{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);padding:16px;animation:codFadeIn .2s ease}
 .cod-modal{background:#fff;width:100%;max-width:460px;border-radius:24px;box-shadow:0 25px 60px rgba(0,0,0,.25);position:relative;overflow:hidden;max-height:90vh;overflow-y:auto;animation:codSlideUp .25s ease}
 @keyframes codFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes codSlideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
-
-/* Close */
 .cod-close-btn{position:absolute;top:14px;left:14px;background:none;border:none;padding:8px;border-radius:50%;cursor:pointer;color:#9ca3af;z-index:10;transition:background .15s}
 .cod-close-btn:hover{background:#f3f4f6}
-
-/* Product Header */
 .cod-product-header{padding:20px;border-bottom:1px solid #f3f4f6;background:#fafafa}
 .cod-product-row{display:flex;gap:14px;align-items:flex-start}
 .cod-product-img-wrap{position:relative;flex-shrink:0}
@@ -253,8 +250,6 @@
 .cod-product-title{font-weight:700;color:#1f2937;font-size:14px;margin:0;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
 .cod-product-variant{color:#6b7280;font-size:12px;margin:4px 0 0}
 .cod-product-price{color:#111827;font-size:12px;font-weight:700;margin:4px 0 0}
-
-/* Form */
 .cod-form-body{padding:24px;display:flex;flex-direction:column;gap:12px}
 .cod-input-wrap{display:flex;align-items:center;gap:10px;padding:12px 14px;background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;transition:all .2s}
 .cod-input-wrap:focus-within{border-color:#93c5fd;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
@@ -263,47 +258,30 @@
 .cod-input{flex:1;border:none;outline:none;font-size:15px;text-align:right;background:transparent;font-family:inherit;color:#1f2937}
 .cod-input::placeholder{color:#d1d5db}
 .cod-required{color:#ef4444;font-weight:700;font-size:16px}
-
-/* Shipping */
 .cod-shipping-row{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1.5px solid #e5e7eb;border-radius:12px;background:#fafafa}
 .cod-radio-dot{width:18px;height:18px;border-radius:50%;border:2px solid #2563eb;display:flex;align-items:center;justify-content:center;padding:3px;flex-shrink:0}
 .cod-radio-inner{width:100%;height:100%;background:#2563eb;border-radius:50%}
 .cod-shipping-label{flex:1;font-weight:500;color:#374151;font-size:14px}
 .cod-shipping-free{color:#059669;font-weight:700;font-size:14px}
-
-/* Summary */
 .cod-summary{background:#f9fafb;padding:16px;border-radius:16px;display:flex;flex-direction:column;gap:8px;font-size:14px}
 .cod-summary-row{display:flex;justify-content:space-between;color:#6b7280}
 .cod-free-tag{color:#059669;font-weight:700}
 .cod-summary-total{padding-top:10px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;font-size:17px;font-weight:700;color:#111827}
-
-/* Error */
 .cod-error{display:flex;align-items:center;gap:8px;padding:12px;background:#fef2f2;color:#dc2626;border-radius:12px;font-size:13px;border:1px solid #fecaca;margin-top:12px}
-
-/* Spinner */
 .cod-spinner{animation:codSpin 1s linear infinite}
 @keyframes codSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
-
-/* Success */
 .cod-success{padding:48px 32px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:20px;animation:codSlideUp .3s ease}
 .cod-success-icon{width:80px;height:80px;background:#ecfdf5;color:#059669;border-radius:50%;display:flex;align-items:center;justify-content:center}
 .cod-success-title{font-size:22px;font-weight:700;color:#111827;margin:0}
 .cod-success-subtitle{color:#6b7280;font-size:15px;margin:0}
 .cod-order-ref{width:100%;background:#f9fafb;border-radius:16px;padding:14px;font-size:14px;color:#4b5563}
 .cod-order-ref span{font-family:monospace;font-weight:700;color:#2563eb}
-
-/* ═══════ UPSELL STYLES ═══════ */
+/* ═══ UPSELL ═══ */
 .cod-upsell{padding:0;display:flex;flex-direction:column;align-items:center;text-align:center;animation:codSlideUp .3s ease}
-
-/* Urgency banner */
 .cod-upsell-banner{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:14px 20px;background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;font-weight:700;font-size:14px;animation:codPulseGlow 2s ease-in-out infinite}
 @keyframes codPulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,0)}50%{box-shadow:0 0 20px 4px rgba(220,38,38,.25)}}
 .cod-upsell-timer-text{font-family:'Courier New',Courier,monospace;font-size:16px;background:rgba(0,0,0,.3);padding:3px 8px;border-radius:6px;letter-spacing:1px}
-
-/* Headline */
 .cod-upsell-headline{font-size:22px;font-weight:800;color:#111827;margin:24px 20px 4px;line-height:1.3}
-
-/* Upsell card */
 .cod-upsell-card{width:calc(100% - 48px);margin:16px 24px;background:#fafafa;border-radius:20px;padding:24px;border:1.5px solid #e5e7eb;display:flex;flex-direction:column;align-items:center;gap:16px}
 .cod-upsell-img-wrap{position:relative}
 .cod-upsell-img{width:180px;height:180px;border-radius:16px;object-fit:cover;border:1px solid #e5e7eb;background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.08)}
@@ -313,13 +291,9 @@
 .cod-upsell-pricing{display:flex;align-items:center;gap:12px;justify-content:center}
 .cod-upsell-price-old{text-decoration:line-through;color:#9ca3af;font-size:16px;font-weight:500}
 .cod-upsell-price-new{color:#059669;font-size:22px;font-weight:800}
-
-/* Timer ring */
 .cod-timer-ring-wrap{position:relative;width:72px;height:72px;display:flex;align-items:center;justify-content:center;margin-top:4px}
 .cod-timer-ring{position:absolute;top:0;left:0}
 .cod-timer-inner{font-family:'Courier New',Courier,monospace;font-size:15px;font-weight:700;color:#ef4444;z-index:1}
-
-/* Upsell actions */
 .cod-upsell-actions{width:calc(100% - 48px);margin:0 24px 24px;display:flex;flex-direction:column;gap:10px}
 .cod-btn-upsell-accept{width:100%;background:linear-gradient(135deg,#059669,#047857);color:#fff;padding:18px 24px;font-size:16px;border-radius:16px;box-shadow:0 8px 24px rgba(5,150,105,.25);animation:codShimmer 3s ease-in-out infinite}
 @keyframes codShimmer{0%,100%{box-shadow:0 8px 24px rgba(5,150,105,.25)}50%{box-shadow:0 12px 32px rgba(5,150,105,.4)}}
@@ -328,8 +302,6 @@
 .cod-btn-upsell-accept:disabled{background:#a7f3d0;cursor:not-allowed;transform:none;animation:none}
 .cod-btn-upsell-skip{width:100%;background:transparent;color:#9ca3af;padding:12px;font-size:13px;font-weight:500;border:none;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .cod-btn-upsell-skip:hover{color:#6b7280}
-
-/* Responsive */
 @media(max-width:480px){
   .cod-modal{border-radius:20px;max-height:95vh}
   .cod-form-body{padding:18px}
@@ -348,11 +320,9 @@
   var WORKSPACE = {{ cod_workspace | json }};
   var VARIANT_ID = {{ product.selected_or_first_available_variant.id | json }};
 
-  /* Upsell config (injected from Liquid schema settings) */
-  var UPSELL_ENABLED = {{ upsell_on | json | default: 'false' }};
+  var UPSELL_ENABLED = {% if cod_upsell_enabled and upsell_product != blank %}true{% else %}false{% endif %};
   var UPSELL_VARIANT_ID = {% if upsell_product != blank %}{{ upsell_product.selected_or_first_available_variant.id | json }}{% else %}null{% endif %};
-  var UPSELL_TIMER_SEC = {{ upsell_timer | default: 300 }};
-  var UPSELL_DISCOUNT = {{ upsell_discount | default: 0 }};
+  var UPSELL_TIMER_SEC = {{ cod_upsell_timer | default: 300 }};
 
   var _timerInterval = null;
   var _customerData = {};
@@ -368,43 +338,31 @@
   function startTimer(){
     var remaining = UPSELL_TIMER_SEC;
     var total = UPSELL_TIMER_SEC;
-    var circumference = 2 * Math.PI * 32; // r=32
+    var circumference = 2 * Math.PI * 32;
 
     function tick(){
-      if(remaining <= 0){
-        clearInterval(_timerInterval);
-        _timerInterval = null;
-        // Auto-skip when timer runs out
-        window.__codForm.skipUpsell();
-        return;
-      }
+      if(remaining <= 0){ clearInterval(_timerInterval); _timerInterval = null; window.__codForm.skipUpsell(); return; }
       remaining--;
       var display = fmtTime(remaining);
-      var el1 = $('cod-upsell-timer');
-      var el2 = $('cod-timer-inner');
+      var el1 = $('cod-upsell-timer'); var el2 = $('cod-timer-inner');
       if(el1) el1.textContent = display;
       if(el2) el2.textContent = display;
-      // Ring progress
       var circle = $('cod-timer-circle');
       if(circle){
         var progress = remaining / total;
         circle.style.strokeDashoffset = (circumference * (1 - progress)).toFixed(2);
-        // Color shift: green → orange → red
         if(progress > 0.5) circle.style.stroke = '#059669';
         else if(progress > 0.2) circle.style.stroke = '#f59e0b';
         else circle.style.stroke = '#ef4444';
       }
     }
 
-    // Init display
     var initDisplay = fmtTime(remaining);
-    var el1 = $('cod-upsell-timer');
-    var el2 = $('cod-timer-inner');
+    var el1 = $('cod-upsell-timer'); var el2 = $('cod-timer-inner');
     if(el1) el1.textContent = initDisplay;
     if(el2) el2.textContent = initDisplay;
     var circle = $('cod-timer-circle');
     if(circle){ circle.style.strokeDashoffset = '0'; circle.style.stroke = '#059669'; }
-
     _timerInterval = setInterval(tick, 1000);
   }
 
@@ -417,8 +375,7 @@
       $('cod-modal-overlay').classList.remove('cod-hidden');
       $('cod-form-state').classList.remove('cod-hidden');
       $('cod-success-state').classList.add('cod-hidden');
-      var upsellEl = $('cod-upsell-state');
-      if(upsellEl) upsellEl.classList.add('cod-hidden');
+      var u = $('cod-upsell-state'); if(u) u.classList.add('cod-hidden');
       $('cod-error-msg').classList.add('cod-hidden');
       document.body.style.overflow = 'hidden';
     },
@@ -428,9 +385,7 @@
       document.body.style.overflow = '';
       $('cod-order-form').reset();
       $('cod-error-msg').classList.add('cod-hidden');
-      ['name','phone','address','city'].forEach(function(f){
-        $('cod-wrap-'+f).classList.remove('cod-error-border');
-      });
+      ['name','phone','address','city'].forEach(function(f){ $('cod-wrap-'+f).classList.remove('cod-error-border'); });
     },
     closeOnOverlay: function(e){
       if(e.target === $('cod-modal-overlay')) window.__codForm.close();
@@ -438,24 +393,15 @@
     submit: function(e){
       e.preventDefault();
       var form = $('cod-order-form');
-      var data = {
-        name: form.name.value.trim(),
-        phone: form.phone.value.trim(),
-        address: form.address.value.trim(),
-        city: form.city.value.trim()
-      };
-
+      var data = { name: form.name.value.trim(), phone: form.phone.value.trim(), address: form.address.value.trim(), city: form.city.value.trim() };
       var hasError = false;
       ['name','phone','address','city'].forEach(function(f){
-        var wrap = $('cod-wrap-'+f);
-        if(!data[f]){ wrap.classList.add('cod-error-border'); hasError = true; }
-        else { wrap.classList.remove('cod-error-border'); }
+        var w = $('cod-wrap-'+f);
+        if(!data[f]){ w.classList.add('cod-error-border'); hasError = true; } else { w.classList.remove('cod-error-border'); }
       });
       if(hasError) return false;
 
-      // Save customer data for upsell
       _customerData = { name: data.name, phone: data.phone, address: data.address, city: data.city };
-
       var btn = $('cod-submit-btn');
       btn.disabled = true;
       $('cod-submit-text').classList.add('cod-hidden');
@@ -468,18 +414,13 @@
       fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: JSON.stringify({
-          variant_id: VARIANT_ID, quantity: 1,
-          name: data.name, phone: data.phone, address: data.address, city: data.city
-        })
+        body: JSON.stringify({ variant_id: VARIANT_ID, quantity: 1, name: data.name, phone: data.phone, address: data.address, city: data.city })
       })
       .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
       .then(function(res){
         if(res.ok && res.data.ok){
           var ref = res.data.order_ref || '';
           if(ref) $('cod-order-ref').innerHTML = 'رقم الطلب الخاص بك: <span>' + ref + '</span>';
-
-          // Show upsell or success
           $('cod-form-state').classList.add('cod-hidden');
           if(UPSELL_ENABLED && UPSELL_VARIANT_ID && $('cod-upsell-state')){
             $('cod-upsell-state').classList.remove('cod-hidden');
@@ -502,11 +443,8 @@
         $('cod-submit-text').classList.remove('cod-hidden');
         $('cod-submit-loading').classList.add('cod-hidden');
       });
-
       return false;
     },
-
-    /* ── Upsell handlers ── */
     acceptUpsell: function(){
       stopTimer();
       var btn = $('cod-upsell-accept');
@@ -522,16 +460,11 @@
       fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: JSON.stringify({
-          variant_id: UPSELL_VARIANT_ID, quantity: 1,
-          name: _customerData.name, phone: _customerData.phone,
-          address: _customerData.address, city: _customerData.city
-        })
+        body: JSON.stringify({ variant_id: UPSELL_VARIANT_ID, quantity: 1, name: _customerData.name, phone: _customerData.phone, address: _customerData.address, city: _customerData.city })
       })
       .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
       .then(function(res){
         if(res.ok && res.data.ok){
-          // Show success
           $('cod-upsell-state').classList.add('cod-hidden');
           $('cod-success-state').classList.remove('cod-hidden');
         } else {
@@ -548,68 +481,11 @@
         $('cod-upsell-accept-loading').classList.add('cod-hidden');
       });
     },
-
     skipUpsell: function(){
       stopTimer();
-      var upsellEl = $('cod-upsell-state');
-      if(upsellEl) upsellEl.classList.add('cod-hidden');
+      var u = $('cod-upsell-state'); if(u) u.classList.add('cod-hidden');
       $('cod-success-state').classList.remove('cod-hidden');
     }
   };
 })();
 </script>
-
-{% schema %}
-{
-  "name": "COD Quick-Order Form",
-  "settings": [
-    {
-      "type": "header",
-      "content": "إعدادات عرض ما بعد الشراء (Upsell)"
-    },
-    {
-      "type": "checkbox",
-      "id": "upsell_enabled",
-      "label": "تفعيل عرض ما بعد الشراء",
-      "default": false
-    },
-    {
-      "type": "product",
-      "id": "upsell_product",
-      "label": "منتج العرض (Upsell Product)"
-    },
-    {
-      "type": "text",
-      "id": "upsell_headline",
-      "label": "عنوان العرض",
-      "default": "🔥 عرض خاص لك فقط!"
-    },
-    {
-      "type": "range",
-      "id": "upsell_discount",
-      "min": 0,
-      "max": 90,
-      "step": 5,
-      "unit": "%",
-      "label": "نسبة الخصم",
-      "default": 30
-    },
-    {
-      "type": "range",
-      "id": "upsell_timer",
-      "min": 60,
-      "max": 600,
-      "step": 30,
-      "unit": "s",
-      "label": "مدة العد التنازلي (ثواني)",
-      "default": 300
-    }
-  ],
-  "presets": [
-    {
-      "name": "COD Quick-Order Form",
-      "category": "Custom"
-    }
-  ]
-}
-{% endschema %}

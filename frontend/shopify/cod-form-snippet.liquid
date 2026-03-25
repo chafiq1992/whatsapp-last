@@ -1,0 +1,343 @@
+{% comment %}
+  ══════════════════════════════════════════════════════════════
+  COD Quick-Order Form — Shopify Liquid Snippet
+  ══════════════════════════════════════════════════════════════
+  SETUP:
+  1. Set COD_FORM_API_KEY env variable on your WhatsApp backend
+  2. Replace YOUR_BACKEND_URL below with your actual backend URL
+  3. Replace YOUR_API_KEY_HERE with the same key from step 1
+  4. Paste this snippet into your Shopify theme product page
+     (e.g., sections/product-template.liquid or a custom section)
+  ══════════════════════════════════════════════════════════════
+{% endcomment %}
+
+{% assign cod_backend_url = "YOUR_BACKEND_URL" %}
+{% assign cod_api_key = "YOUR_API_KEY_HERE" %}
+{% assign cod_workspace = "" %}
+
+<div class="cod-form-wrapper" dir="rtl">
+
+  <!-- COD Button (triggers the popup) -->
+  <button type="button" id="cod-open-btn" class="cod-btn cod-btn-primary" onclick="window.__codForm.open()">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg>
+    اطلب الآن — الدفع عند الاستلام
+  </button>
+
+  <!-- Modal Overlay -->
+  <div id="cod-modal-overlay" class="cod-modal-overlay cod-hidden" onclick="window.__codForm.closeOnOverlay(event)">
+    <div class="cod-modal" onclick="event.stopPropagation()">
+
+      <!-- Close Button -->
+      <button type="button" class="cod-close-btn" onclick="window.__codForm.close()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+
+      <!-- ====== FORM STATE ====== -->
+      <div id="cod-form-state">
+
+        <!-- Product Summary Header -->
+        <div class="cod-product-header">
+          <div class="cod-product-row">
+            <div class="cod-product-img-wrap">
+              {% if product.featured_image %}
+                <img src="{{ product.featured_image | img_url: '80x80', crop: 'center' }}" alt="{{ product.title | escape }}" class="cod-product-img" />
+              {% else %}
+                <div class="cod-product-img cod-product-img-placeholder"></div>
+              {% endif %}
+              <span class="cod-qty-badge">1</span>
+            </div>
+            <div class="cod-product-info">
+              <h4 class="cod-product-title">{{ product.title }}</h4>
+              {% if product.selected_or_first_available_variant.title != "Default Title" %}
+                <p class="cod-product-variant">{{ product.selected_or_first_available_variant.title }}</p>
+              {% endif %}
+              <p class="cod-product-price">{{ product.selected_or_first_available_variant.price | money }}</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Order Form -->
+        <form id="cod-order-form" class="cod-form-body" onsubmit="return window.__codForm.submit(event)">
+
+          <!-- Name -->
+          <div class="cod-field">
+            <div class="cod-input-wrap" id="cod-wrap-name">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="cod-input-icon"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+              <input type="text" name="name" placeholder="الاسم الكامل" class="cod-input" required />
+              <span class="cod-required">*</span>
+            </div>
+          </div>
+
+          <!-- Phone -->
+          <div class="cod-field">
+            <div class="cod-input-wrap" id="cod-wrap-phone">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="cod-input-icon"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
+              <input type="tel" name="phone" placeholder="رقم الهاتف" class="cod-input" required />
+              <span class="cod-required">*</span>
+            </div>
+          </div>
+
+          <!-- Address -->
+          <div class="cod-field">
+            <div class="cod-input-wrap" id="cod-wrap-address">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="cod-input-icon"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+              <input type="text" name="address" placeholder="العنوان السكني" class="cod-input" required />
+              <span class="cod-required">*</span>
+            </div>
+          </div>
+
+          <!-- City -->
+          <div class="cod-field">
+            <div class="cod-input-wrap" id="cod-wrap-city">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="cod-input-icon"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect><path d="M9 22v-4h6v4"></path><path d="M8 6h.01"></path><path d="M16 6h.01"></path><path d="M12 6h.01"></path><path d="M12 10h.01"></path><path d="M12 14h.01"></path><path d="M16 10h.01"></path><path d="M16 14h.01"></path><path d="M8 10h.01"></path><path d="M8 14h.01"></path></svg>
+              <input type="text" name="city" placeholder="المدينة" class="cod-input" required />
+              <span class="cod-required">*</span>
+            </div>
+          </div>
+
+          <!-- Shipping info -->
+          <div class="cod-shipping-row">
+            <div class="cod-radio-dot"><div class="cod-radio-inner"></div></div>
+            <span class="cod-shipping-label">توصيل مجاني</span>
+            <span class="cod-shipping-free">مجاني</span>
+          </div>
+
+          <!-- Price Summary -->
+          <div class="cod-summary">
+            <div class="cod-summary-row">
+              <span>قبل المجموع:</span>
+              <span>{{ product.selected_or_first_available_variant.price | money }}</span>
+            </div>
+            <div class="cod-summary-row">
+              <span>شحن:</span>
+              <span class="cod-free-tag">مجاني</span>
+            </div>
+            <div class="cod-summary-total">
+              <span>المجموع:</span>
+              <span>{{ product.selected_or_first_available_variant.price | money }}</span>
+            </div>
+          </div>
+
+          <!-- Error message -->
+          <div id="cod-error-msg" class="cod-error cod-hidden"></div>
+
+          <!-- Submit Button -->
+          <button type="submit" id="cod-submit-btn" class="cod-btn cod-btn-submit">
+            <span id="cod-submit-text">أكمل الطلب — {{ product.selected_or_first_available_variant.price | money }}</span>
+            <span id="cod-submit-loading" class="cod-hidden">
+              <svg class="cod-spinner" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+              جاري معالجة الطلب...
+            </span>
+          </button>
+        </form>
+      </div>
+
+      <!-- ====== SUCCESS STATE ====== -->
+      <div id="cod-success-state" class="cod-success cod-hidden">
+        <div class="cod-success-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+        </div>
+        <h2 class="cod-success-title">شكراً لك! لقد تم استلام طلبك</h2>
+        <p class="cod-success-subtitle">سيتواصل معك فريقنا قريباً لتأكيد تفاصيل التوصيل.</p>
+        <div id="cod-order-ref" class="cod-order-ref"></div>
+        <button type="button" class="cod-btn cod-btn-back" onclick="window.__codForm.close()">العودة للمتجر</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<style>
+/* ═══════ COD FORM SCOPED STYLES ═══════ */
+.cod-form-wrapper{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;direction:rtl;text-align:right;line-height:1.5}
+.cod-hidden{display:none!important}
+
+/* Button */
+.cod-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:none;cursor:pointer;font-weight:700;font-size:15px;border-radius:12px;transition:all .2s ease;font-family:inherit}
+.cod-btn-primary{width:100%;background:#059669;color:#fff;padding:16px 24px;font-size:16px;box-shadow:0 4px 14px rgba(5,150,105,.25)}
+.cod-btn-primary:hover{background:#047857;transform:translateY(-1px);box-shadow:0 6px 20px rgba(5,150,105,.35)}
+.cod-btn-submit{width:100%;background:#1d4ed8;color:#fff;padding:18px 24px;font-size:16px;border-radius:16px;box-shadow:0 8px 24px rgba(29,78,216,.2);margin-top:16px}
+.cod-btn-submit:hover{background:#1e40af;transform:translateY(-1px)}
+.cod-btn-submit:active{transform:scale(.98)}
+.cod-btn-submit:disabled{background:#93c5fd;cursor:not-allowed;transform:none}
+.cod-btn-back{width:100%;background:#111827;color:#fff;padding:16px;font-size:15px;border-radius:12px}
+.cod-btn-back:hover{background:#000}
+
+/* Modal */
+.cod-modal-overlay{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);padding:16px;animation:codFadeIn .2s ease}
+.cod-modal{background:#fff;width:100%;max-width:460px;border-radius:24px;box-shadow:0 25px 60px rgba(0,0,0,.25);position:relative;overflow:hidden;max-height:90vh;overflow-y:auto;animation:codSlideUp .25s ease}
+@keyframes codFadeIn{from{opacity:0}to{opacity:1}}
+@keyframes codSlideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+
+/* Close */
+.cod-close-btn{position:absolute;top:14px;left:14px;background:none;border:none;padding:8px;border-radius:50%;cursor:pointer;color:#9ca3af;z-index:10;transition:background .15s}
+.cod-close-btn:hover{background:#f3f4f6}
+
+/* Product Header */
+.cod-product-header{padding:20px;border-bottom:1px solid #f3f4f6;background:#fafafa}
+.cod-product-row{display:flex;gap:14px;align-items:flex-start}
+.cod-product-img-wrap{position:relative;flex-shrink:0}
+.cod-product-img{width:64px;height:64px;border-radius:12px;object-fit:cover;border:1px solid #e5e7eb;background:#fff}
+.cod-product-img-placeholder{width:64px;height:64px;border-radius:12px;background:#e5e7eb}
+.cod-qty-badge{position:absolute;top:-8px;right:-8px;background:#6b7280;color:#fff;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.cod-product-info{flex:1;min-width:0}
+.cod-product-title{font-weight:700;color:#1f2937;font-size:14px;margin:0;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
+.cod-product-variant{color:#6b7280;font-size:12px;margin:4px 0 0}
+.cod-product-price{color:#111827;font-size:12px;font-weight:700;margin:4px 0 0}
+
+/* Form */
+.cod-form-body{padding:24px;display:flex;flex-direction:column;gap:12px}
+.cod-field{}
+.cod-input-wrap{display:flex;align-items:center;gap:10px;padding:12px 14px;background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;transition:all .2s}
+.cod-input-wrap:focus-within{border-color:#93c5fd;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
+.cod-input-wrap.cod-error-border{border-color:#f87171}
+.cod-input-icon{color:#9ca3af;flex-shrink:0}
+.cod-input{flex:1;border:none;outline:none;font-size:15px;text-align:right;background:transparent;font-family:inherit;color:#1f2937}
+.cod-input::placeholder{color:#d1d5db}
+.cod-required{color:#ef4444;font-weight:700;font-size:16px}
+
+/* Shipping */
+.cod-shipping-row{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1.5px solid #e5e7eb;border-radius:12px;background:#fafafa}
+.cod-radio-dot{width:18px;height:18px;border-radius:50%;border:2px solid #2563eb;display:flex;align-items:center;justify-content:center;padding:3px;flex-shrink:0}
+.cod-radio-inner{width:100%;height:100%;background:#2563eb;border-radius:50%}
+.cod-shipping-label{flex:1;font-weight:500;color:#374151;font-size:14px}
+.cod-shipping-free{color:#059669;font-weight:700;font-size:14px}
+
+/* Summary */
+.cod-summary{background:#f9fafb;padding:16px;border-radius:16px;display:flex;flex-direction:column;gap:8px;font-size:14px}
+.cod-summary-row{display:flex;justify-content:space-between;color:#6b7280}
+.cod-free-tag{color:#059669;font-weight:700}
+.cod-summary-total{padding-top:10px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;font-size:17px;font-weight:700;color:#111827}
+
+/* Error */
+.cod-error{display:flex;align-items:center;gap:8px;padding:12px;background:#fef2f2;color:#dc2626;border-radius:12px;font-size:13px;border:1px solid #fecaca}
+
+/* Spinner */
+.cod-spinner{animation:codSpin 1s linear infinite}
+@keyframes codSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+/* Success */
+.cod-success{padding:48px 32px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:20px;animation:codSlideUp .3s ease}
+.cod-success-icon{width:80px;height:80px;background:#ecfdf5;color:#059669;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.cod-success-title{font-size:22px;font-weight:700;color:#111827;margin:0}
+.cod-success-subtitle{color:#6b7280;font-size:15px;margin:0}
+.cod-order-ref{width:100%;background:#f9fafb;border-radius:16px;padding:14px;font-size:14px;color:#4b5563}
+.cod-order-ref span{font-family:monospace;font-weight:700;color:#2563eb}
+
+/* Responsive */
+@media(max-width:480px){
+  .cod-modal{border-radius:20px;max-height:95vh}
+  .cod-form-body{padding:18px}
+  .cod-product-title{max-width:200px}
+}
+</style>
+
+<script>
+(function(){
+  var BACKEND_URL = {{ cod_backend_url | json }};
+  var API_KEY = {{ cod_api_key | json }};
+  var WORKSPACE = {{ cod_workspace | json }};
+  var VARIANT_ID = {{ product.selected_or_first_available_variant.id | json }};
+
+  function $(id){ return document.getElementById(id); }
+
+  window.__codForm = {
+    open: function(){
+      $('cod-modal-overlay').classList.remove('cod-hidden');
+      $('cod-form-state').classList.remove('cod-hidden');
+      $('cod-success-state').classList.add('cod-hidden');
+      $('cod-error-msg').classList.add('cod-hidden');
+      document.body.style.overflow = 'hidden';
+    },
+    close: function(){
+      $('cod-modal-overlay').classList.add('cod-hidden');
+      document.body.style.overflow = '';
+      // Reset form
+      $('cod-order-form').reset();
+      $('cod-error-msg').classList.add('cod-hidden');
+      ['name','phone','address','city'].forEach(function(f){
+        $('cod-wrap-'+f).classList.remove('cod-error-border');
+      });
+    },
+    closeOnOverlay: function(e){
+      if(e.target === $('cod-modal-overlay')) window.__codForm.close();
+    },
+    submit: function(e){
+      e.preventDefault();
+      var form = $('cod-order-form');
+      var data = {
+        name: form.name.value.trim(),
+        phone: form.phone.value.trim(),
+        address: form.address.value.trim(),
+        city: form.city.value.trim()
+      };
+
+      // Validate
+      var hasError = false;
+      ['name','phone','address','city'].forEach(function(f){
+        var wrap = $('cod-wrap-'+f);
+        if(!data[f]){
+          wrap.classList.add('cod-error-border');
+          hasError = true;
+        } else {
+          wrap.classList.remove('cod-error-border');
+        }
+      });
+      if(hasError) return false;
+
+      // Disable button, show loading
+      var btn = $('cod-submit-btn');
+      btn.disabled = true;
+      $('cod-submit-text').classList.add('cod-hidden');
+      $('cod-submit-loading').classList.remove('cod-hidden');
+      $('cod-error-msg').classList.add('cod-hidden');
+
+      var url = BACKEND_URL.replace(/\/$/,'') + '/cod/create-order';
+      if(WORKSPACE) url += '?workspace=' + encodeURIComponent(WORKSPACE);
+
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-COD-API-Key': API_KEY
+        },
+        body: JSON.stringify({
+          variant_id: VARIANT_ID,
+          quantity: 1,
+          name: data.name,
+          phone: data.phone,
+          address: data.address,
+          city: data.city
+        })
+      })
+      .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
+      .then(function(res){
+        if(res.ok && res.data.ok){
+          // Show success
+          $('cod-form-state').classList.add('cod-hidden');
+          $('cod-success-state').classList.remove('cod-hidden');
+          var ref = res.data.order_ref || '';
+          if(ref){
+            $('cod-order-ref').innerHTML = 'رقم الطلب الخاص بك: <span>' + ref + '</span>';
+          }
+        } else {
+          var msg = (res.data && res.data.detail) || (res.data && res.data.message) || 'حدث خطأ، يرجى المحاولة مرة أخرى.';
+          $('cod-error-msg').textContent = msg;
+          $('cod-error-msg').classList.remove('cod-hidden');
+        }
+      })
+      .catch(function(){
+        $('cod-error-msg').textContent = 'تعذر الاتصال بالخادم. يرجى المحاولة لاحقاً.';
+        $('cod-error-msg').classList.remove('cod-hidden');
+      })
+      .finally(function(){
+        btn.disabled = false;
+        $('cod-submit-text').classList.remove('cod-hidden');
+        $('cod-submit-loading').classList.add('cod-hidden');
+      });
+
+      return false;
+    }
+  };
+})();
+</script>

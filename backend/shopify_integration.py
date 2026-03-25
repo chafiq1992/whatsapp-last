@@ -2339,3 +2339,91 @@ async def create_shopify_order(
             "message": "Draft order completed with payment pending." if order_id else "Draft order created, but completion response did not include order id.",
             **({"warnings": warnings} if warnings else {})
         }
+
+# =============== PUBLIC COD STOREFRONT FORM ===============
+
+_COD_API_KEY = (os.getenv("COD_FORM_API_KEY") or "").strip()
+
+
+@router.post("/cod/create-order")
+async def cod_storefront_create_order(
+    request: Request,
+    data: dict = Body(...),
+    workspace: str | None = Query(None, description="Workspace for store routing (e.g. irranova)"),
+):
+    """Public endpoint for the Shopify COD quick-order form.
+
+    Validates the request via X-COD-API-Key header, then creates
+    a Shopify draft order using the existing internal logic.
+    """
+    # ── 1. Validate API key ──
+    if not _COD_API_KEY:
+        raise HTTPException(status_code=503, detail="COD form not configured (missing COD_FORM_API_KEY)")
+    incoming_key = (request.headers.get("x-cod-api-key") or request.headers.get("X-COD-API-Key") or "").strip()
+    if not incoming_key or incoming_key != _COD_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+    # ── 2. Basic input validation ──
+    name = str(data.get("name") or "").strip()
+    phone = str(data.get("phone") or "").strip()
+    address = str(data.get("address") or "").strip()
+    city = str(data.get("city") or "").strip()
+    if not name or not phone or not address or not city:
+        raise HTTPException(status_code=422, detail="Missing required fields: name, phone, address, city")
+
+    variant_id = data.get("variant_id") or data.get("product_variant_id")
+    if not variant_id:
+        raise HTTPException(status_code=422, detail="Missing required field: variant_id")
+
+    quantity = int(data.get("quantity", 1) or 1)
+    if quantity < 1:
+        quantity = 1
+
+    # ── 3. Build internal payload (same shape create_shopify_order expects) ──
+    internal_payload = {
+        "name": name,
+        "phone": phone,
+        "address": address,
+        "city": city,
+        "email": str(data.get("email") or "").strip(),
+        "province": str(data.get("province") or "").strip(),
+        "zip": str(data.get("zip") or "").strip(),
+        "delivery": str(data.get("delivery") or "COD Home Delivery").strip(),
+        "note": "Order placed via COD Quick-Order Form (Shopify Storefront)",
+        "create_customer_if_missing": True,
+        "items": [
+            {
+                "variant_id": variant_id,
+                "quantity": quantity,
+                "discount": 0,
+            }
+        ],
+        # Do NOT auto-complete; leave as draft for merchant review
+        "complete_now": False,
+    }
+
+    # ── 4. Resolve workspace → store ──
+    x_workspace = workspace
+    ws = _normalize_ws_id(x_workspace)
+
+    # ── 5. Reuse existing draft-order creation logic ──
+    try:
+        result = await create_shopify_order(
+            data=internal_payload,
+            store=None,
+            x_workspace=ws or None,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("COD form order creation failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Failed to create order. Please try again later.")
+
+    # ── 6. Return simplified response (no admin links exposed) ──
+    ok = bool((result or {}).get("ok"))
+    draft_id = (result or {}).get("draft_order_id")
+    return {
+        "ok": ok,
+        "order_ref": f"COD-{draft_id}" if draft_id else None,
+        "message": "تم استلام طلبك بنجاح! سيتواصل معك فريقنا قريباً." if ok else "حدث خطأ أثناء إنشاء الطلب.",
+    }

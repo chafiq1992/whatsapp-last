@@ -1152,6 +1152,9 @@ def _is_public_path(path: str) -> bool:
     # Endpoint itself enforces allowlist/auth to avoid becoming an open proxy.
     if path.startswith("/proxy-image"):
         return True
+    # COD storefront form (Shopify theme) – validated by its own API key, not agent auth
+    if path.startswith("/cod/"):
+        return True
     return False
 
 def _maybe_get_agent_from_request(request: Request) -> Optional[dict]:

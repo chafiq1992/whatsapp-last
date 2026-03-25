@@ -2349,17 +2349,74 @@ async def create_shopify_order(
 
 _COD_API_KEY = (os.getenv("COD_FORM_API_KEY") or "").strip()
 
+# ── COD Store Registry ──
+# Independent from WhatsApp workspaces. Format:
+#   COD_STORES=store1.myshopify.com:shpat_xxx,store2.myshopify.com:shpat_yyy
+_COD_STORE_REGISTRY: dict[str, str] = {}  # shop_domain -> access_token
+
+def _load_cod_store_registry() -> dict[str, str]:
+    raw = (os.getenv("COD_STORES") or "").strip()
+    if not raw:
+        return {}
+    registry: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if ":" not in entry:
+            continue
+        # Split on first colon only (tokens may contain colons)
+        domain, token = entry.split(":", 1)
+        domain = domain.strip().lower()
+        token = token.strip()
+        if domain and token:
+            registry[domain] = token
+    return registry
+
+_COD_STORE_REGISTRY = _load_cod_store_registry()
+if _COD_STORE_REGISTRY:
+    logger.info("COD store registry loaded: %s", list(_COD_STORE_REGISTRY.keys()))
+
+
+def _get_cod_store_context(shop_domain: str | None) -> tuple[str, dict]:
+    """Resolve Shopify Admin API base URL and auth headers for a COD store.
+
+    Uses the independent COD_STORES registry. Falls back to the default
+    env-based store config if no shop is specified or registry is empty.
+
+    Returns: (base_url, extra_args)
+    """
+    shop = (shop_domain or "").strip().lower()
+
+    # Try the COD store registry first
+    if shop and shop in _COD_STORE_REGISTRY:
+        token = _COD_STORE_REGISTRY[shop]
+        base = f"https://{shop}/admin/api/{API_VERSION}"
+        extra_args = {"headers": {"X-Shopify-Access-Token": token}}
+        return base, extra_args
+
+    # Fallback: use default env-based store (backward compat for single-store setups)
+    if not shop:
+        base = admin_api_base(None)
+        extra_args = _client_args(store=None)
+        return base, extra_args
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Unknown COD store '{shop}'. Add it to COD_STORES env var.",
+    )
+
+
 
 @router.post("/cod/create-order")
 async def cod_storefront_create_order(
     request: Request,
     data: dict = Body(...),
-    workspace: str | None = Query(None, description="Workspace for store routing (e.g. irranova)"),
+    shop: str | None = Query(None, description="Shopify store domain (e.g. my-store.myshopify.com)"),
 ):
     """Public endpoint for the Shopify COD quick-order form.
 
     Validates the request via X-COD-API-Key header, then creates
-    a Shopify draft order using the existing internal logic.
+    a Shopify draft order directly on the target store using the
+    independent COD store registry (COD_STORES env var).
     """
     # ── 1. Validate API key ──
     if not _COD_API_KEY:
@@ -2384,57 +2441,104 @@ async def cod_storefront_create_order(
     if quantity < 1:
         quantity = 1
 
-    # ── 3. Build internal payload (same shape create_shopify_order expects) ──
-    tags = list(data.get("tags") or []) or ["cod form"]
+    # ── 3. Resolve store from COD registry ──
+    base, extra_args = _get_cod_store_context(shop)
 
-    internal_payload = {
-        "name": name,
-        "phone": phone,
-        "address": address,
+    # ── 4. Build draft order payload ──
+    tags = list(data.get("tags") or []) or ["cod form"]
+    fn, ln = _split_name(name)
+    shipping_address = {
+        "first_name": fn or "",
+        "last_name": ln or "",
+        "address1": address,
         "city": city,
-        "email": str(data.get("email") or "").strip(),
         "province": str(data.get("province") or "").strip(),
         "zip": str(data.get("zip") or "").strip(),
-        "delivery": str(data.get("delivery") or "COD Home Delivery").strip(),
-        "note": "Order placed via COD Quick-Order Form (Shopify Storefront)",
-        "create_customer_if_missing": True,
-        "tags": tags,
-        "items": [
-            {
-                "variant_id": variant_id,
-                "quantity": quantity,
-                "discount": float(data.get("discount", 0) or 0),
-            }
-        ],
-        # Do NOT auto-complete; leave as draft for merchant review
-        "complete_now": False,
+        "country": "Morocco",
+        "country_code": "MA",
+        "name": name,
+        "phone": normalize_phone(phone),
     }
 
-    # ── 4. Resolve workspace → store ──
-    x_workspace = workspace
-    ws = _normalize_ws_id(x_workspace)
+    def _money2(value) -> str:
+        try:
+            return f"{float(value):.2f}"
+        except Exception:
+            return "0.00"
 
-    # ── 5. Reuse existing draft-order creation logic ──
+    discount_val = float(data.get("discount", 0) or 0)
+    line_item = {"variant_id": variant_id, "quantity": quantity}
+    if discount_val > 0:
+        line_item["applied_discount"] = {
+            "value": _money2(discount_val),
+            "value_type": "fixed_amount",
+            "amount": _money2(discount_val),
+            "title": "Item discount",
+        }
+
+    order_tags = ", ".join(tags) if isinstance(tags, list) else str(tags)
+
+    draft_order_payload = {
+        "draft_order": {
+            "line_items": [line_item],
+            "shipping_address": shipping_address,
+            "billing_address": shipping_address,
+            "shipping_lines": [{"title": "COD Home Delivery", "price": 0.00, "code": "STANDARD"}],
+            "phone": normalize_phone(phone),
+            "note": "Order placed via COD Quick-Order Form (Shopify Storefront)",
+            "tags": order_tags,
+            "customer": {"first_name": fn, "last_name": ln, "phone": normalize_phone(phone)},
+        }
+    }
+
+    # ── 5. Try to find or create customer ──
     try:
-        result = await create_shopify_order(
-            data=internal_payload,
-            store=None,
-            x_workspace=ws or None,
-        )
-    except HTTPException:
-        raise
+        phone_q = normalize_phone(phone)
+        if phone_q:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{base}/customers/search.json",
+                    params={"query": f"phone:{phone_q}"},
+                    timeout=10,
+                    **extra_args,
+                )
+                if resp.status_code == 200:
+                    items = (resp.json() or {}).get("customers") or []
+                    if items:
+                        draft_order_payload["draft_order"]["customer"] = {"id": items[0]["id"]}
+    except Exception:
+        pass  # Best-effort customer linking
+
+    # ── 6. Create draft order directly ──
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{base}/draft_orders.json",
+                json=draft_order_payload,
+                timeout=20,
+                **extra_args,
+            )
+            resp.raise_for_status()
+            draft_data = resp.json()
+            draft_id = draft_data["draft_order"]["id"]
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+        try:
+            detail = exc.response.text[:500]
+        except Exception:
+            detail = str(exc)
+        logger.exception("COD form order creation failed: %s", detail)
+        raise HTTPException(status_code=502, detail="Failed to create order. Please try again later.")
     except Exception as exc:
         logger.exception("COD form order creation failed: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to create order. Please try again later.")
 
-    # ── 6. Return simplified response (no admin links exposed) ──
-    ok = bool((result or {}).get("ok"))
-    draft_id = (result or {}).get("draft_order_id")
+    # ── 7. Return simplified response ──
     return {
-        "ok": ok,
+        "ok": True,
         "draft_order_id": draft_id,
-        "order_ref": f"COD-{draft_id}" if draft_id else None,
-        "message": "تم استلام طلبك بنجاح! سيتواصل معك فريقنا قريباً." if ok else "حدث خطأ أثناء إنشاء الطلب.",
+        "order_ref": f"COD-{draft_id}",
+        "message": "تم استلام طلبك بنجاح! سيتواصل معك فريقنا قريباً.",
     }
 
 
@@ -2442,12 +2546,13 @@ async def cod_storefront_create_order(
 async def cod_add_upsell(
     request: Request,
     data: dict = Body(...),
-    workspace: str | None = Query(None),
+    shop: str | None = Query(None, description="Shopify store domain"),
 ):
     """Add an upsell line item to an existing COD draft order.
 
     Updates the draft order by adding the upsell variant as a new line item
     and appends the 'cod form upsell' tag.
+    Uses independent COD store registry (not workspaces).
     """
     # ── 1. Validate API key ──
     if not _COD_API_KEY:
@@ -2466,19 +2571,8 @@ async def cod_add_upsell(
     quantity = int(data.get("quantity", 1) or 1)
     discount_amount = float(data.get("discount", 0) or 0)
 
-    # ── 3. Resolve store ──
-    ws = _normalize_ws_id(workspace)
-    oauth = await _get_shopify_oauth_record(ws)
-    oauth_shop = str((oauth or {}).get("shop") or "").strip().lower()
-    oauth_token = str((oauth or {}).get("access_token") or "").strip()
-    store = _resolve_store_from_workspace(None, workspace)
-
-    if oauth_shop and oauth_token:
-        base = _oauth_admin_api_base(oauth_shop)
-        extra_args = {"headers": {"X-Shopify-Access-Token": oauth_token}}
-    else:
-        base = admin_api_base(store)
-        extra_args = _client_args(store=store)
+    # ── 3. Resolve store from COD registry ──
+    base, extra_args = _get_cod_store_context(shop)
 
     # ── 4. Get existing draft order ──
     try:
@@ -2554,12 +2648,13 @@ async def cod_add_upsell(
 async def cod_abandon_checkout(
     request: Request,
     data: dict = Body(...),
-    workspace: str | None = Query(None),
+    shop: str | None = Query(None, description="Shopify store domain"),
 ):
     """Create a draft order for an abandoned COD checkout.
 
     Called when the customer fills in their details but leaves
     without completing the purchase.
+    Uses independent COD store registry (not workspaces).
     """
     # ── 1. Validate API key ──
     if not _COD_API_KEY:
@@ -2580,34 +2675,49 @@ async def cod_abandon_checkout(
     if not variant_id:
         raise HTTPException(status_code=422, detail="Missing variant_id")
 
-    # ── 3. Create draft order via existing logic ──
-    internal_payload = {
-        "name": name,
-        "phone": phone,
-        "address": address or "N/A",
+    # ── 3. Resolve store from COD registry ──
+    base, extra_args = _get_cod_store_context(shop)
+
+    # ── 4. Build draft order for abandoned checkout ──
+    fn, ln = _split_name(name)
+    shipping_address = {
+        "first_name": fn or "",
+        "last_name": ln or "",
+        "address1": address or "N/A",
         "city": city or "N/A",
-        "email": str(data.get("email") or "").strip(),
         "province": str(data.get("province") or "").strip(),
         "zip": str(data.get("zip") or "").strip(),
-        "delivery": "COD Home Delivery",
-        "note": "[ABANDONED CHECKOUT] Customer filled in form but did not complete order.",
-        "create_customer_if_missing": True,
-        "tags": ["cod form abandon checkout"],
-        "items": [{"variant_id": variant_id, "quantity": 1, "discount": 0}],
-        "complete_now": False,
+        "country": "Morocco",
+        "country_code": "MA",
+        "name": name,
+        "phone": normalize_phone(phone),
     }
 
-    ws = _normalize_ws_id(workspace)
+    draft_order_payload = {
+        "draft_order": {
+            "line_items": [{"variant_id": variant_id, "quantity": 1}],
+            "shipping_address": shipping_address,
+            "billing_address": shipping_address,
+            "shipping_lines": [{"title": "COD Home Delivery", "price": 0.00, "code": "STANDARD"}],
+            "phone": normalize_phone(phone),
+            "note": "[ABANDONED CHECKOUT] Customer filled in form but did not complete order.",
+            "tags": "cod form abandon checkout",
+            "customer": {"first_name": fn, "last_name": ln, "phone": normalize_phone(phone)},
+        }
+    }
+
+    # ── 5. Create draft order directly ──
     try:
-        result = await create_shopify_order(
-            data=internal_payload,
-            store=None,
-            x_workspace=ws or None,
-        )
-    except HTTPException:
-        raise
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{base}/draft_orders.json",
+                json=draft_order_payload,
+                timeout=20,
+                **extra_args,
+            )
+            resp.raise_for_status()
     except Exception as exc:
         logger.exception("COD abandon checkout creation failed: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to create abandon checkout.")
 
-    return {"ok": bool((result or {}).get("ok"))}
+    return {"ok": True}

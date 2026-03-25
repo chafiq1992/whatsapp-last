@@ -6,7 +6,7 @@
 
 {% assign cod_backend_url = "YOUR_BACKEND_URL" %}
 {% assign cod_api_key = "YOUR_API_KEY_HERE" %}
-{% assign cod_workspace = "" %}
+{% assign cod_shop_domain = "" %}
 
 {% comment %} Settings with Metafield Overrides {% endcomment %}
 {% assign sticky_button = section.settings.sticky_button %}
@@ -361,7 +361,7 @@
 
   var BACKEND_URL = {{ cod_backend_url | json }};
   var API_KEY = {{ cod_api_key | json }};
-  var WORKSPACE = {{ cod_workspace | json }};
+  var WORKSPACE = {{ cod_shop_domain | json }};
   var VARIANT_ID = {{ product.selected_or_first_available_variant.id | json }};
 
   var UPSELL_ENABLED = {{ upsell_on | json | default: 'false' }};
@@ -539,7 +539,7 @@
       $('cod-error-msg').classList.add('cod-hidden');
 
       var url = BACKEND_URL.replace(/\/$/,'') + '/cod/create-order';
-      if(WORKSPACE) url += '?workspace=' + encodeURIComponent(WORKSPACE);
+      if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
 
       fetch(url, {
         method: 'POST',
@@ -581,7 +581,7 @@
       if(errEl) errEl.classList.add('cod-hidden');
 
       var url = BACKEND_URL.replace(/\/$/,'') + '/cod/add-upsell';
-      if(WORKSPACE) url += '?workspace=' + encodeURIComponent(WORKSPACE);
+      if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
 
       // Calculate discount amount in cents for the upsell variant
       var upsellDiscountAmount = 0;
@@ -627,7 +627,7 @@
     if(_abandonSent || _orderCompleted) return;
     _abandonSent = true;
     var url = BACKEND_URL.replace(/\/$/,'') + '/cod/abandon-checkout';
-    if(WORKSPACE) url += '?workspace=' + encodeURIComponent(WORKSPACE);
+    if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
     // Use sendBeacon for reliability on page unload, fallback to fetch
     var payload = JSON.stringify({ variant_id: VARIANT_ID, name: name, phone: phone, address: address || 'N/A', city: city || 'N/A' });
     if(navigator.sendBeacon){

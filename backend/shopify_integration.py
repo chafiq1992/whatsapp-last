@@ -2349,26 +2349,26 @@ async def create_shopify_order(
 
 _COD_API_KEY = (os.getenv("COD_FORM_API_KEY") or "").strip()
 
-# ── COD Store OAuth Lookup ──
-# Looks up Shopify OAuth tokens by shop domain from the settings DB.
-# Completely independent from WhatsApp workspaces — uses only the shop URL.
+# ── COD Store Credential Lookup ──
+# Looks up Shopify credentials by shop domain. Tries:
+# 1. OAuth tokens from the settings DB
+# 2. Env-var based store configs ({PREFIX}_STORE_URL + API key/secret)
+# 3. Default env-based store as last fallback
 
 async def _get_cod_store_context(shop_domain: str | None) -> tuple[str, dict]:
     """Resolve Shopify Admin API base URL and auth headers for a COD store.
 
-    Looks up the shop domain in the Shopify OAuth settings stored in the DB.
-    Each OAuth record (stored under key `shopify_oauth::<workspace>`) contains
-    the shop domain and access token. We scan all records to find the one
-    matching the requested shop domain.
-
-    Falls back to default env-based store config if no shop is specified.
+    Priority:
+    1. Shopify OAuth records in the DB (by matching shop domain)
+    2. Env-var based store configs (by matching STORE_URL/STORE_DOMAIN)
+    3. Default env-based store if no shop specified
 
     Returns: (base_url, extra_args)
     """
     shop = (shop_domain or "").strip().lower()
 
     if shop:
-        # Search OAuth records in DB for matching shop domain
+        # ── 1. Try OAuth records in DB ──
         try:
             from .main import db_manager  # type: ignore
             async with db_manager._conn() as db:
@@ -2399,15 +2399,44 @@ async def _get_cod_store_context(shop_domain: str | None) -> tuple[str, dict]:
         except Exception as exc:
             logger.warning("COD OAuth lookup failed for %s: %s", shop, exc)
 
+        # ── 2. Try env-var based store configs ──
+        # Scan all env prefixes ({PREFIX}_STORE_URL / {PREFIX}_STORE_DOMAIN)
+        # and match against the requested shop domain.
+        try:
+            prefixes: list[str] = []
+            for k in os.environ.keys():
+                if k.endswith("_STORE_URL") or k.endswith("_STORE_DOMAIN"):
+                    # Extract prefix: e.g. NOURALIBAS_STORE_URL -> NOURALIBAS
+                    parts = k.rsplit("_STORE_", 1)
+                    if parts and parts[0]:
+                        p = parts[0].strip()
+                        if p and p not in prefixes:
+                            prefixes.append(p)
+
+            for prefix in prefixes:
+                try:
+                    _api_key, _password, store_url, _access_token = _load_store_config_for_prefix(prefix)
+                    # Normalize the store URL to a bare domain for comparison
+                    env_domain = (store_url or "").replace("https://", "").replace("http://", "").strip("/").lower()
+                    if env_domain == shop:
+                        base = f"https://{shop}/admin/api/{API_VERSION}"
+                        extra_args = _client_args(store=prefix)
+                        return base, extra_args
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("COD env store lookup failed for %s: %s", shop, exc)
+
         raise HTTPException(
             status_code=404,
-            detail=f"No Shopify OAuth connection found for store '{shop}'. Please install the app on this store first.",
+            detail=f"No Shopify connection found for store '{shop}'. Set up OAuth or add env vars for this store.",
         )
 
     # Fallback: use default env-based store (backward compat for single-store setups)
     base = admin_api_base(None)
     extra_args = _client_args(store=None)
     return base, extra_args
+
 
 
 

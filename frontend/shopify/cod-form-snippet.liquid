@@ -373,6 +373,9 @@
   var _timerInterval = null;
   var _customerData = {};
   var _upsellVariants = [];
+  var _draftOrderId = null;
+  var _abandonSent = false;
+  var _orderCompleted = false;
 
   function $(id){ return document.getElementById(id); }
 
@@ -456,6 +459,15 @@
     },
     close: function(){
       stopTimer();
+      // Send abandon checkout if customer filled form but didn't submit
+      if(!_orderCompleted && !_abandonSent) {
+        var form = $('cod-order-form');
+        if(form) {
+          var n = (form.name ? form.name.value : '').trim();
+          var p = (form.phone ? form.phone.value : '').trim();
+          if(n && p) _sendAbandon(n, p, (form.address ? form.address.value : '').trim(), (form.city ? form.city.value : '').trim());
+        }
+      }
       $('cod-modal-overlay').classList.add('cod-hidden');
       document.body.style.overflow = '';
       $('cod-order-form').reset();
@@ -532,11 +544,13 @@
       fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: JSON.stringify({ variant_id: VARIANT_ID, quantity: 1, name: data.name, phone: data.phone, address: data.address, city: data.city })
+        body: JSON.stringify({ variant_id: VARIANT_ID, quantity: 1, name: data.name, phone: data.phone, address: data.address, city: data.city, tags: ['cod form'] })
       })
       .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
       .then(function(res){
         if(res.ok && res.data.ok){
+          _orderCompleted = true;
+          _draftOrderId = res.data.draft_order_id;
           var ref = res.data.order_ref || '';
           if(ref) $('cod-order-ref').innerHTML = 'رقم الطلب الخاص بك: <span>' + ref + '</span>';
           
@@ -566,15 +580,26 @@
       var errEl = $('cod-upsell-error');
       if(errEl) errEl.classList.add('cod-hidden');
 
-      var url = BACKEND_URL.replace(/\/$/,'') + '/cod/create-order';
+      var url = BACKEND_URL.replace(/\/$/,'') + '/cod/add-upsell';
       if(WORKSPACE) url += '?workspace=' + encodeURIComponent(WORKSPACE);
+
+      // Calculate discount amount in cents for the upsell variant
+      var upsellDiscountAmount = 0;
+      if(UPSELL_DISCOUNT > 0 && _upsellVariants.length){
+        var selVariant = _upsellVariants.find(function(v){ return v.id === UPSELL_VARIANT_ID; });
+        if(selVariant){
+          upsellDiscountAmount = (selVariant.price * UPSELL_DISCOUNT / 100) / 100;
+        }
+      }
 
       fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
         body: JSON.stringify({
-          variant_id: UPSELL_VARIANT_ID, quantity: 1,
-          name: _customerData.name, phone: _customerData.phone, address: _customerData.address, city: _customerData.city
+          draft_order_id: _draftOrderId,
+          variant_id: UPSELL_VARIANT_ID,
+          quantity: 1,
+          discount: upsellDiscountAmount
         })
       })
       .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
@@ -596,6 +621,44 @@
       $('cod-success-state').classList.remove('cod-hidden');
     }
   };
+
+  // ── Abandon Checkout Tracking ──
+  function _sendAbandon(name, phone, address, city){
+    if(_abandonSent || _orderCompleted) return;
+    _abandonSent = true;
+    var url = BACKEND_URL.replace(/\/$/,'') + '/cod/abandon-checkout';
+    if(WORKSPACE) url += '?workspace=' + encodeURIComponent(WORKSPACE);
+    // Use sendBeacon for reliability on page unload, fallback to fetch
+    var payload = JSON.stringify({ variant_id: VARIANT_ID, name: name, phone: phone, address: address || 'N/A', city: city || 'N/A' });
+    if(navigator.sendBeacon){
+      var blob = new Blob([payload], {type: 'application/json'});
+      // sendBeacon doesn't support custom headers, so we use fetch with keepalive
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
+        body: payload,
+        keepalive: true
+      }).catch(function(){});
+    } else {
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
+        body: payload,
+        keepalive: true
+      }).catch(function(){});
+    }
+  }
+
+  // Also fire on page unload if user filled the form but didn't order
+  window.addEventListener('beforeunload', function(){
+    if(_orderCompleted || _abandonSent) return;
+    var form = $('cod-order-form');
+    if(!form) return;
+    var n = (form.name ? form.name.value : '').trim();
+    var p = (form.phone ? form.phone.value : '').trim();
+    if(n && p) _sendAbandon(n, p, (form.address ? form.address.value : '').trim(), (form.city ? form.city.value : '').trim());
+  });
+
 })();
 </script>
 

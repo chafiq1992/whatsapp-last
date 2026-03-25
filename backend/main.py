@@ -56,6 +56,10 @@ from .observability.context import (
 )
 from .observability.logging import configure_logging as _configure_logging
 from .webhook import WebhookRuntime, WebhookState, create_webhook_router, start_webhook_maintenance, start_webhook_workers
+from .core.runtime_types import RetargetingRuntime
+from .services import retargeting_jobs as _retargeting_jobs_service
+from .services.campaign_jobs import create_campaign_job, get_campaign_job
+from .api.routers.campaigns import router as campaigns_router
 
 from fastapi.staticfiles import StaticFiles
 from base64 import b64encode
@@ -80,171 +84,33 @@ CUSTOMER_CAMPAIGN_JOBS: dict[str, dict] = {}
 RETARGETING_JOBS: dict[str, dict] = {}
 
 # Durable retargeting jobs store (cross-instance) ---------------------------------------------------
+def _retargeting_runtime() -> RetargetingRuntime:
+    return RetargetingRuntime(db_manager=db_manager, jobs=RETARGETING_JOBS)
+
+
 async def _ensure_retargeting_jobs_table() -> None:
-    try:
-        async with db_manager._conn() as db:  # type: ignore[attr-defined]
-            stmt = db_manager._convert(  # type: ignore[attr-defined]
-                """
-                CREATE TABLE IF NOT EXISTS retargeting_jobs (
-                    id          TEXT PRIMARY KEY,
-                    workspace   TEXT,
-                    status      TEXT,
-                    data        TEXT,
-                    created_at  TEXT,
-                    updated_at  TEXT
-                )
-                """
-            )
-            if getattr(db_manager, "use_postgres", False):
-                await db.execute(stmt)
-            else:
-                await db.execute(stmt)
-                await db.commit()
-    except Exception:
-        return
+    await _retargeting_jobs_service.ensure_retargeting_jobs_table(_retargeting_runtime())
+
 
 async def _rt_job_upsert(job: dict) -> None:
-    try:
-        await _ensure_retargeting_jobs_table()
-    except Exception:
-        pass
-    try:
-        jid = str(job.get("id") or "").strip()
-        if not jid:
-            return
-        ws = str(job.get("workspace") or "").strip().lower() or None
-        st = str(job.get("status") or "").strip()
-        created_at = str(job.get("created_at") or "") or datetime.now(timezone.utc).isoformat()
-        updated_at = datetime.now(timezone.utc).isoformat()
-        data = json.dumps(job, ensure_ascii=False)
-        async with db_manager._conn() as db:  # type: ignore[attr-defined]
-            if getattr(db_manager, "use_postgres", False):
-                await db.execute(
-                    db_manager._convert(
-                        """
-                        INSERT INTO retargeting_jobs (id, workspace, status, data, created_at, updated_at)
-                        VALUES ($1, $2, $3, $4, $5, $6)
-                        ON CONFLICT(id) DO UPDATE SET
-                          workspace = EXCLUDED.workspace,
-                          status = EXCLUDED.status,
-                          data = EXCLUDED.data,
-                          updated_at = EXCLUDED.updated_at
-                        """
-                    ),
-                    jid,
-                    ws,
-                    st,
-                    data,
-                    created_at,
-                    updated_at,
-                )
-            else:
-                await db.execute(
-                    db_manager._convert(
-                        """
-                        INSERT INTO retargeting_jobs (id, workspace, status, data, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET
-                          workspace = excluded.workspace,
-                          status = excluded.status,
-                          data = excluded.data,
-                          updated_at = excluded.updated_at
-                        """
-                    ),
-                    (jid, ws, st, data, created_at, updated_at),
-                )
-                await db.commit()
-    except Exception:
-        return
+    await _retargeting_jobs_service.rt_job_upsert(_retargeting_runtime(), job)
+
 
 async def _rt_job_get(job_id: str) -> dict | None:
-    jid = str(job_id or "").strip()
-    if not jid:
-        return None
-    # Prefer in-memory (for active job live updates), fallback to DB
-    j = RETARGETING_JOBS.get(jid)
-    if isinstance(j, dict):
-        return j
-    try:
-        await _ensure_retargeting_jobs_table()
-        async with db_manager._conn() as db:  # type: ignore[attr-defined]
-            q = db_manager._convert("SELECT data FROM retargeting_jobs WHERE id = ?")
-            if getattr(db_manager, "use_postgres", False):
-                q = db_manager._convert("SELECT data FROM retargeting_jobs WHERE id = $1")
-                row = await db.fetchrow(q, jid)
-                raw = row[0] if row else None
-            else:
-                cur = await db.execute(q, (jid,))
-                row = await cur.fetchone()
-                raw = row["data"] if row else None
-        if raw:
-            obj = json.loads(raw)
-            return obj if isinstance(obj, dict) else None
-    except Exception:
-        return None
-    return None
+    return await _retargeting_jobs_service.rt_job_get(_retargeting_runtime(), job_id)
+
 
 async def _rt_job_list(*, active_only: bool, limit: int, workspace: str | None = None) -> list[dict]:
-    lim = max(1, min(int(limit or 200), 1000))
-    active_statuses = {"queued", "waiting", "running", "sleeping", "stopping"}
-    ws = (str(workspace or "").strip().lower() or None)
-    out: list[dict] = []
-    # Start with DB (cross-instance)
-    try:
-        await _ensure_retargeting_jobs_table()
-        async with db_manager._conn() as db:  # type: ignore[attr-defined]
-            if getattr(db_manager, "use_postgres", False):
-                if ws:
-                    rows = await db.fetch(db_manager._convert("SELECT data FROM retargeting_jobs WHERE workspace = $1 ORDER BY created_at DESC LIMIT $2"), ws, lim)
-                else:
-                    rows = await db.fetch(db_manager._convert("SELECT data FROM retargeting_jobs ORDER BY created_at DESC LIMIT $1"), lim)
-                for r in rows or []:
-                    try:
-                        obj = json.loads(r[0]) if r and r[0] else None
-                        if isinstance(obj, dict):
-                            out.append(obj)
-                    except Exception:
-                        continue
-            else:
-                if ws:
-                    cur = await db.execute(db_manager._convert("SELECT data FROM retargeting_jobs WHERE workspace = ? ORDER BY created_at DESC LIMIT ?"), (ws, lim))
-                else:
-                    cur = await db.execute(db_manager._convert("SELECT data FROM retargeting_jobs ORDER BY created_at DESC LIMIT ?"), (lim,))
-                rows = await cur.fetchall()
-                for r in rows or []:
-                    try:
-                        raw = r["data"]
-                        obj = json.loads(raw) if raw else None
-                        if isinstance(obj, dict):
-                            out.append(obj)
-                    except Exception:
-                        continue
-    except Exception:
-        out = []
+    return await _retargeting_jobs_service.rt_job_list(
+        _retargeting_runtime(),
+        active_only=active_only,
+        limit=limit,
+        workspace=workspace,
+    )
 
-    # Filter + sort
-    if active_only:
-        out = [j for j in out if str(j.get("status") or "") in active_statuses]
-    try:
-        out.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
-    except Exception:
-        pass
-    return out[:lim]
 
 async def _rt_should_stop(job_id: str) -> bool:
-    # In-memory fast path
-    try:
-        if RETARGETING_JOBS.get(job_id, {}).get("stop_requested"):
-            return True
-    except Exception:
-        pass
-    # DB flag for cross-instance stop requests
-    try:
-        j = await _rt_job_get(job_id)
-        return bool((j or {}).get("stop_requested"))
-    except Exception:
-        return False
-
+    return await _retargeting_jobs_service.rt_should_stop(_retargeting_runtime(), job_id)
 # Absolute paths
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -11326,6 +11192,7 @@ messenger = message_processor.whatsapp_messenger
 # FastAPI app
 app = FastAPI(default_response_class=(ORJSONResponse if _ORJSON_AVAILABLE else JSONResponse))
 app.include_router(create_webhook_router(webhook_runtime))
+app.include_router(campaigns_router)
 
 # ── Request context: request_id (for tracing) ──────────────────────
 @app.middleware("http")
@@ -14938,7 +14805,6 @@ async def upload_template_header_image_endpoint(
         raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
 
 
-@app.post("/customer-campaigns/launch")
 async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends(require_admin)):
     """Launch a WhatsApp template campaign to customers matching a Shopify segment DSL.
 
@@ -14981,21 +14847,17 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
     ws = _coerce_workspace(ws)
 
     job_id = str(uuid.uuid4())
-    CUSTOMER_CAMPAIGN_JOBS[job_id] = {
-        "id": job_id,
-        "status": "queued",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_by": agent.get("username"),
-        "store": store,
-        "workspace": ws,
-        "template_name": template_name,
-        "language": language,
-        "limit": limit,
-        "compiled_query": compiled_query,
-        "sent": 0,
-        "failed": 0,
-        "last_error": "",
-    }
+    create_campaign_job(
+        jobs=CUSTOMER_CAMPAIGN_JOBS,
+        job_id=job_id,
+        agent_username=agent.get("username"),
+        store=store,
+        workspace=ws,
+        template_name=template_name,
+        language=language,
+        limit=limit,
+        compiled_query=compiled_query,
+    )
 
     async def _run():
         tok = _CURRENT_WORKSPACE.set(ws)
@@ -15115,15 +14977,13 @@ async def launch_customer_campaign(body: dict = Body(...), agent: dict = Depends
     return {"job_id": job_id}
 
 
-@app.get("/customer-campaigns/{job_id}")
 async def get_customer_campaign(job_id: str, agent: dict = Depends(require_admin)):
-    j = CUSTOMER_CAMPAIGN_JOBS.get(str(job_id or "").strip())
+    j = get_campaign_job(CUSTOMER_CAMPAIGN_JOBS, job_id)
     if not j:
         raise HTTPException(status_code=404, detail="Job not found")
     return j
 
 
-@app.post("/retargeting/customer-segments/launch")
 async def launch_retargeting_customer_segments(
     body: dict = Body(...),
     agent: dict = Depends(require_admin),
@@ -15804,7 +15664,6 @@ async def launch_retargeting_customer_segments(
     return {"job_id": job_id}
 
 
-@app.post("/retargeting/customer-segments/preview")
 async def preview_retargeting_customer_segments(
     body: dict = Body(...),
     agent: dict = Depends(require_admin),
@@ -15989,7 +15848,6 @@ async def preview_retargeting_customer_segments(
     }
 
 
-@app.get("/retargeting/jobs/{job_id}")
 async def get_retargeting_job(job_id: str, agent: dict = Depends(require_admin)):
     j = await _rt_job_get(str(job_id or "").strip())
     if not j:
@@ -15997,7 +15855,6 @@ async def get_retargeting_job(job_id: str, agent: dict = Depends(require_admin))
     return j
 
 
-@app.get("/retargeting/jobs")
 async def list_retargeting_jobs(
     active_only: bool = True,
     limit: int = 200,
@@ -16008,7 +15865,6 @@ async def list_retargeting_jobs(
     return await _rt_job_list(active_only=bool(active_only), limit=lim)
 
 
-@app.post("/retargeting/jobs/{job_id}/stop")
 async def stop_retargeting_job(job_id: str, agent: dict = Depends(require_admin)):
     jid = str(job_id or "").strip()
     if not jid:

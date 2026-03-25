@@ -2467,19 +2467,16 @@ async def cod_storefront_create_order(
     if not name or not phone or not address or not city:
         raise HTTPException(status_code=422, detail="Missing required fields: name, phone, address, city")
 
+    # ── 2b. Build line items (multi-item support) ──
+    incoming_items = data.get("line_items") or []
     variant_id = data.get("variant_id") or data.get("product_variant_id")
-    if not variant_id:
-        raise HTTPException(status_code=422, detail="Missing required field: variant_id")
-
-    quantity = int(data.get("quantity", 1) or 1)
-    if quantity < 1:
-        quantity = 1
+    if not incoming_items and not variant_id:
+        raise HTTPException(status_code=422, detail="Missing required field: variant_id or line_items")
 
     # ── 3. Resolve store from COD registry ──
     base, extra_args = await _get_cod_store_context(shop)
 
     # ── 4. Build draft order payload ──
-    tags = list(data.get("tags") or []) or ["cod form"]
     fn, ln = _split_name(name)
     shipping_address = {
         "first_name": fn or "",
@@ -2500,21 +2497,38 @@ async def cod_storefront_create_order(
         except Exception:
             return "0.00"
 
-    discount_val = float(data.get("discount", 0) or 0)
-    line_item = {"variant_id": variant_id, "quantity": quantity}
-    if discount_val > 0:
-        line_item["applied_discount"] = {
-            "value": _money2(discount_val),
-            "value_type": "fixed_amount",
-            "amount": _money2(discount_val),
-            "title": "Item discount",
-        }
+    # Build line_items list
+    draft_line_items = []
+    if incoming_items:
+        for li in incoming_items:
+            vid = li.get("variant_id") or li.get("id")
+            qty = int(li.get("quantity", 1) or 1)
+            if not vid or qty < 1:
+                continue
+            draft_line_items.append({"variant_id": vid, "quantity": qty})
+    if not draft_line_items and variant_id:
+        quantity = int(data.get("quantity", 1) or 1)
+        if quantity < 1:
+            quantity = 1
+        discount_val = float(data.get("discount", 0) or 0)
+        line_item = {"variant_id": variant_id, "quantity": quantity}
+        if discount_val > 0:
+            line_item["applied_discount"] = {
+                "value": _money2(discount_val),
+                "value_type": "fixed_amount",
+                "amount": _money2(discount_val),
+                "title": "Item discount",
+            }
+        draft_line_items.append(line_item)
 
-    order_tags = ", ".join(tags) if isinstance(tags, list) else str(tags)
+    if not draft_line_items:
+        raise HTTPException(status_code=422, detail="No valid line items provided")
+
+    order_tags = "easysell_cod_form"
 
     draft_order_payload = {
         "draft_order": {
-            "line_items": [line_item],
+            "line_items": draft_line_items,
             "shipping_address": shipping_address,
             "billing_address": shipping_address,
             "shipping_lines": [{"title": "COD Home Delivery", "price": 0.00, "code": "STANDARD"}],
@@ -2645,7 +2659,10 @@ async def cod_add_upsell(
     # ── 6. Update tags ──
     existing_tags = (existing.get("tags") or "").strip()
     tag_set = {t.strip() for t in existing_tags.split(",") if t.strip()}
-    tag_set.add("cod form upsell")
+    tag_set.discard("cod form")
+    tag_set.discard("cod form upsell")
+    tag_set.add("easysell_cod_form")
+    tag_set.add("easysell_cod_form_upsell")
     new_tags = ", ".join(sorted(tag_set))
 
     # ── 7. Update draft order ──
@@ -2697,25 +2714,36 @@ async def cod_abandon_checkout(
     if not incoming_key or incoming_key != _COD_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
 
-    # ── 2. Validate inputs ──
-    name = str(data.get("name") or "").strip()
+    # ── 2. Validate inputs (name/phone optional for abandon) ──
+    name = str(data.get("name") or "").strip() or "Unknown"
     phone = str(data.get("phone") or "").strip()
     address = str(data.get("address") or "").strip()
     city = str(data.get("city") or "").strip()
-    if not name or not phone:
-        raise HTTPException(status_code=422, detail="Missing: name, phone")
 
+    # Build line items (multi-item support)
+    incoming_items = data.get("line_items") or []
     variant_id = data.get("variant_id")
-    if not variant_id:
-        raise HTTPException(status_code=422, detail="Missing variant_id")
+    draft_line_items = []
+    if incoming_items:
+        for li in incoming_items:
+            vid = li.get("variant_id") or li.get("id")
+            qty = int(li.get("quantity", 1) or 1)
+            if not vid or qty < 1:
+                continue
+            draft_line_items.append({"variant_id": vid, "quantity": qty})
+    if not draft_line_items and variant_id:
+        draft_line_items.append({"variant_id": variant_id, "quantity": 1})
+    if not draft_line_items:
+        raise HTTPException(status_code=422, detail="Missing variant_id or line_items")
 
     # ── 3. Resolve store from COD registry ──
     base, extra_args = await _get_cod_store_context(shop)
 
     # ── 4. Build draft order for abandoned checkout ──
     fn, ln = _split_name(name)
+    phone_norm = normalize_phone(phone) if phone else ""
     shipping_address = {
-        "first_name": fn or "",
+        "first_name": fn or "Unknown",
         "last_name": ln or "",
         "address1": address or "N/A",
         "city": city or "N/A",
@@ -2724,19 +2752,19 @@ async def cod_abandon_checkout(
         "country": "Morocco",
         "country_code": "MA",
         "name": name,
-        "phone": normalize_phone(phone),
+        "phone": phone_norm,
     }
 
     draft_order_payload = {
         "draft_order": {
-            "line_items": [{"variant_id": variant_id, "quantity": 1}],
+            "line_items": draft_line_items,
             "shipping_address": shipping_address,
             "billing_address": shipping_address,
             "shipping_lines": [{"title": "COD Home Delivery", "price": 0.00, "code": "STANDARD"}],
-            "phone": normalize_phone(phone),
-            "note": "[ABANDONED CHECKOUT] Customer filled in form but did not complete order.",
-            "tags": "cod form abandon checkout",
-            "customer": {"first_name": fn, "last_name": ln, "phone": normalize_phone(phone)},
+            "phone": phone_norm,
+            "note": "[ABANDONED CHECKOUT] Customer opened COD form but did not complete order.",
+            "tags": "easysell_cod_form, easysell_cod_form_abandon",
+            "customer": {"first_name": fn or "Unknown", "last_name": ln or "", "phone": phone_norm} if phone_norm else {},
         }
     }
 

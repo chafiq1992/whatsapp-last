@@ -348,10 +348,21 @@
 
 <script>
 (function(){
-  // Move primary inline button below Add To Cart
+  // Move primary inline button below Add To Cart (product pages)
+  // On cart pages, inject button into cart form
   document.addEventListener("DOMContentLoaded", function() {
     var codBtn = document.getElementById("cod-open-btn");
-    if (codBtn) {
+    if (!codBtn) return;
+
+    var isCartPage = /\/cart\b/.test(window.location.pathname);
+    if (isCartPage) {
+      // Cart page: inject button into the cart form or after cart actions
+      var cartForm = document.querySelector('form[action="/cart"]') || document.querySelector('.cart__footer') || document.querySelector('.cart-footer');
+      if (cartForm) {
+        cartForm.appendChild(codBtn);
+      }
+    } else {
+      // Product page: place below Add To Cart
       var addToCartBtn = document.querySelector('.product-form__submit') || document.querySelector('button[name="add"]');
       if (addToCartBtn && addToCartBtn.parentNode) {
         addToCartBtn.parentNode.insertBefore(codBtn, addToCartBtn.nextSibling);
@@ -376,12 +387,14 @@
   var _draftOrderId = null;
   var _abandonSent = false;
   var _orderCompleted = false;
+  var _modalOpened = false;
+  var _cartItems = [];   // [{variant_id, quantity}] fetched from Shopify cart
+  var _lineItems = [];   // final line items for the order
 
   function $(id){ return document.getElementById(id); }
 
   function formatMoney(cents) {
     if(!MONEY_FORMAT) return (cents/100).toFixed(2);
-    // Find format pattern using 9991.11 test value
     var val1 = (9991.11).toFixed(2);
     var val2 = (9991.11).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
     var newVal1 = (cents/100).toFixed(2);
@@ -408,6 +421,75 @@
     _timerInterval = setInterval(tick, 1000);
   }
   function stopTimer(){ if(_timerInterval){ clearInterval(_timerInterval); _timerInterval = null; } }
+
+  // ── Fetch cart items from Shopify AJAX API ──
+  function _fetchCart(callback) {
+    fetch('/cart.js', {method:'GET', headers:{'Accept':'application/json'}})
+      .then(function(r){ return r.json(); })
+      .then(function(cart){
+        _cartItems = [];
+        if(cart && cart.items && cart.items.length) {
+          cart.items.forEach(function(item){
+            _cartItems.push({variant_id: item.variant_id || item.id, quantity: item.quantity || 1});
+          });
+        }
+        if(callback) callback();
+      })
+      .catch(function(){ _cartItems = []; if(callback) callback(); });
+  }
+
+  // ── Build line items from current product + cart ──
+  function _buildLineItems() {
+    var isCartPage = /\/cart\b/.test(window.location.pathname);
+    var items = [];
+    var seenVariants = {};
+
+    // On product page, include the current product
+    if (!isCartPage && VARIANT_ID) {
+      items.push({variant_id: VARIANT_ID, quantity: 1});
+      seenVariants[VARIANT_ID] = true;
+    }
+
+    // Add cart items (skip duplicates of product variant)
+    _cartItems.forEach(function(ci){
+      if (!seenVariants[ci.variant_id]) {
+        items.push({variant_id: ci.variant_id, quantity: ci.quantity});
+        seenVariants[ci.variant_id] = true;
+      } else {
+        // If the product variant is already there from the product page, add cart qty
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].variant_id == ci.variant_id) {
+            items[i].quantity += ci.quantity;
+            break;
+          }
+        }
+      }
+    });
+
+    _lineItems = items;
+    return items;
+  }
+
+  // ── Update modal header to show item count ──
+  function _updateModalHeader() {
+    var badge = document.querySelector('.cod-qty-badge');
+    var totalQty = 0;
+    _lineItems.forEach(function(li){ totalQty += li.quantity; });
+    if (badge) badge.textContent = totalQty || 1;
+
+    // Update summary prices — we don't have all prices client-side for cart items,
+    // so show the item count instead and let total be computed server-side
+    var totalItems = _lineItems.length;
+    if (totalItems > 1) {
+      var titleEl = document.querySelector('.cod-product-title');
+      if (titleEl) {
+        var isCartPage = /\/cart\b/.test(window.location.pathname);
+        if (isCartPage) {
+          titleEl.textContent = totalItems + ' منتجات في السلة';
+        }
+      }
+    }
+  }
 
   function updateOptionAvailability(){
     if(!_upsellVariants.length) return;
@@ -442,6 +524,8 @@
 
   window.__codForm = {
     open: function(){
+      _modalOpened = true;
+      _abandonSent = false;
       $('cod-modal-overlay').classList.remove('cod-hidden');
       $('cod-form-state').classList.remove('cod-hidden');
       $('cod-success-state').classList.add('cod-hidden');
@@ -450,6 +534,12 @@
       $('cod-error-msg').classList.add('cod-hidden');
       document.body.style.overflow = 'hidden';
       
+      // Fetch cart and build line items
+      _fetchCart(function(){
+        _buildLineItems();
+        _updateModalHeader();
+      });
+
       // Load variants array lazily on open
       var vdata = $('cod-upsell-variants-data');
       if(vdata && _upsellVariants.length === 0) {
@@ -459,14 +549,9 @@
     },
     close: function(){
       stopTimer();
-      // Send abandon checkout if customer filled form but didn't submit
+      // Send abandon checkout on modal close
       if(!_orderCompleted && !_abandonSent) {
-        var form = $('cod-order-form');
-        if(form) {
-          var n = (form.name ? form.name.value : '').trim();
-          var p = (form.phone ? form.phone.value : '').trim();
-          if(n && p) _sendAbandon(n, p, (form.address ? form.address.value : '').trim(), (form.city ? form.city.value : '').trim());
-        }
+        _fireAbandon();
       }
       $('cod-modal-overlay').classList.add('cod-hidden');
       document.body.style.overflow = '';
@@ -480,7 +565,7 @@
     onVariantChange: function(){
       if(!_upsellVariants.length) return;
       var selects = document.querySelectorAll('.cod-upsell-select');
-      var selectedOptions = Array.prototype.map.call(selects, function(s){ return s.value.replace(/ \(نفدت\)$/, ''); });
+      var selectedOptions = Array.prototype.map.call(selects, function(s){ return s.value.replace(/ (نفدت)$/, ''); });
       
       var variant = _upsellVariants.find(function(v){
         return v.options.every(function(opt, i){ return opt === selectedOptions[i]; });
@@ -541,10 +626,13 @@
       var url = BACKEND_URL.replace(/\/$/,'') + '/cod/create-order';
       if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
 
+      // Build the payload with line_items
+      var items = _lineItems.length ? _lineItems : [{variant_id: VARIANT_ID, quantity: 1}];
+
       fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: JSON.stringify({ variant_id: VARIANT_ID, quantity: 1, name: data.name, phone: data.phone, address: data.address, city: data.city, tags: ['cod form'] })
+        body: JSON.stringify({ line_items: items, name: data.name, phone: data.phone, address: data.address, city: data.city, tags: ['easysell_cod_form'] })
       })
       .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
       .then(function(res){
@@ -623,44 +711,62 @@
   };
 
   // ── Abandon Checkout Tracking ──
-  function _sendAbandon(name, phone, address, city){
+  // Fires on ANY exit: modal close, page navigation, tab close, connection loss
+  // Works even without customer info (sends with empty/Unknown fields)
+  function _fireAbandon(){
     if(_abandonSent || _orderCompleted) return;
+    if(!_modalOpened) return; // Only abandon if modal was opened
     _abandonSent = true;
+
+    var form = $('cod-order-form');
+    var name = '', phone = '', address = '', city = '';
+    if(form) {
+      name = (form.name ? form.name.value : '').trim();
+      phone = (form.phone ? form.phone.value : '').trim();
+      address = (form.address ? form.address.value : '').trim();
+      city = (form.city ? form.city.value : '').trim();
+    }
+
+    var items = _lineItems.length ? _lineItems : (VARIANT_ID ? [{variant_id: VARIANT_ID, quantity: 1}] : []);
+    if(!items.length) return; // Nothing to abandon
+
     var url = BACKEND_URL.replace(/\/$/,'') + '/cod/abandon-checkout';
     if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
-    // Use sendBeacon for reliability on page unload, fallback to fetch
-    var payload = JSON.stringify({ variant_id: VARIANT_ID, name: name, phone: phone, address: address || 'N/A', city: city || 'N/A' });
-    if(navigator.sendBeacon){
-      var blob = new Blob([payload], {type: 'application/json'});
-      // sendBeacon doesn't support custom headers, so we use fetch with keepalive
+
+    var payload = JSON.stringify({
+      line_items: items,
+      name: name || '',
+      phone: phone || '',
+      address: address || 'N/A',
+      city: city || 'N/A'
+    });
+
+    // Use fetch with keepalive for reliability on page unload
+    try {
       fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
         body: payload,
         keepalive: true
       }).catch(function(){});
-    } else {
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: payload,
-        keepalive: true
-      }).catch(function(){});
-    }
+    } catch(e) {}
   }
 
-  // Also fire on page unload if user filled the form but didn't order
+  // Fire abandon on page unload (tab close, navigate away)
   window.addEventListener('beforeunload', function(){
-    if(_orderCompleted || _abandonSent) return;
-    var form = $('cod-order-form');
-    if(!form) return;
-    var n = (form.name ? form.name.value : '').trim();
-    var p = (form.phone ? form.phone.value : '').trim();
-    if(n && p) _sendAbandon(n, p, (form.address ? form.address.value : '').trim(), (form.city ? form.city.value : '').trim());
+    if(!_orderCompleted && !_abandonSent && _modalOpened) _fireAbandon();
+  });
+
+  // Fire abandon on visibility change (mobile: switching apps, closing tab)
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState === 'hidden' && !_orderCompleted && !_abandonSent && _modalOpened) {
+      _fireAbandon();
+    }
   });
 
 })();
 </script>
+
 
 {% schema %}
 {

@@ -195,13 +195,6 @@
             {% endif %}
           </div>
 
-          <div class="cod-timer-ring-wrap">
-            <svg class="cod-timer-ring" width="72" height="72" viewBox="0 0 72 72">
-              <circle cx="36" cy="36" r="32" fill="none" stroke="#f3f4f6" stroke-width="4"></circle>
-              <circle id="cod-timer-circle" cx="36" cy="36" r="32" fill="none" stroke="#ef4444" stroke-width="4" stroke-linecap="round" stroke-dasharray="201.06" stroke-dashoffset="0" transform="rotate(-90 36 36)"></circle>
-            </svg>
-            <span id="cod-timer-inner" class="cod-timer-inner">05:00</span>
-          </div>
         </div>
 
         <div class="cod-upsell-actions">
@@ -339,9 +332,6 @@
 .cod-upsell-pricing{display:flex;align-items:center;gap:12px;justify-content:center}
 .cod-upsell-price-old{text-decoration:line-through;color:#9ca3af;font-size:16px;font-weight:500}
 .cod-upsell-price-new{color:#059669;font-size:22px;font-weight:800}
-.cod-timer-ring-wrap{position:relative;width:72px;height:72px;display:flex;align-items:center;justify-content:center;margin-top:4px}
-.cod-timer-ring{position:absolute;top:0;left:0}
-.cod-timer-inner{font-family:'Courier New',Courier,monospace;font-size:15px;font-weight:700;color:#ef4444;z-index:1}
 .cod-upsell-actions{width:calc(100% - 48px);margin:0 24px 24px;display:flex;flex-direction:column;gap:10px}
 .cod-btn-upsell-accept{width:100%;background:linear-gradient(135deg,#059669,#047857);color:#fff;padding:18px 24px;font-size:16px;border-radius:16px;box-shadow:0 8px 24px rgba(5,150,105,.25);animation:codShimmer 3s ease-in-out infinite}
 @keyframes codShimmer{0%,100%{box-shadow:0 8px 24px rgba(5,150,105,.25)}50%{box-shadow:0 12px 32px rgba(5,150,105,.4)}}
@@ -405,28 +395,47 @@
 
   function startTimer(){
     var remaining = UPSELL_TIMER_SEC;
-    var total = UPSELL_TIMER_SEC;
-    var circumference = 2 * Math.PI * 32;
-
     function tick(){
       if(remaining <= 0){ clearInterval(_timerInterval); _timerInterval = null; window.__codForm.skipUpsell(); return; }
       remaining--;
       var display = fmtTime(remaining);
-      var el1 = $('cod-upsell-timer'); var el2 = $('cod-timer-inner');
+      var el1 = $('cod-upsell-timer');
       if(el1) el1.textContent = display;
-      if(el2) el2.textContent = display;
-      var circle = $('cod-timer-circle');
-      if(circle){
-        var progress = remaining / total;
-        circle.style.strokeDashoffset = (circumference * (1 - progress)).toFixed(2);
-        if(progress > 0.5) circle.style.stroke = '#059669';
-        else if(progress > 0.2) circle.style.stroke = '#f59e0b';
-        else circle.style.stroke = '#ef4444';
-      }
     }
     _timerInterval = setInterval(tick, 1000);
   }
   function stopTimer(){ if(_timerInterval){ clearInterval(_timerInterval); _timerInterval = null; } }
+
+  function updateOptionAvailability(){
+    if(!_upsellVariants.length) return;
+    var selects = document.querySelectorAll('.cod-upsell-select');
+    Array.prototype.forEach.call(selects, function(select, selIdx){
+      var otherSelections = [];
+      Array.prototype.forEach.call(selects, function(s, i){
+        otherSelections.push({ index: i, value: s.value.replace(/ \(\u0646\u0641\u062f\u062a\)$/, '') });
+      });
+      Array.prototype.forEach.call(select.options, function(opt){
+        var cleanVal = opt.value.replace(/ \(\u0646\u0641\u062f\u062a\)$/, '');
+        var hasAvailable = _upsellVariants.some(function(v){
+          if(v.options[selIdx] !== cleanVal) return false;
+          return otherSelections.every(function(os){
+            if(os.index === selIdx) return true;
+            return v.options[os.index] === os.value;
+          }) && v.available;
+        });
+        var anyExists = _upsellVariants.some(function(v){ return v.options[selIdx] === cleanVal; });
+        if(anyExists && !hasAvailable){
+          opt.value = cleanVal;
+          opt.textContent = cleanVal + ' (\u0646\u0641\u062f\u062a)';
+          opt.style.color = '#9ca3af';
+        } else {
+          opt.value = cleanVal;
+          opt.textContent = cleanVal;
+          opt.style.color = '';
+        }
+      });
+    });
+  }
 
   window.__codForm = {
     open: function(){
@@ -438,10 +447,11 @@
       $('cod-error-msg').classList.add('cod-hidden');
       document.body.style.overflow = 'hidden';
       
-      // Load variants array lazily on open mapping
+      // Load variants array lazily on open
       var vdata = $('cod-upsell-variants-data');
       if(vdata && _upsellVariants.length === 0) {
         try { _upsellVariants = JSON.parse(vdata.textContent); } catch(e){}
+        updateOptionAvailability();
       }
     },
     close: function(){
@@ -458,7 +468,7 @@
     onVariantChange: function(){
       if(!_upsellVariants.length) return;
       var selects = document.querySelectorAll('.cod-upsell-select');
-      var selectedOptions = Array.prototype.map.call(selects, function(s){ return s.value; });
+      var selectedOptions = Array.prototype.map.call(selects, function(s){ return s.value.replace(/ \(نفدت\)$/, ''); });
       
       var variant = _upsellVariants.find(function(v){
         return v.options.every(function(opt, i){ return opt === selectedOptions[i]; });
@@ -495,6 +505,8 @@
         btnText.innerHTML = 'أضف للطلب — ' + formatMoney(finalPrice);
         if(icon) icon.style.display = 'inline-block';
       }
+
+      updateOptionAvailability();
     },
     submit: function(e){
       e.preventDefault();

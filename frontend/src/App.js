@@ -16,6 +16,7 @@ const Login = React.lazy(() => import('./Login'));
 // Read API base from env for production/dev compatibility
 // Default to relative paths if not provided
 const API_BASE = process.env.REACT_APP_API_BASE || "";
+const WS_QUERY_TOKEN_FALLBACK = String(process.env.REACT_APP_WS_QUERY_TOKEN_FALLBACK || '').trim() === '1';
 
 // Normalize timestamps across types and formats; treat naive ISO as UTC
 const toMsNormalized = (t) => {
@@ -508,10 +509,12 @@ export default function App() {
 
     const connectAdmin = () => {
       const qs = new URLSearchParams();
-      try {
-        const t = sessionStorage.getItem('agent_access_token') || localStorage.getItem('agent_access_token');
-        if (t) qs.set('token', t);
-      } catch {}
+      if (WS_QUERY_TOKEN_FALLBACK) {
+        try {
+          const t = sessionStorage.getItem('agent_access_token') || localStorage.getItem('agent_access_token');
+          if (t) qs.set('token', t);
+        } catch {}
+      }
       qs.set('workspace', String(workspace || 'irranova'));
       const ws = new WebSocket(`${wsBase}admin?${qs.toString()}`);
       adminWsRef.current = ws;
@@ -668,10 +671,12 @@ export default function App() {
 
     const connectUser = () => {
       const qs = new URLSearchParams();
-      try {
-        const t = sessionStorage.getItem('agent_access_token') || localStorage.getItem('agent_access_token');
-        if (t) qs.set('token', t);
-      } catch {}
+      if (WS_QUERY_TOKEN_FALLBACK) {
+        try {
+          const t = sessionStorage.getItem('agent_access_token') || localStorage.getItem('agent_access_token');
+          if (t) qs.set('token', t);
+        } catch {}
+      }
       qs.set('workspace', String(workspace || 'irranova'));
       const uid = String(activeUserRef.current?.user_id || '').trim();
       if (!uid) return; // avoid connecting to /ws/?... (invalid path)

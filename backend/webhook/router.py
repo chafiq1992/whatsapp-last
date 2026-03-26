@@ -146,6 +146,9 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
                     return PlainTextResponse("Invalid signature", status_code=401)
                 data = parsed_data if isinstance(parsed_data, dict) else json.loads(body_bytes or b"{}")
             else:
+                if not bool(getattr(rt, "allow_unsigned_webhooks", False)):
+                    rt.vlog("❌ Webhook signature not configured; rejecting unsigned webhook")
+                    return PlainTextResponse("Webhook signature not configured", status_code=503)
                 data = await request.json()
         except Exception:
             return PlainTextResponse("Bad Request", status_code=400)
@@ -213,5 +216,4 @@ def create_webhook_router(rt: WebhookRuntime) -> APIRouter:
         return {"ok": True}
 
     return router
-
 

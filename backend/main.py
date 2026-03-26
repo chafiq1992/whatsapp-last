@@ -782,6 +782,8 @@ except Exception:
 # - Refresh tokens are random secrets stored hashed in DB and sent as HttpOnly cookies.
 #
 AGENT_AUTH_SECRET = os.getenv("AGENT_AUTH_SECRET", "") or os.getenv("SECRET_KEY", "")
+if (not DISABLE_AUTH) and (not str(AGENT_AUTH_SECRET or "").strip()):
+    raise RuntimeError("AGENT_AUTH_SECRET (or SECRET_KEY) must be set when authentication is enabled.")
 if not TRACK_IP_SALT:
     # Best-effort: re-use auth secret as salt (keeps deterministic hashing across instances),
     # otherwise fall back to a dev-only salt.
@@ -806,7 +808,9 @@ AUTH_COOKIE_SAMESITE = (os.getenv("AUTH_COOKIE_SAMESITE", "") or "").strip().low
 ACCESS_COOKIE_NAME = "agent_access"
 REFRESH_COOKIE_NAME = "agent_refresh"
 JWT_ISSUER = os.getenv("JWT_ISSUER", "whatsapp-inbox")
-EXPOSE_REFRESH_TOKEN_FALLBACK = os.getenv("EXPOSE_REFRESH_TOKEN_FALLBACK", "1") == "1"
+EXPOSE_REFRESH_TOKEN_FALLBACK = os.getenv("EXPOSE_REFRESH_TOKEN_FALLBACK", "0") == "1"
+TOKEN_FALLBACK_ENABLED = os.getenv("TOKEN_FALLBACK_ENABLED", "0") == "1"
+WS_QUERY_TOKEN_FALLBACK = os.getenv("WS_QUERY_TOKEN_FALLBACK", "0") == "1"
 REFRESH_ROTATE_ON_REFRESH = os.getenv("REFRESH_ROTATE_ON_REFRESH", "0") == "1"
 # Agent auth cache (in-memory). Helps avoid intermittent DB timeouts on /auth/login.
 # Keep TTL short to limit exposure if an admin changes a password.
@@ -857,11 +861,10 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 def _jwt_secret() -> str:
-    # Keep a hard requirement in production, but don't crash tests/dev when DISABLE_AUTH is on.
+    # Hard requirement when auth is enabled: never sign/verify with a static fallback secret.
     if not AGENT_AUTH_SECRET and not DISABLE_AUTH:
-        # Still allow the app to boot, but login won't work safely without a secret.
-        logging.getLogger(__name__).warning("AGENT_AUTH_SECRET is empty; set it for secure authentication.")
-    return AGENT_AUTH_SECRET or "dev-unsafe-secret"
+        raise RuntimeError("AGENT_AUTH_SECRET is required when DISABLE_AUTH is not set.")
+    return AGENT_AUTH_SECRET
 
 def issue_access_token(username: str, is_admin: bool) -> str:
     now = datetime.utcnow()
@@ -11167,6 +11170,7 @@ webhook_runtime = WebhookRuntime(
     verify_tokens=RUNTIME_WEBHOOK_VERIFY_TOKENS,
     meta_app_secret="" if WEBHOOK_SKIP_SIGNATURE else META_APP_SECRET,
     meta_app_secrets=[] if WEBHOOK_SKIP_SIGNATURE else list(META_APP_SECRETS or []),
+    allow_unsigned_webhooks=bool(WEBHOOK_SKIP_SIGNATURE),
     resolve_webhook_secrets=_resolve_webhook_secrets_for_phone_id,
     # Do NOT block ingress by a static env allowlist; routing is enforced later per-workspace.
     allowed_phone_number_ids=set(),
@@ -11883,8 +11887,9 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         except Exception:
             token = None
         ws_agent = parse_access_token(token or "")
-        # Fallback: allow token via query string when cookies are blocked.
-        if not ws_agent:
+        # Optional fallback: allow token via query string when cookies are blocked.
+        # Disabled by default because query tokens are easier to leak via logs/history.
+        if (not ws_agent) and WS_QUERY_TOKEN_FALLBACK:
             try:
                 qs_token = websocket.query_params.get("token")  # type: ignore[attr-defined]
             except Exception:
@@ -16289,17 +16294,19 @@ async def auth_login(request: Request, response: Response, payload: dict = Body(
         await redis_manager.touch_agent_last_seen(username, workspace=get_current_workspace())
     except Exception:
         pass
-    # Also return access token so clients can fall back to Authorization header
-    # if their environment blocks cookies (some browsers/settings/extensions).
-    out = {"ok": True, "username": username, "is_admin": bool(is_admin), "access_token": access_token, "token_type": "bearer"}
-    # Optional: also return refresh token as a fallback (for clients that can't use cookies).
+    out = {"ok": True, "username": username, "is_admin": bool(is_admin)}
+    # Optional token fallback for environments that cannot use HttpOnly cookies.
+    # Disabled by default because exposing tokens to JS increases XSS impact.
     try:
         wants = bool(payload.get("token_fallback")) or bool(payload.get("use_token_fallback"))
     except Exception:
         wants = False
-    if EXPOSE_REFRESH_TOKEN_FALLBACK and wants:
-        out["refresh_token"] = refresh_token
-        out["refresh_token_ttl_seconds"] = int(REFRESH_TOKEN_TTL_SECONDS)
+    if TOKEN_FALLBACK_ENABLED and wants:
+        out["access_token"] = access_token
+        out["token_type"] = "bearer"
+        if EXPOSE_REFRESH_TOKEN_FALLBACK:
+            out["refresh_token"] = refresh_token
+            out["refresh_token_ttl_seconds"] = int(REFRESH_TOKEN_TTL_SECONDS)
     return out
 
 @app.post("/auth/refresh")
@@ -16307,13 +16314,13 @@ async def auth_refresh(request: Request, response: Response):
     if DISABLE_AUTH:
         return {"ok": True, "username": "admin", "is_admin": True}
     refresh = request.cookies.get(REFRESH_COOKIE_NAME) or ""
-    # Fallback: accept refresh token from header for clients that can't store cookies
-    if not refresh:
+    # Fallback: accept refresh token from header only when token fallback is explicitly enabled.
+    if (not refresh) and TOKEN_FALLBACK_ENABLED:
         try:
             refresh = (request.headers.get("x-refresh-token") or request.headers.get("X-Refresh-Token") or "").strip()
         except Exception:
             refresh = ""
-    if not refresh:
+    if (not refresh) and TOKEN_FALLBACK_ENABLED:
         # Optional: accept JSON body {refresh_token:"..."} (no dependency on cookies)
         try:
             body = await request.json()
@@ -16372,14 +16379,18 @@ async def auth_refresh(request: Request, response: Response):
             _set_auth_cookies(response, request, access_token, refresh)
         out_refresh = refresh
 
-    return {
+    out = {
         "ok": True,
         "username": username,
         "is_admin": bool(is_admin),
-        "access_token": access_token,
-        "token_type": "bearer",
-        **({"refresh_token": out_refresh, "refresh_token_ttl_seconds": int(REFRESH_TOKEN_TTL_SECONDS)} if EXPOSE_REFRESH_TOKEN_FALLBACK else {}),
     }
+    if TOKEN_FALLBACK_ENABLED:
+        out["access_token"] = access_token
+        out["token_type"] = "bearer"
+        if EXPOSE_REFRESH_TOKEN_FALLBACK:
+            out["refresh_token"] = out_refresh
+            out["refresh_token_ttl_seconds"] = int(REFRESH_TOKEN_TTL_SECONDS)
+    return out
 
 @app.post("/auth/logout")
 async def auth_logout(request: Request, response: Response):

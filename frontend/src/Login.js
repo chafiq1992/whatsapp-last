@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import api from './api';
 
+const TOKEN_FALLBACK_ENABLED = String(process.env.REACT_APP_TOKEN_FALLBACK || '').trim() === '1';
+
 export default function Login({ onSuccess }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -25,7 +27,7 @@ export default function Login({ onSuccess }) {
     }
     setLoading(true);
     try {
-      const res = await api.post('/auth/login', { username, password, token_fallback: true });
+      const res = await api.post('/auth/login', { username, password, token_fallback: TOKEN_FALLBACK_ENABLED });
       const user = res?.data?.username || username;
       const isAdmin = !!res?.data?.is_admin;
       const accessToken = res?.data?.access_token;
@@ -33,15 +35,16 @@ export default function Login({ onSuccess }) {
       try {
         if (user) localStorage.setItem('agent_username', user);
         localStorage.setItem('agent_is_admin', isAdmin ? '1' : '0');
-        // Fallback tokens for environments that block cookies (e.g., embedded/3P contexts).
-        // Prefer sessionStorage, but also mirror into localStorage as a durability fallback.
-        if (accessToken) {
-          sessionStorage.setItem('agent_access_token', accessToken);
-          localStorage.setItem('agent_access_token', accessToken);
-        }
-        if (refreshToken) {
-          sessionStorage.setItem('agent_refresh_token', refreshToken);
-          localStorage.setItem('agent_refresh_token', refreshToken);
+        // Optional token fallback for cookie-blocked environments.
+        if (TOKEN_FALLBACK_ENABLED) {
+          if (accessToken) {
+            sessionStorage.setItem('agent_access_token', accessToken);
+            localStorage.setItem('agent_access_token', accessToken);
+          }
+          if (refreshToken) {
+            sessionStorage.setItem('agent_refresh_token', refreshToken);
+            localStorage.setItem('agent_refresh_token', refreshToken);
+          }
         }
       } catch {}
       if (typeof onSuccess === 'function') onSuccess(user, null, isAdmin);

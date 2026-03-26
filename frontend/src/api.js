@@ -9,13 +9,14 @@ const baseUrl =
 
 const api = axios.create({
   baseURL: baseUrl,
-  // Use HttpOnly cookies for auth (access + refresh). This is safer than localStorage tokens.
+  // Use HttpOnly cookies for auth (access + refresh).
   withCredentials: true,
 });
 
+const TOKEN_FALLBACK_ENABLED = String(process.env.REACT_APP_TOKEN_FALLBACK || '').trim() === '1';
+
 function getStoredToken(key) {
-  // Prefer sessionStorage (tab-scoped). Fall back to localStorage for embedded/3P-cookie-blocked contexts.
-  // NOTE: localStorage tokens are less safe than HttpOnly cookies; we use this only as a fallback.
+  if (!TOKEN_FALLBACK_ENABLED) return null;
   try {
     const t = sessionStorage.getItem(key);
     if (t) return t;
@@ -28,12 +29,14 @@ function getStoredToken(key) {
 }
 
 function setStoredToken(key, value) {
+  if (!TOKEN_FALLBACK_ENABLED) return;
   if (!value) return;
   try { sessionStorage.setItem(key, value); } catch {}
   try { localStorage.setItem(key, value); } catch {}
 }
 
 function clearStoredToken(key) {
+  if (!TOKEN_FALLBACK_ENABLED) return;
   try { sessionStorage.removeItem(key); } catch {}
   try { localStorage.removeItem(key); } catch {}
 }
@@ -64,17 +67,18 @@ api.interceptors.request.use((config) => {
       ...(!explicitWs ? { 'X-Workspace': getWorkspace() } : {}),
     };
 
-    // Fallback: attach Authorization header from sessionStorage if present
-    // (used only when cookies are blocked/dropped by the client).
-    try {
-      const t = getStoredToken('agent_access_token');
-      if (t) {
-        config.headers = {
-          ...(config.headers || {}),
-          Authorization: `Bearer ${t}`,
-        };
-      }
-    } catch {}
+    // Optional fallback: attach Authorization header only when explicitly enabled.
+    if (TOKEN_FALLBACK_ENABLED) {
+      try {
+        const t = getStoredToken('agent_access_token');
+        if (t) {
+          config.headers = {
+            ...(config.headers || {}),
+            Authorization: `Bearer ${t}`,
+          };
+        }
+      } catch {}
+    }
 
     if ((config.method || 'get').toLowerCase() === 'get') {
       // Add cache-buster param
@@ -97,24 +101,25 @@ api.interceptors.request.use((config) => {
 let _refreshInFlight = null;
 
 async function refreshSession() {
-  // Prefer header-based refresh token fallback if present (for cookie-blocked clients).
-  let rt = null;
-  rt = getStoredToken('agent_refresh_token');
-  if (rt) {
-    const res = await api.post('/auth/refresh', null, { headers: { 'X-Refresh-Token': rt } });
+  if (TOKEN_FALLBACK_ENABLED) {
+    const rt = getStoredToken('agent_refresh_token');
+    if (rt) {
+      const res = await api.post('/auth/refresh', null, { headers: { 'X-Refresh-Token': rt } });
+      const at = res?.data?.access_token;
+      const nrt = res?.data?.refresh_token;
+      setStoredToken('agent_access_token', at);
+      if (nrt) setStoredToken('agent_refresh_token', nrt);
+      return res;
+    }
+  }
+  // Cookie-based refresh (default path)
+  const res = await api.post('/auth/refresh');
+  if (TOKEN_FALLBACK_ENABLED) {
     const at = res?.data?.access_token;
     const nrt = res?.data?.refresh_token;
     setStoredToken('agent_access_token', at);
-    // Refresh token may not be returned (depends on backend config)
     if (nrt) setStoredToken('agent_refresh_token', nrt);
-    return res;
   }
-  // Cookie-based refresh (normal path)
-  const res = await api.post('/auth/refresh');
-  const at = res?.data?.access_token;
-  const nrt = res?.data?.refresh_token;
-  setStoredToken('agent_access_token', at);
-  if (nrt) setStoredToken('agent_refresh_token', nrt);
   return res;
 }
 
@@ -135,7 +140,7 @@ api.interceptors.response.use(
           await _refreshInFlight;
           return api(original);
         } catch (e) {
-          // If refresh fails (e.g., cookies blocked), drop any header token and force re-login.
+          // If refresh fails, clear fallback tokens (if enabled) and force re-login.
           clearStoredToken('agent_access_token');
           clearStoredToken('agent_refresh_token');
           try { window.location.replace('/login'); } catch {}

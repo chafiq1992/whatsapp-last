@@ -386,16 +386,20 @@
 
   function _checkCountry(cb){
     if(!COUNTRY_RESTRICTION){cb(true);return;}
+    // Skip geo-check inside the Shopify theme editor to prevent freezing
+    if(window.Shopify && window.Shopify.designMode){cb(true);return;}
     var allowed=ALLOWED_COUNTRIES.split(',').map(function(s){return s.trim().toUpperCase();});
     // Try Shopify's built-in country first
     if(window.Shopify && window.Shopify.country){
       cb(allowed.indexOf(window.Shopify.country.toUpperCase())!==-1);return;
     }
-    // Fallback: lightweight geo lookup
+    // Fallback: lightweight geo lookup with timeout
+    var done=false;
+    var timer=setTimeout(function(){if(!done){done=true;cb(true);}},3000);
     fetch('https://ipapi.co/country/',{method:'GET'})
       .then(function(r){return r.text();})
-      .then(function(code){cb(allowed.indexOf(code.trim().toUpperCase())!==-1);})
-      .catch(function(){cb(true);}); // on error, allow
+      .then(function(code){if(!done){done=true;clearTimeout(timer);cb(allowed.indexOf(code.trim().toUpperCase())!==-1);}})
+      .catch(function(){if(!done){done=true;clearTimeout(timer);cb(true);}}); // on error, allow
   }
 
   document.addEventListener("DOMContentLoaded",function(){
@@ -440,6 +444,7 @@
   /* ── Cart Drawer: inject button + hide sticky when drawer is open ── */
   function _watchCartDrawer(){
     var stickyEl=document.getElementById('cod-sticky-wrapper');
+    var _drawerCheckPending=false;
     function inject(){
       var d=document.querySelector('cart-drawer')||document.getElementById('cart-drawer')||document.querySelector('.drawer__inner');
       if(!d||d.querySelector('#cod-drawer-btn'))return;
@@ -448,15 +453,29 @@
       if(f){f.parentNode.insertBefore(b,f);}else{d.appendChild(b);}
     }
     function checkDrawerOpen(){
-      if(!stickyEl)return;
-      var drawer=document.querySelector('cart-drawer')||document.getElementById('cart-drawer');
-      if(!drawer){stickyEl.classList.remove('cod-drawer-open');return;}
-      var isOpen=drawer.classList.contains('is-empty')===false&&(drawer.hasAttribute('open')||drawer.classList.contains('active')||drawer.classList.contains('is-open')||drawer.classList.contains('drawer--is-open')||getComputedStyle(drawer).visibility==='visible');
-      if(isOpen){stickyEl.classList.add('cod-drawer-open');}
-      else{stickyEl.classList.remove('cod-drawer-open');}
+      if(!stickyEl||_drawerCheckPending)return;
+      _drawerCheckPending=true;
+      requestAnimationFrame(function(){
+        _drawerCheckPending=false;
+        var drawer=document.querySelector('cart-drawer')||document.getElementById('cart-drawer');
+        if(!drawer){stickyEl.className=stickyEl.className.replace(/\bcod-drawer-open\b/g,'').trim();return;}
+        var isOpen=drawer.hasAttribute('open')||drawer.classList.contains('active')||drawer.classList.contains('is-open')||drawer.classList.contains('drawer--is-open');
+        if(isOpen&&stickyEl.className.indexOf('cod-drawer-open')===-1){stickyEl.className+=' cod-drawer-open';}
+        else if(!isOpen&&stickyEl.className.indexOf('cod-drawer-open')!==-1){stickyEl.className=stickyEl.className.replace(/\bcod-drawer-open\b/g,'').trim();}
+      });
     }
-    inject();checkDrawerOpen();
-    new MutationObserver(function(){inject();checkDrawerOpen();}).observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class','open','style']});
+    inject();
+    /* Only watch childList for button injection; watch drawer element separately for open state */
+    new MutationObserver(function(){inject();}).observe(document.body,{childList:true,subtree:true});
+    /* Watch drawer element specifically for open/class changes */
+    function _observeDrawer(){
+      var drawer=document.querySelector('cart-drawer')||document.getElementById('cart-drawer');
+      if(drawer){
+        new MutationObserver(function(){checkDrawerOpen();}).observe(drawer,{attributes:true,attributeFilter:['open','class']});
+        checkDrawerOpen();
+      } else { setTimeout(_observeDrawer,1000); }
+    }
+    _observeDrawer();
   }
 
   var BACKEND_URL={{ cod_backend_url | json }};

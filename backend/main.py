@@ -6325,7 +6325,7 @@ class MessageProcessor:
                 "timestamp": datetime.utcnow().isoformat(),
             })
 
-    async def _handle_delivery_status_request(self, user_id: str, ws: str | None = None) -> None:
+    async def _handle_delivery_status_request(self, user_id: str, ws: str | None = None, ctx: dict | None = None) -> None:
         """Fetch latest delivery integration event for this phone and send a status summary."""
         _log = logging.getLogger(__name__)
         ws0 = _coerce_workspace(ws or get_current_workspace())
@@ -6366,54 +6366,76 @@ class MessageProcessor:
                 return True
             return a.endswith(b[-9:]) or b.endswith(a[-9:])
 
+        def _norm_order_ref(v) -> str:
+            s = str(v or "").strip()
+            if not s:
+                return ""
+            if s.startswith("#"):
+                s = s[1:]
+            return s.strip().lower()
+
+        order_refs: set[str] = set()
+        try:
+            c = ctx if isinstance(ctx, dict) else {}
+            for v in (
+                c.get("order_number"),
+                c.get("order_id"),
+                c.get("id"),
+                c.get("order_name"),
+            ):
+                nv = _norm_order_ref(v)
+                if nv:
+                    order_refs.add(nv)
+        except Exception:
+            order_refs = set()
+
         try:
             rows = []
             async with self.db_manager._conn() as db:
                 if self.db_manager.use_postgres:
-                    try:
-                        rows = await db.fetch(
-                            """
-                            SELECT payload, event, received_at
-                            FROM integration_events
-                            WHERE workspace=$1 AND source='delivery'
-                            ORDER BY id DESC
-                            LIMIT 150
-                            """,
-                            ws0,
-                        )
-                    except Exception:
+                    rows = await db.fetch(
+                        """
+                        SELECT payload, event, received_at
+                        FROM integration_events
+                        WHERE workspace=$1 AND source='delivery'
+                        ORDER BY id DESC
+                        LIMIT 200
+                        """,
+                        ws0,
+                    )
+                    if not rows:
                         rows = await db.fetch(
                             """
                             SELECT payload, event, received_at
                             FROM integration_events
                             WHERE source='delivery'
                             ORDER BY id DESC
-                            LIMIT 150
+                            LIMIT 200
                             """
                         )
                 else:
-                    try:
-                        cur = await db.execute(
-                            """
-                            SELECT payload, event, received_at
-                            FROM integration_events
-                            WHERE workspace=? AND source='delivery'
-                            ORDER BY id DESC
-                            LIMIT 150
-                            """,
-                            (ws0,),
-                        )
-                    except Exception:
+                    cur = await db.execute(
+                        """
+                        SELECT payload, event, received_at
+                        FROM integration_events
+                        WHERE workspace=? AND source='delivery'
+                        ORDER BY id DESC
+                        LIMIT 200
+                        """,
+                        (ws0,),
+                    )
+                    rows = await cur.fetchall()
+                    if not rows:
                         cur = await db.execute(
                             """
                             SELECT payload, event, received_at
                             FROM integration_events
                             WHERE source='delivery'
                             ORDER BY id DESC
-                            LIMIT 150
+                            LIMIT 200
                             """
                         )
-                    rows = await cur.fetchall()
+                        rows = await cur.fetchall()
 
             match_payload = None
             match_event = ""
@@ -6421,13 +6443,33 @@ class MessageProcessor:
                 payload_obj = _parse_payload(r["payload"] if isinstance(r, dict) else r[0])
                 if not isinstance(payload_obj, dict):
                     continue
+                order_obj = payload_obj.get("order") if isinstance(payload_obj.get("order"), dict) else {}
                 p_digits = _payload_digits(payload_obj)
                 if user_digits and p_digits and _same_phone(user_digits, p_digits):
                     match_payload = payload_obj
                     match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
                     break
+                if order_refs:
+                    payload_refs = {
+                        _norm_order_ref(payload_obj.get("order_name")),
+                        _norm_order_ref(payload_obj.get("order_id")),
+                        _norm_order_ref(order_obj.get("order_name")),
+                        _norm_order_ref(order_obj.get("id")),
+                    }
+                    payload_refs.discard("")
+                    if payload_refs.intersection(order_refs):
+                        match_payload = payload_obj
+                        match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
+                        break
 
             if not isinstance(match_payload, dict):
+                _log.info(
+                    "delivery_status_lookup no_match ws=%s user=%s order_refs=%s rows=%s",
+                    ws0,
+                    user_digits,
+                    ",".join(sorted(order_refs)) if order_refs else "",
+                    len(rows or []),
+                )
                 await self.process_outgoing_message({
                     "user_id": user_id,
                     "type": "text",
@@ -9815,7 +9857,11 @@ class MessageProcessor:
                                                     str(matched_action.get("to") or "{{ phone }}"),
                                                     fb_ctx_merged,
                                                 ).strip() or user_id
-                                                await self._handle_delivery_status_request(to_id, ws=ws_fb)
+                                                await self._handle_delivery_status_request(
+                                                    to_id,
+                                                    ws=ws_fb,
+                                                    ctx=fb_ctx_merged,
+                                                )
                                             except Exception as exc:
                                                 logging.getLogger(__name__).exception(
                                                     "button_action delivery_status_lookup failed ws=%s user=%s: %s",
@@ -10256,7 +10302,7 @@ class MessageProcessor:
                                 pass
                         elif at in ("delivery_order_status", "delivery_status_lookup", "order_delivery_status"):
                             try:
-                                await self._handle_delivery_status_request(user_id, ws=ws)
+                                await self._handle_delivery_status_request(user_id, ws=ws, ctx=ctx)
                             except Exception:
                                 pass
                         elif at in ("add_tag", "tag"):

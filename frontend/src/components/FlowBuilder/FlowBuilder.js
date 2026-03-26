@@ -126,16 +126,23 @@ const WHATSAPP_EVENTS = [
     { key: 'phone', label: 'Sender Phone' }, { key: 'message_text', label: 'Message Text' },
     { key: 'message_type', label: 'Message Type' }, { key: 'contact_name', label: 'Contact Name' },
     { key: 'timestamp', label: 'Timestamp' }, { key: 'is_group', label: 'Is Group Chat', type: 'boolean' },
+    { key: 'wa_message_id', label: 'WhatsApp Message ID' }, { key: 'reply_to', label: 'Reply To Message ID' },
+    { key: 'button_title', label: 'Button Title' }, { key: 'button_id', label: 'Button ID' },
+    { key: 'list_title', label: 'List Reply Title' }, { key: 'list_id', label: 'List Reply ID' },
+    { key: 'media_type', label: 'Media Type' }, { key: 'media_url', label: 'Media URL' }, { key: 'caption', label: 'Media Caption' },
+    { key: 'conversation_status', label: 'Conversation Status' }, { key: 'minutes_waiting', label: 'Minutes Waiting', type: 'number' },
   ]},
   { id: 'no_reply', label: 'No Agent Reply', cat: 'Messages', mode: 'no_reply', variables: [
     { key: 'phone', label: 'Customer Phone' }, { key: 'contact_name', label: 'Contact Name' },
     { key: 'minutes_waiting', label: 'Minutes Waiting', type: 'number' },
     { key: 'last_message_text', label: 'Last Message' }, { key: 'conversation_status', label: 'Conv. Status' },
+    { key: 'message_type', label: 'Last Message Type' }, { key: 'wa_message_id', label: 'Last Message ID' },
   ]},
   { id: 'interactive', label: 'Button Clicked', cat: 'Interactive', mode: 'button', variables: [
     { key: 'phone', label: 'Customer Phone' }, { key: 'button_title', label: 'Button Title' },
     { key: 'button_id', label: 'Button ID' }, { key: 'contact_name', label: 'Contact Name' },
     { key: 'list_title', label: 'List Selection Title' }, { key: 'list_id', label: 'List Selection ID' },
+    { key: 'message_text', label: 'Rendered Message Text' }, { key: 'timestamp', label: 'Timestamp' }, { key: 'wa_message_id', label: 'Message ID' },
   ]},
   { id: 'first_message', label: 'First-Time Message', cat: 'Messages', mode: 'incoming', variables: [
     { key: 'phone', label: 'Sender Phone' }, { key: 'message_text', label: 'Message Text' },
@@ -156,6 +163,7 @@ const DELIVERY_EVENTS = [
   { id: 'status_change', label: 'Delivery Status Change', cat: 'Status', variables: [
     { key: 'order_id', label: 'Order ID' }, { key: 'tracking_number', label: 'Tracking Number' }, { key: 'tracking_url', label: 'Tracking URL' },
     { key: 'status', label: 'Delivery Status' }, { key: 'previous_status', label: 'Previous Status' },
+    { key: 'prev_status', label: 'Previous Status (Alias)' }, { key: 'event', label: 'Delivery Event' }, { key: 'timestamp', label: 'Event Timestamp' },
     { key: 'customer_phone', label: 'Customer Phone' }, { key: 'customer_name', label: 'Customer Name' },
     { key: 'city', label: 'Delivery City' }, { key: 'address', label: 'Delivery Address' }, { key: 'shipping_zone', label: 'Shipping Zone' },
     { key: 'driver_name', label: 'Driver Name' }, { key: 'driver_phone', label: 'Driver Phone' },
@@ -163,6 +171,14 @@ const DELIVERY_EVENTS = [
     { key: 'cod_amount', label: 'COD Amount', type: 'number' }, { key: 'delivery_fee', label: 'Delivery Fee', type: 'number' },
     { key: 'attempt_count', label: 'Attempt Count', type: 'number' }, { key: 'notes', label: 'Delivery Notes' },
     { key: 'warehouse', label: 'Warehouse / Hub' }, { key: 'delivery_company', label: 'Delivery Company' },
+    { key: 'merchant_id', label: 'Merchant ID' }, { key: 'merchant_name', label: 'Merchant Name' }, { key: 'merchant_phone', label: 'Merchant Phone' },
+    { key: 'order_name', label: 'Order Name' }, { key: 'order_description', label: 'Order Description' }, { key: 'order_address', label: 'Order Address' },
+    { key: 'phone_local', label: 'Local Phone' }, { key: 'cash_amount', label: 'Cash Amount' },
+    { key: 'order.delivery_status', label: 'Order Delivery Status' }, { key: 'order.order_status', label: 'Order Status' },
+    { key: 'order.tags', label: 'Order Tags' }, { key: 'order.fulfillment', label: 'Order Fulfillment' },
+    { key: 'order.scheduled_time', label: 'Scheduled Time' }, { key: 'order.expected_delivery_time', label: 'Expected Delivery Time' },
+    { key: 'order.return_status', label: 'Return Status' }, { key: 'order.partner_code', label: 'Partner Code' },
+    { key: 'order.description', label: 'Order Description (Raw)' }, { key: 'order.special_note', label: 'Order Special Note' },
   ]},
   { id: 'out_for_delivery', label: 'Out for Delivery', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
   { id: 'delivered', label: 'Delivered', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
@@ -184,6 +200,16 @@ DELIVERY_EVENTS.forEach(ev => {
 const ALL_SHOPIFY_VARS = Array.from(new Map(SHOPIFY_EVENTS.flatMap(e => Array.isArray(e.variables) ? e.variables : []).map(v => [v.key, v])).values());
 const ALL_DELIVERY_VARS = Array.from(new Map(DELIVERY_EVENTS.flatMap(e => Array.isArray(e.variables) ? e.variables : []).map(v => [v.key, v])).values());
 const ALL_WHATSAPP_VARS = Array.from(new Map(WHATSAPP_EVENTS.flatMap(e => Array.isArray(e.variables) ? e.variables : []).map(v => [v.key, v])).values());
+const VARIABLE_SOURCE_META = {
+  shopify: { label: 'Shopify', badge: 'bg-blue-50 text-blue-700 border-blue-200' },
+  delivery: { label: 'Delivery', badge: 'bg-sky-50 text-sky-700 border-sky-200' },
+  whatsapp: { label: 'WhatsApp', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+};
+const ALL_VARS_WITH_SOURCE = [
+  ...ALL_SHOPIFY_VARS.map(v => ({ ...v, source: 'shopify' })),
+  ...ALL_DELIVERY_VARS.map(v => ({ ...v, source: 'delivery' })),
+  ...ALL_WHATSAPP_VARS.map(v => ({ ...v, source: 'whatsapp' })),
+];
 
 
 /* Helper: get variables for the active trigger */
@@ -220,7 +246,8 @@ function _getTemplateButtons(tpl) {
     const btnComp = comps.find(c => String(c?.type || '').toUpperCase() === 'BUTTONS');
     if (!btnComp || !Array.isArray(btnComp.buttons)) return [];
     return btnComp.buttons.map((b, i) => ({
-      id: String(b?.id || b?.text || `btn_${i}`).toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24) || `btn_${i}`,
+      // Keep Meta button id/text as-is; backend matcher also normalizes for safety.
+      id: String(b?.id || b?.text || `btn_${i + 1}`).trim(),
       text: String(b?.text || b?.id || `Button ${i + 1}`),
       type: String(b?.type || 'QUICK_REPLY').toUpperCase(),
     }));
@@ -1532,7 +1559,8 @@ function StepPickerPanel({ onClose, onAddStep }) {
 }
 
 function PlatformVariableSelector({ onInsert }) {
-  const [activeTab, setActiveTab] = React.useState('shopify');
+  const [activeSource, setActiveSource] = React.useState('all');
+  const [query, setQuery] = React.useState('');
   const [copied, setCopied] = React.useState(null);
 
   const handleCopyAndInsert = (v) => {
@@ -1543,16 +1571,28 @@ function PlatformVariableSelector({ onInsert }) {
     setTimeout(() => setCopied(null), 1500);
   };
 
+  const filteredVars = React.useMemo(() => {
+    const q = String(query || '').trim().toLowerCase();
+    return ALL_VARS_WITH_SOURCE
+      .filter(v => v.key !== '__custom__')
+      .filter(v => activeSource === 'all' || v.source === activeSource)
+      .filter(v => !q || String(v.label || '').toLowerCase().includes(q) || String(v.key || '').toLowerCase().includes(q))
+      .sort((a, b) => String(a.label || '').localeCompare(String(b.label || '')));
+  }, [activeSource, query]);
+
   const renderVars = (vars) => (
     <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto p-3 bg-slate-50 border-t border-slate-100">
       {vars.filter(v => v.key !== '__custom__').map(v => (
         <button
-          key={v.key}
+          key={`${v.source || 'na'}:${v.key}`}
           type="button"
           onClick={() => handleCopyAndInsert(v)}
           className="relative px-2.5 py-1.5 rounded-full text-[10px] font-medium bg-white text-slate-600 border border-slate-200 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-all shadow-sm flex items-center gap-1"
           title={`Click to copy and insert {{ ${v.key} }}`}
         >
+          <span className={`px-1.5 py-0.5 rounded-full border text-[9px] font-semibold ${VARIABLE_SOURCE_META[v.source || 'shopify']?.badge || 'bg-slate-50 text-slate-600 border-slate-200'}`}>
+            {VARIABLE_SOURCE_META[v.source || 'shopify']?.label || 'Source'}
+          </span>
           {v.label}
           {copied === v.key && (
             <span className="absolute -top-7 left-1/2 -translate-x-1/2 bg-slate-800 text-white text-[10px] px-2 py-0.5 rounded shadow-lg whitespace-nowrap z-10 animate-fade-in">
@@ -1567,14 +1607,27 @@ function PlatformVariableSelector({ onInsert }) {
 
   return (
     <div className="mt-3 border border-slate-200 rounded-xl overflow-hidden shadow-sm bg-white">
-      <div className="flex border-b bg-slate-50/50">
-        <button type="button" onClick={() => setActiveTab('shopify')} className={`flex-1 py-2 text-xs font-semibold flex justify-center items-center gap-1.5 transition-colors ${activeTab==='shopify' ? 'text-blue-600 border-b-2 border-blue-500 bg-white' : 'text-slate-500 hover:text-slate-700'}`}><ShoppingCart className="w-3.5 h-3.5"/> Shopify</button>
-        <button type="button" onClick={() => setActiveTab('delivery')} className={`flex-1 py-2 text-xs font-semibold flex justify-center items-center gap-1.5 transition-colors ${activeTab==='delivery' ? 'text-sky-600 border-b-2 border-sky-500 bg-white' : 'text-slate-500 hover:text-slate-700'}`}><ScanLine className="w-3.5 h-3.5"/> Delivery</button>
-        <button type="button" onClick={() => setActiveTab('whatsapp')} className={`flex-1 py-2 text-xs font-semibold flex justify-center items-center gap-1.5 transition-colors ${activeTab==='whatsapp' ? 'text-green-600 border-b-2 border-green-500 bg-white' : 'text-slate-500 hover:text-slate-700'}`}><MessageSquare className="w-3.5 h-3.5"/> WhatsApp</button>
+      <div className="border-b bg-slate-50/50 p-2 space-y-2">
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            className="w-full border rounded-lg px-2 py-1.5 text-xs bg-white"
+            value={activeSource}
+            onChange={(e) => setActiveSource(e.target.value)}
+          >
+            <option value="all">All Channels</option>
+            <option value="shopify">Shopify</option>
+            <option value="delivery">Delivery</option>
+            <option value="whatsapp">WhatsApp</option>
+          </select>
+          <input
+            className="w-full border rounded-lg px-2 py-1.5 text-xs bg-white"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search variable..."
+          />
+        </div>
       </div>
-      {activeTab === 'shopify' && renderVars(ALL_SHOPIFY_VARS)}
-      {activeTab === 'delivery' && renderVars(ALL_DELIVERY_VARS)}
-      {activeTab === 'whatsapp' && renderVars(ALL_WHATSAPP_VARS)}
+      {renderVars(filteredVars)}
     </div>
   );
 }
@@ -1648,38 +1701,13 @@ function GcsMediaUpload({ label, accept, value, onChange }) {
    VariableSearchPicker  - searchable, source-aware variable picker
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 const ALL_VARIABLES_BY_SOURCE = {
-  whatsapp: [
-    { label: 'Customer name', value: '{{customer_name}}' },
-    { label: 'Customer phone', value: '{{customer_phone}}' },
-    { label: 'Message text', value: '{{message_text}}' },
-    { label: 'Message timestamp', value: '{{message_timestamp}}' },
-    { label: 'Button title clicked', value: '{{button_title}}' },
-    { label: 'List reply title', value: '{{list_reply_title}}' },
-  ],
+  whatsapp: ALL_WHATSAPP_VARS.map(v => ({ label: v.label, value: `{{${v.key}}}` })),
   shopify: [
-    { label: 'Order ID', value: '{{order_id}}' },
-    { label: 'Order number', value: '{{order_number}}' },
-    { label: 'Order status', value: '{{order_status}}' },
-    { label: 'Order total', value: '{{order_total_price}}' },
-    { label: 'Order items count', value: '{{order_items_count}}' },
-    { label: 'Order tracking URL', value: '{{order_tracking_url}}' },
-    { label: 'Product title', value: '{{product_title}}' },
-    { label: 'Product price', value: '{{product_price}}' },
-    { label: 'Discount code', value: '{{discount_code}}' },
-    { label: 'Shopify customer name', value: '{{shopify_customer_name}}' },
-    { label: 'Shopify customer email', value: '{{shopify_customer_email}}' },
-    { label: 'First order date', value: '{{first_order_date}}' },
-    { label: 'Last order date', value: '{{last_order_date}}' },
-    { label: 'Total orders', value: '{{total_orders}}' },
-    { label: 'Total spent', value: '{{total_spent}}' },
-    { label: 'Last order items images', value: '{{last_order_line_items_images}}' },
+    ...ALL_SHOPIFY_VARS.map(v => ({ label: v.label, value: `{{${v.key}}}` })),
+    { label: 'Last order first image', value: '{{last_order_first_image}}' },
+    { label: 'Last order images (csv)', value: '{{last_order_line_items_images}}' },
   ],
-  delivery: [
-    { label: 'Delivery status', value: '{{delivery_status}}' },
-    { label: 'Tracking number', value: '{{tracking_number}}' },
-    { label: 'Estimated delivery', value: '{{estimated_delivery}}' },
-    { label: 'Driver name', value: '{{driver_name}}' },
-  ],
+  delivery: ALL_DELIVERY_VARS.map(v => ({ label: v.label, value: `{{${v.key}}}` })),
 };
 
 function VariableSearchPicker({ onInsert }) {
@@ -1982,7 +2010,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                       <button type="button" className={`flex-1 px-3 py-2 text-xs rounded-lg border font-medium transition-colors ${(d.templateHeaderVariant || 'url') === 'url' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-200'}`} onClick={() => onUpdate({ templateHeaderVariant: 'url', templateHeaderUrl: '' })}>
                         Upload / URL
                       </button>
-                      <button type="button" className={`flex-1 px-3 py-2 text-xs rounded-lg border font-medium transition-colors ${d.templateHeaderVariant === 'last_order_images' ? 'bg-pink-50 border-pink-300 text-pink-700' : 'bg-white border-slate-200 text-slate-500 hover:border-pink-200'}`} onClick={() => onUpdate({ templateHeaderVariant: 'last_order_images', templateHeaderUrl: '{{ last_order_line_items_images }}' })}>
+                      <button type="button" className={`flex-1 px-3 py-2 text-xs rounded-lg border font-medium transition-colors ${d.templateHeaderVariant === 'last_order_images' ? 'bg-pink-50 border-pink-300 text-pink-700' : 'bg-white border-slate-200 text-slate-500 hover:border-pink-200'}`} onClick={() => onUpdate({ templateHeaderVariant: 'last_order_images', templateHeaderUrl: '{{ last_order_first_image }}' })}>
                         Last Order Images
                       </button>
                     </div>

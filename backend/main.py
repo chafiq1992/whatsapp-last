@@ -5763,6 +5763,13 @@ class MessageProcessor:
         meta_app_id_effective = meta_app_id_default or None
         webhook_verify_token_effective = str(VERIFY_TOKEN or "").strip() or None
 
+        # Safety: always allow this workspace's own configured phone_number_id.
+        try:
+            if phone_effective and (not _is_placeholder_phone(str(phone_effective))):
+                allowed_effective.add(str(phone_effective).strip())
+        except Exception:
+            pass
+
         out = {
             "workspace": ws,
             "allowed_phone_number_ids": allowed_effective,
@@ -6282,6 +6289,7 @@ class MessageProcessor:
                             template_name=tname,
                             language=lang,
                             components=comps,
+                            recipient_id=user_id,
                         )
                         wa_response = await self.whatsapp_messenger.send_template_message(
                             user_id,
@@ -7070,97 +7078,129 @@ class MessageProcessor:
             try:
                 env_cfg = await self._get_inbox_env(get_current_workspace())
                 expected_pid = str((env_cfg or {}).get("phone_number_id") or "").strip()
-                if expected_pid and incoming_phone_id and (str(incoming_phone_id).strip() != expected_pid):
-                    async def _ws_for_pid(pid: str) -> str:
-                        try:
-                            p = str(pid or "").strip()
-                            if not p:
-                                return ""
-                            # Prefer shared Redis mapping (multi-instance stable)
+                allowed_ids_cfg = set((env_cfg or {}).get("allowed_phone_number_ids") or set())
+                incoming_pid = str(incoming_phone_id or "").strip()
+                expected_pid_valid = bool(expected_pid and not _is_placeholder_phone(expected_pid))
+
+                if expected_pid_valid and incoming_pid and (incoming_pid != expected_pid):
+                    # If this workspace explicitly allows the incoming phone_number_id, do not hard-fail.
+                    # This supports multi-number migrations / cutovers without dropping inbound button replies.
+                    if incoming_pid in allowed_ids_cfg:
+                        _vlog(
+                            f"⚠️ phone_number_id differs from primary but allowed by workspace allowlist: "
+                            f"workspace={get_current_workspace()} incoming={incoming_pid} primary={expected_pid}"
+                        )
+                        expected_pid = incoming_pid
+                    else:
+                        async def _ws_for_pid(pid: str) -> str:
                             try:
-                                r = getattr(self.redis_manager, "redis_client", None)
-                                if r:
-                                    raw = await r.hget("wa:phone_id_to_workspace", p)
-                                    if raw is not None:
-                                        if isinstance(raw, (bytes, bytearray)):
-                                            raw = raw.decode("utf-8", "ignore")
-                                        ws2 = _coerce_workspace(str(raw or "").strip())
-                                        if ws2:
-                                            return ws2
+                                p = str(pid or "").strip()
+                                if not p:
+                                    return ""
+                                # Prefer shared Redis mapping (multi-instance stable)
+                                try:
+                                    r = getattr(self.redis_manager, "redis_client", None)
+                                    if r:
+                                        raw = await r.hget("wa:phone_id_to_workspace", p)
+                                        if raw is not None:
+                                            if isinstance(raw, (bytes, bytearray)):
+                                                raw = raw.decode("utf-8", "ignore")
+                                            ws2 = _coerce_workspace(str(raw or "").strip())
+                                            if ws2:
+                                                return ws2
+                                except Exception:
+                                    pass
+                                # Next: scan per-workspace inbox_env (DB + env defaults) for a matching phone_number_id.
+                                # This avoids relying on a stale _workspace hint or per-instance memory maps.
+                                try:
+                                    candidates = sorted(list(_all_workspaces_set()))
+                                except Exception:
+                                    candidates = sorted(list(set((WORKSPACES or [DEFAULT_WORKSPACE]))))
+                                for w in candidates:
+                                    ww = _coerce_workspace(w)
+                                    if not ww:
+                                        continue
+                                    try:
+                                        cfg = await self._get_inbox_env(ww)
+                                        pid2 = str((cfg or {}).get("phone_number_id") or "").strip()
+                                        if pid2 and pid2 == p:
+                                            return ww
+                                    except Exception:
+                                        continue
+                                # Prefer scanning runtime configs (avoids stale phone_id map entries).
+                                for _w, _cfg in (RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+                                    try:
+                                        if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
+                                            return _coerce_workspace(_w)
+                                    except Exception:
+                                        continue
+                                for _w, _cfg in (WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
+                                    try:
+                                        if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
+                                            return _coerce_workspace(_w)
+                                    except Exception:
+                                        continue
+                                # Fallback to maps
+                                return _coerce_workspace(
+                                    (RUNTIME_PHONE_ID_TO_WORKSPACE.get(p) or PHONE_ID_TO_WORKSPACE.get(p) or "")
+                                )
+                            except Exception:
+                                return ""
+
+                        if not ENABLE_WEBHOOK_REROUTE:
+                            # Do not silently drop mismatch events in strict mode.
+                            # Re-raise so the durable webhook worker can retry and eventually DLQ.
+                            raise RuntimeError(
+                                f"phone_number_id mismatch (reroute disabled): workspace={get_current_workspace()} "
+                                f"incoming={incoming_phone_id} expected={expected_pid}"
+                            )
+
+                        target_ws = await _ws_for_pid(incoming_phone_id)
+                        if target_ws and target_ws != get_current_workspace():
+                            _vlog(
+                                f"🔁 Rerouting webhook by phone_number_id: incoming={incoming_phone_id} from={get_current_workspace()} to={target_ws}"
+                            )
+                            # Switch workspace context (avoid dropping the webhook due to a bad hint/stale map)
+                            try:
+                                if ws_token is not None:
+                                    _CURRENT_WORKSPACE.reset(ws_token)
                             except Exception:
                                 pass
-                            # Next: scan per-workspace inbox_env (DB + env defaults) for a matching phone_number_id.
-                            # This avoids relying on a stale _workspace hint or per-instance memory maps.
+                            ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(target_ws))
                             try:
-                                candidates = sorted(list(_all_workspaces_set()))
+                                env_cfg = await self._get_inbox_env(get_current_workspace())
+                                expected_pid = str((env_cfg or {}).get("phone_number_id") or "").strip()
+                                allowed_ids_cfg = set((env_cfg or {}).get("allowed_phone_number_ids") or set())
                             except Exception:
-                                candidates = sorted(list(set((WORKSPACES or [DEFAULT_WORKSPACE]))))
-                            for w in candidates:
-                                ww = _coerce_workspace(w)
-                                if not ww:
-                                    continue
-                                try:
-                                    cfg = await self._get_inbox_env(ww)
-                                    pid2 = str((cfg or {}).get("phone_number_id") or "").strip()
-                                    if pid2 and pid2 == p:
-                                        return ww
-                                except Exception:
-                                    continue
-                            # Prefer scanning runtime configs (avoids stale phone_id map entries).
-                            for _w, _cfg in (RUNTIME_WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
-                                try:
-                                    if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
-                                        return _coerce_workspace(_w)
-                                except Exception:
-                                    continue
-                            for _w, _cfg in (WHATSAPP_CONFIG_BY_WORKSPACE or {}).items():
-                                try:
-                                    if str((_cfg or {}).get("phone_number_id") or "").strip() == p:
-                                        return _coerce_workspace(_w)
-                                except Exception:
-                                    continue
-                            # Fallback to maps
-                            return _coerce_workspace(
-                                (RUNTIME_PHONE_ID_TO_WORKSPACE.get(p) or PHONE_ID_TO_WORKSPACE.get(p) or "")
-                            )
-                        except Exception:
-                            return ""
-
-                    if not ENABLE_WEBHOOK_REROUTE:
-                        # Do not silently drop mismatch events in strict mode.
-                        # Re-raise so the durable webhook worker can retry and eventually DLQ.
-                        raise RuntimeError(
-                            f"phone_number_id mismatch (reroute disabled): workspace={get_current_workspace()} "
-                            f"incoming={incoming_phone_id} expected={expected_pid}"
-                        )
-
-                    target_ws = await _ws_for_pid(incoming_phone_id)
-                    if target_ws and target_ws != get_current_workspace():
-                        _vlog(
-                            f"🔁 Rerouting webhook by phone_number_id: incoming={incoming_phone_id} from={get_current_workspace()} to={target_ws}"
-                        )
-                        # Switch workspace context (avoid dropping the webhook due to a bad hint/stale map)
-                        try:
-                            if ws_token is not None:
-                                _CURRENT_WORKSPACE.reset(ws_token)
-                        except Exception:
-                            pass
-                        ws_token = _CURRENT_WORKSPACE.set(_coerce_workspace(target_ws))
-                        try:
-                            env_cfg = await self._get_inbox_env(get_current_workspace())
-                            expected_pid = str((env_cfg or {}).get("phone_number_id") or "").strip()
-                        except Exception:
-                            expected_pid = ""
-                        if expected_pid and incoming_phone_id and (str(incoming_phone_id).strip() != expected_pid):
+                                expected_pid = ""
+                                allowed_ids_cfg = set()
+                            # After reroute: accept either exact primary match or allowlist match.
+                            if incoming_pid and expected_pid and (incoming_pid != expected_pid) and (incoming_pid not in allowed_ids_cfg):
+                                _vlog(
+                                    f"⏭️ Skipping webhook after reroute: phone_number_id mismatch workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
+                                )
+                                return
+                        elif target_ws and target_ws == get_current_workspace():
+                            # Mapping already points here. If allowlist doesn't include this phone id yet, avoid hard-fail
+                            # and continue; allowlist guard below will still enforce when explicitly configured.
                             _vlog(
-                                f"⏭️ Skipping webhook after reroute: phone_number_id mismatch workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
+                                f"⚠️ phone_number_id mapped to current workspace but differs from primary: "
+                                f"workspace={get_current_workspace()} incoming={incoming_pid} primary={expected_pid} (continuing)"
                             )
-                            return
-                    else:
-                        # Treat as a processing failure so the webhook worker can retry and/or DLQ.
-                        raise RuntimeError(
-                            f"phone_number_id mismatch (unroutable): workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
-                        )
+                        else:
+                            # Last-resort fallback: if request explicitly targeted this workspace
+                            # (e.g. /webhook?workspace=... or /webhook/<workspace>), trust the hint
+                            # to avoid dropping valid inbound events during phone-id cutovers.
+                            if hinted_ws_norm and hinted_ws_norm == get_current_workspace():
+                                _vlog(
+                                    f"⚠️ phone_number_id mismatch unroutable; trusting explicit workspace hint: "
+                                    f"workspace={get_current_workspace()} incoming={incoming_pid} primary={expected_pid}"
+                                )
+                            else:
+                                # Treat as a processing failure so the webhook worker can retry and/or DLQ.
+                                raise RuntimeError(
+                                    f"phone_number_id mismatch (unroutable): workspace={get_current_workspace()} incoming={incoming_phone_id} expected={expected_pid}"
+                                )
             except RuntimeError:
                 # Important: do NOT swallow routing failures; the webhook worker must retry and/or DLQ.
                 raise
@@ -8120,7 +8160,7 @@ class MessageProcessor:
                 except Exception:
                     pass
 
-    async def _ensure_template_components_for_send(self, *, template_name: str, language: str, components: list[dict] | None) -> list[dict]:
+    async def _ensure_template_components_for_send(self, *, template_name: str, language: str, components: list[dict] | None, recipient_id: str | None = None) -> list[dict]:
         """Ensure required template components are present before send (best-effort).
 
         Today we:
@@ -8207,6 +8247,33 @@ class MessageProcessor:
             except Exception:
                 return src
 
+        def _pick_first_http_url(raw: str) -> str:
+            """Extract first http(s) URL from plain/comma/json-list strings."""
+            txt = str(raw or "").strip()
+            if not txt:
+                return ""
+            if txt.startswith(("http://", "https://")) and "," not in txt and "[" not in txt:
+                return txt
+            try:
+                parsed = json.loads(txt)
+                if isinstance(parsed, list):
+                    for it in parsed:
+                        s = str(it or "").strip().strip("'\"")
+                        if s.startswith(("http://", "https://")):
+                            return s
+                elif isinstance(parsed, str):
+                    s = str(parsed).strip().strip("'\"")
+                    if s.startswith(("http://", "https://")):
+                        return s
+            except Exception:
+                pass
+            for candidate in re.split(r"[,|\n\r]+", txt):
+                s = str(candidate or "").strip().strip("'\"[]")
+                if s.startswith(("http://", "https://")):
+                    return s
+            m = re.search(r"(https?://[^\s,\]\)]+)", txt)
+            return str(m.group(1)).strip() if m else ""
+
         header_def = next((c for c in comps_def if isinstance(c, dict) and str(c.get("type") or "").upper() == "HEADER"), None) or {}
         header_fmt = str((header_def or {}).get("format") or "").upper()
         if header_fmt in ("IMAGE", "VIDEO", "DOCUMENT"):
@@ -8224,7 +8291,7 @@ class MessageProcessor:
                         if ptype != header_fmt.lower():
                             continue
                         obj = p.get(ptype) if isinstance(p.get(ptype), dict) else {}
-                        link = str((obj or {}).get("link") or "").strip()
+                        link = _pick_first_http_url(str((obj or {}).get("link") or ""))
                         mid = str((obj or {}).get("id") or "").strip()
                         if link or mid:
                             has_header_media = True
@@ -8262,7 +8329,7 @@ class MessageProcessor:
                             pp = dict(p)
                             if str(pp.get("type") or "").lower() == "image":
                                 img = dict(pp.get("image") or {}) if isinstance(pp.get("image"), dict) else {}
-                                link = str(img.get("link") or "").strip()
+                                link = _pick_first_http_url(str(img.get("link") or ""))
                                 mid = str(img.get("id") or "").strip()
                                 if link and not mid:
                                     try:
@@ -8560,6 +8627,30 @@ class MessageProcessor:
             await self.db_manager.delete_setting(self._oc_pending_db_key_global(user_id))
         except Exception:
             return
+
+    def _extract_line_item_image_urls(self, order_obj: dict) -> list[str]:
+        """Collect best-effort HTTP image URLs from Shopify line items."""
+        urls: list[str] = []
+        try:
+            if not isinstance(order_obj, dict):
+                return urls
+            line_items = order_obj.get("line_items") if isinstance(order_obj.get("line_items"), list) else []
+            for li in line_items:
+                if not isinstance(li, dict):
+                    continue
+                for key in ("image_url", "image", "featured_image"):
+                    val = li.get(key)
+                    if isinstance(val, str):
+                        v = val.strip()
+                        if v.startswith(("http://", "https://")) and v not in urls:
+                            urls.append(v)
+                    elif isinstance(val, dict):
+                        v = str(val.get("src") or val.get("url") or val.get("image_url") or "").strip()
+                        if v.startswith(("http://", "https://")) and v not in urls:
+                            urls.append(v)
+        except Exception:
+            return urls
+        return urls
 
     async def _shopify_first_item_image_url(self, data: dict) -> str:
         """Best-effort fetch of an order image URL suitable for template IMAGE headers (cached).
@@ -9156,14 +9247,29 @@ class MessageProcessor:
                         if fb_raw:
                             import json as _json
                             fb_data = _json.loads(fb_raw) if isinstance(fb_raw, (str, bytes, bytearray)) else fb_raw
+                            fb_ctx = {}
+                            if isinstance(fb_data, dict):
+                                if isinstance(fb_data.get("ctx"), dict):
+                                    fb_ctx = fb_data.get("ctx") or {}
+                                fb_data = fb_data.get("button_actions")
                             if isinstance(fb_data, list):
                                 matched_actions = []
+                                rid_norm = self._normalize_button_title(reply_id_fb)
+                                ttl_norm = self._normalize_button_title(reply_title_fb)
                                 for ba in fb_data:
                                     if not isinstance(ba, dict):
                                         continue
                                     ba_id = str(ba.get("button_id") or "").strip()
                                     ba_text = str(ba.get("button_text") or "").strip()
-                                    if (ba_id and ba_id == reply_id_fb) or (ba_text and ba_text.lower() == reply_title_fb.lower()):
+                                    ba_id_norm = self._normalize_button_title(ba_id)
+                                    ba_text_norm = self._normalize_button_title(ba_text)
+                                    id_match = bool(ba_id and (ba_id == reply_id_fb or (rid_norm and rid_norm == ba_id_norm)))
+                                    text_match = bool(ba_text and (ba_text.lower() == reply_title_fb.lower() or (ttl_norm and ttl_norm == ba_text_norm)))
+                                    cross_match = bool(
+                                        (rid_norm and ba_text_norm and rid_norm == ba_text_norm) or
+                                        (ttl_norm and ba_id_norm and ttl_norm == ba_id_norm)
+                                    )
+                                    if id_match or text_match or cross_match:
                                         matched_actions = ba.get("actions") or []
                                         if not matched_actions and ba.get("action"):
                                             matched_actions = [ba.get("action")]
@@ -9176,22 +9282,23 @@ class MessageProcessor:
                                         if not isinstance(matched_action, dict):
                                             continue
                                         fb_at = str(matched_action.get("type") or "").strip().lower()
-                                        fb_ctx = dict(ctx)
+                                        fb_ctx_merged = dict(fb_ctx) if isinstance(fb_ctx, dict) else {}
+                                        fb_ctx_merged.update(dict(ctx))
                                         if fb_at in ("send_text", "send_whatsapp_text"):
-                                            msg = self._render_template(str(matched_action.get("text") or ""), fb_ctx).strip()
+                                            msg = self._render_template(str(matched_action.get("text") or ""), fb_ctx_merged).strip()
                                             if msg:
                                                 await self.process_outgoing_message({
-                                                    "user_id": self._render_template(str(matched_action.get("to") or "{{ phone }}"), fb_ctx).strip() or user_id,
+                                                    "user_id": self._render_template(str(matched_action.get("to") or "{{ phone }}"), fb_ctx_merged).strip() or user_id,
                                                     "type": "text", "from_me": True, "message": msg,
                                                     "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
                                                 })
                                         elif fb_at in ("send_template", "send_whatsapp_template"):
-                                            tname = self._render_template(str(matched_action.get("template_name") or ""), fb_ctx).strip()
+                                            tname = self._render_template(str(matched_action.get("template_name") or ""), fb_ctx_merged).strip()
                                             if tname:
                                                 lang = str(matched_action.get("language") or "en").strip() or "en"
-                                                comps = self._render_template_components(matched_action.get("components") or [], fb_ctx)
+                                                comps = self._render_template_components(matched_action.get("components") or [], fb_ctx_merged)
                                                 await self.process_outgoing_message({
-                                                    "user_id": self._render_template(str(matched_action.get("to") or "{{ phone }}"), fb_ctx).strip() or user_id,
+                                                    "user_id": self._render_template(str(matched_action.get("to") or "{{ phone }}"), fb_ctx_merged).strip() or user_id,
                                                     "type": "text", "from_me": True,
                                                     "message": f"[template] {tname}",
                                                     "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
@@ -9707,7 +9814,22 @@ class MessageProcessor:
                                 if rds:
                                     import json as _json
                                     fb_key = f"flow_builder:button_actions:{_coerce_workspace(ws)}:{user_id}"
-                                    await rds.setex(fb_key, 24 * 3600, _json.dumps(ba_list))
+                                    ctx_snapshot = {}
+                                    try:
+                                        keep_keys = (
+                                            "phone", "user_id", "text", "button_id", "button_title",
+                                            "order_id", "order_number", "customer_name", "total_price",
+                                            "last_order_first_image", "last_order_line_items_images",
+                                            "order_first_item_image_url", "shipping_address", "billing_address",
+                                            "line_items", "order", "payload",
+                                        )
+                                        if isinstance(ctx, dict):
+                                            for kk in keep_keys:
+                                                if kk in ctx:
+                                                    ctx_snapshot[kk] = ctx.get(kk)
+                                    except Exception:
+                                        ctx_snapshot = {}
+                                    await rds.setex(fb_key, 24 * 3600, _json.dumps({"button_actions": ba_list, "ctx": ctx_snapshot}, ensure_ascii=False))
                         except Exception:
                             pass
                 except Exception as exc:
@@ -9809,6 +9931,9 @@ class MessageProcessor:
                 first_item_image = await self._shopify_first_item_image_url(data)
             except Exception:
                 first_item_image = ""
+            line_item_images = self._extract_line_item_image_urls(order_obj)
+            if first_item_image and first_item_image not in line_item_images:
+                line_item_images = [first_item_image] + line_item_images
             # IMPORTANT: no fallback image. If Shopify doesn't provide/resolve an image URL,
             # templates with required IMAGE headers must NOT be sent (WhatsApp will fail).
             ctx = {
@@ -9833,6 +9958,9 @@ class MessageProcessor:
                 "billing_address": billing_address,
                 "line_items": line_items,
                 "order_first_item_image_url": first_item_image,
+                # Aliases used by Flow Builder variable pickers
+                "last_order_first_image": first_item_image,
+                "last_order_line_items_images": ", ".join([u for u in line_item_images if u]),
                 # Full raw payload for power users
                 "payload": data,
             }
@@ -10156,7 +10284,22 @@ class MessageProcessor:
                                 if rds:
                                     import json as _json
                                     fb_key = f"flow_builder:button_actions:{_coerce_workspace(ws)}:{to_id}"
-                                    await rds.setex(fb_key, 24 * 3600, _json.dumps(ba_list))
+                                    ctx_snapshot = {}
+                                    try:
+                                        keep_keys = (
+                                            "phone", "user_id", "text", "button_id", "button_title",
+                                            "order_id", "order_number", "customer_name", "total_price",
+                                            "last_order_first_image", "last_order_line_items_images",
+                                            "order_first_item_image_url", "shipping_address", "billing_address",
+                                            "line_items", "order", "payload",
+                                        )
+                                        if isinstance(ctx, dict):
+                                            for kk in keep_keys:
+                                                if kk in ctx:
+                                                    ctx_snapshot[kk] = ctx.get(kk)
+                                    except Exception:
+                                        ctx_snapshot = {}
+                                    await rds.setex(fb_key, 24 * 3600, _json.dumps({"button_actions": ba_list, "ctx": ctx_snapshot}, ensure_ascii=False))
                                     _log.info("shopify_automation ws=%s rule=%s stored %d button_actions for user=%s", ws, rule_id, len(ba_list), to_id)
                         except Exception:
                             pass

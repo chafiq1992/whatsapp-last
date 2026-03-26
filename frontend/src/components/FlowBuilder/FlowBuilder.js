@@ -38,8 +38,9 @@ const SHOPIFY_EVENTS = [
     { key: 'shipping_address.country', label: 'Shipping Country' }, { key: 'shipping_address.zip', label: 'Shipping ZIP' },
     { key: 'shipping_address.address1', label: 'Shipping Address' }, { key: 'shipping_address.phone', label: 'Shipping Phone' },
     { key: 'billing_address.city', label: 'Billing City' },
-    { key: 'line_items[].title', label: 'Product Titles' }, { key: 'line_items[].quantity', label: 'Item Quantities', type: 'number' },
+    { key: 'line_items[].title', label: 'Product Titles' }, { key: 'line_items[].variant_title', label: 'Variant Names' }, { key: 'line_items[].quantity', label: 'Item Quantities', type: 'number' },
     { key: 'line_items[].price', label: 'Item Prices', type: 'number' }, { key: 'line_items[].sku', label: 'Item SKU' },
+    { key: 'line_items[].variant_id', label: 'Variant IDs' }, { key: 'line_items[].product_id', label: 'Product IDs' },
     { key: 'line_items[].grams', label: 'Item Weight (g)', type: 'number' }, { key: 'line_items[].vendor', label: 'Item Vendor' },
     { key: 'discount_codes[].code', label: 'Discount Codes' }, { key: 'discount_applications', label: 'Discount Applications' },
     { key: 'payment_gateway_names', label: 'Payment Method' },
@@ -60,7 +61,7 @@ const SHOPIFY_EVENTS = [
     { key: 'customer.phone', label: 'Customer Phone' }, { key: 'customer.first_name', label: 'First Name' },
     { key: 'customer.last_name', label: 'Last Name' }, { key: 'customer.email', label: 'Email' },
     { key: 'destination.city', label: 'Destination City' }, { key: 'destination.country', label: 'Destination Country' },
-    { key: 'line_items[].title', label: 'Fulfilled Items' }, { key: 'line_items[].quantity', label: 'Fulfilled Qty', type: 'number' },
+    { key: 'line_items[].title', label: 'Fulfilled Items' }, { key: 'line_items[].variant_title', label: 'Fulfilled Variant Names' }, { key: 'line_items[].quantity', label: 'Fulfilled Qty', type: 'number' },
   ]},
   { id: 'fulfillments/update', label: 'Fulfillment Updated', cat: 'Fulfillments', variables: 'SAME_AS:fulfillments/create' },
   // â”€â”€ Customers â”€â”€
@@ -83,8 +84,8 @@ const SHOPIFY_EVENTS = [
     { key: 'total_discounts', label: 'Total Discounts', type: 'number' },
     { key: 'email', label: 'Email' }, { key: 'phone', label: 'Phone' },
     { key: 'customer.first_name', label: 'First Name' }, { key: 'customer.last_name', label: 'Last Name' },
-    { key: 'line_items[].title', label: 'Cart Items' }, { key: 'line_items[].quantity', label: 'Item Qty', type: 'number' },
-    { key: 'line_items[].price', label: 'Item Price', type: 'number' },
+    { key: 'line_items[].title', label: 'Cart Items' }, { key: 'line_items[].variant_title', label: 'Cart Variant Names' }, { key: 'line_items[].quantity', label: 'Item Qty', type: 'number' },
+    { key: 'line_items[].price', label: 'Item Price', type: 'number' }, { key: 'line_items[].variant_id', label: 'Cart Variant IDs' },
     { key: 'shipping_address.city', label: 'Shipping City' }, { key: 'currency', label: 'Currency' },
   ]},
   // â”€â”€ Draft Orders â”€â”€
@@ -126,7 +127,7 @@ const WHATSAPP_EVENTS = [
     { key: 'phone', label: 'Sender Phone' }, { key: 'message_text', label: 'Message Text' },
     { key: 'message_type', label: 'Message Type' }, { key: 'contact_name', label: 'Contact Name' },
     { key: 'timestamp', label: 'Timestamp' }, { key: 'is_group', label: 'Is Group Chat', type: 'boolean' },
-    { key: 'wa_message_id', label: 'WhatsApp Message ID' }, { key: 'reply_to', label: 'Reply To Message ID' },
+    { key: 'wa_message_id', label: 'WhatsApp Message ID' }, { key: 'reply_to', label: 'Reply To Message ID' }, { key: 'user_id', label: 'User ID' },
     { key: 'button_title', label: 'Button Title' }, { key: 'button_id', label: 'Button ID' },
     { key: 'list_title', label: 'List Reply Title' }, { key: 'list_id', label: 'List Reply ID' },
     { key: 'media_type', label: 'Media Type' }, { key: 'media_url', label: 'Media URL' }, { key: 'caption', label: 'Media Caption' },
@@ -178,7 +179,7 @@ const DELIVERY_EVENTS = [
     { key: 'order.tags', label: 'Order Tags' }, { key: 'order.fulfillment', label: 'Order Fulfillment' },
     { key: 'order.scheduled_time', label: 'Scheduled Time' }, { key: 'order.expected_delivery_time', label: 'Expected Delivery Time' },
     { key: 'order.return_status', label: 'Return Status' }, { key: 'order.partner_code', label: 'Partner Code' },
-    { key: 'order.description', label: 'Order Description (Raw)' }, { key: 'order.special_note', label: 'Order Special Note' },
+    { key: 'order.description', label: 'Order Description (Raw)' }, { key: 'order.special_note', label: 'Order Special Note' }, { key: 'order.customer_phone', label: 'Order Customer Phone' },
   ]},
   { id: 'out_for_delivery', label: 'Out for Delivery', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
   { id: 'delivered', label: 'Delivered', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
@@ -207,6 +208,13 @@ const VARIABLE_SOURCE_META = {
 };
 const ALL_VARS_WITH_SOURCE = [
   ...ALL_SHOPIFY_VARS.map(v => ({ ...v, source: 'shopify' })),
+  { key: 'last_order_first_image', label: 'Last Order First Image', source: 'shopify' },
+  { key: 'last_order_image_1', label: 'Last Order Image 1', source: 'shopify' },
+  { key: 'last_order_image_2', label: 'Last Order Image 2', source: 'shopify' },
+  { key: 'last_order_image_3', label: 'Last Order Image 3', source: 'shopify' },
+  { key: 'last_order_image_4', label: 'Last Order Image 4', source: 'shopify' },
+  { key: 'last_order_image_5', label: 'Last Order Image 5', source: 'shopify' },
+  { key: 'last_order_line_items_images', label: 'Last Order Images (CSV)', source: 'shopify' },
   ...ALL_DELIVERY_VARS.map(v => ({ ...v, source: 'delivery' })),
   ...ALL_WHATSAPP_VARS.map(v => ({ ...v, source: 'whatsapp' })),
 ];
@@ -280,13 +288,14 @@ const ACTION_CATALOG = [
   { id: 'send_audio',        label: 'Send Audio',              icon: <MessageSquare className="w-4 h-4 text-violet-500" />,  type: 'send_audio',                    cat: 'whatsapp', desc: 'Send a voice message or audio file' },
   // â”€â”€ Shopify Actions â”€â”€
   { id: 'tag_customer',      label: 'Tag Customer',            icon: <Zap className="w-4 h-4 text-amber-500" />,             type: 'shopify_tag',                   cat: 'shopify',  desc: 'Add a tag to the Shopify customer' },
+  { id: 'tag_order',         label: 'Tag Shopify Order',       icon: <Tag className="w-4 h-4 text-amber-600" />,             type: 'shopify_order_tag',             cat: 'shopify',  desc: 'Add a tag to the current Shopify order' },
   { id: 'remove_tag',        label: 'Remove Tag',              icon: <Zap className="w-4 h-4 text-orange-500" />,            type: 'shopify_remove_tag',            cat: 'shopify',  desc: 'Remove a tag from the Shopify customer' },
   { id: 'order_confirm',     label: 'Confirmation Flow',       icon: <CheckCircle className="w-4 h-4 text-emerald-500" />,   type: 'order_confirmation_flow',       cat: 'shopify',  desc: 'Multi-step order confirmation with buttons' },
   { id: 'order_status',      label: 'Order Status Lookup',     icon: <Search className="w-4 h-4 text-sky-500" />,            type: 'shopify_order_status',           cat: 'shopify',  desc: 'Look up and send order status to customer' },
   // â”€â”€ Catalog & Orders â”€â”€
   { id: 'catalog_item',      label: 'Send Catalog Item',       icon: <Package className="w-4 h-4 text-indigo-500" />,        type: 'send_catalog_item',             cat: 'catalog',  desc: 'Send a single product from your catalog' },
   { id: 'catalog_set',       label: 'Send Catalog Set',        icon: <Package className="w-4 h-4 text-purple-500" />,        type: 'send_catalog_set',              cat: 'catalog',  desc: 'Send a product set from your catalog' },
-  { id: 'last_order_items',  label: 'Last Order Items + Audio', icon: <ShoppingCart className="w-4 h-4 text-pink-500" />,     type: 'send_last_order_catalog_items', cat: 'catalog',  desc: 'Send last order items as catalog cards + audio' },
+  { id: 'last_order_items',  label: 'Last Order Items',         icon: <ShoppingCart className="w-4 h-4 text-pink-500" />,     type: 'send_last_order_catalog_items', cat: 'catalog',  desc: 'Send last order items as catalog cards' },
   // â”€â”€ Workflow Control â”€â”€
   { id: 'assign_agent',      label: 'Assign to Agent',         icon: <Zap className="w-4 h-4 text-cyan-500" />,              type: 'assign_agent',                  cat: 'workflow', desc: 'Route conversation to a specific agent' },
   { id: 'close_conversation',label: 'Close Conversation',      icon: <Ban className="w-4 h-4 text-slate-500" />,             type: 'close_conversation',            cat: 'workflow', desc: 'Mark conversation as resolved' },
@@ -620,6 +629,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         templateHeaderUrl: config.templateHeaderUrl || '',
         templateHeaderType: config.templateHeaderType || '',
         tag: config.tag || '',
+        orderId: config.orderId || '{{ order_id }}',
         description: config.description || '',
         // Buttons
         buttonsText: config.buttonsText || '',
@@ -642,7 +652,6 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         catalogSetCaption: config.catalogSetCaption || '',
         // Last order items
         lastOrderItemsMax: config.lastOrderItemsMax || 10,
-        lastOrderAudioUrl: config.lastOrderAudioUrl || '',
         // Confirmation flow
         ocEntryGateMode: config.ocEntryGateMode || 'all',
         ocConfirmTitles: config.ocConfirmTitles || 'ØªØ£ÙƒÙŠØ¯ Ø§Ù„Ø·Ù„Ø¨\nØªØ§ÙƒÙŠØ¯ Ø§Ù„Ø·Ù„Ø¨',
@@ -889,6 +898,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     else if (ra === 'send_last_order_catalog_items') { a.to = '{{ phone }}'; a.max_items = Number(cd.replyLastOrderItemsMax || 10); }
     else if (ra === 'shopify_order_status') { /* no config needed */ }
     else if (ra === 'shopify_tag') { a.tag = cd.replyTag || cd.tag || ''; }
+    else if (ra === 'shopify_order_tag') { a.tag = cd.replyTag || cd.tag || ''; a.order_id = cd.replyOrderId || cd.orderId || '{{ order_id }}'; }
     else if (ra === 'shopify_remove_tag') { a.tag = cd.replyTag || cd.tag || ''; }
     else if (ra === 'assign_agent') { a.agent = cd.replyAgent || cd.agent || ''; }
     else if (ra === 'close_conversation' || ra === 'exit') { /* no config */ }
@@ -1005,6 +1015,8 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             actions.push({ type: 'add_tag', tag: d.tag || '' });
           } else if (at === 'shopify_remove_tag') {
             actions.push({ type: 'remove_tag', tag: d.tag || '' });
+          } else if (at === 'shopify_order_tag') {
+            actions.push({ type: 'shopify_order_tag', tag: d.tag || '', order_id: d.orderId || '{{ order_id }}' });
           } else if (at === 'order_confirmation_flow') {
             const listFromLines = s => String(s || '').split(/\r?\n/g).map(x => x.trim()).filter(Boolean);
             const comps = [];
@@ -1034,7 +1046,6 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             actions.push({ type: 'send_catalog_set', to: '{{ phone }}', set_id: d.catalogSetId || '', caption: d.catalogSetCaption || '' });
           } else if (at === 'send_last_order_catalog_items') {
             actions.push({ type: 'send_last_order_catalog_items', to: '{{ phone }}', max_items: Number(d.lastOrderItemsMax || 10) });
-            if (String(d.lastOrderAudioUrl || '').trim()) actions.push({ type: 'send_audio_url', to: '{{ phone }}', audio_url: d.lastOrderAudioUrl });
           } else if (at === 'assign_agent') {
             actions.push({ type: 'assign_agent', agent: d.agent || '' });
           } else if (at === 'close_conversation') {
@@ -1079,6 +1090,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
                       replyTemplateName: cad.templateName || '',
                       replyTemplateLanguage: cad.templateLanguage || '',
                       replyTag: cad.tag || '',
+                      replyOrderId: cad.orderId || cad.order_id || '{{ order_id }}',
                       replyAgent: cad.agent || '',
                       replyAudioUrl: cad.audioUrl || '',
                       replyImageUrl: cad.imageUrl || '',
@@ -1705,6 +1717,11 @@ const ALL_VARIABLES_BY_SOURCE = {
   shopify: [
     ...ALL_SHOPIFY_VARS.map(v => ({ label: v.label, value: `{{${v.key}}}` })),
     { label: 'Last order first image', value: '{{last_order_first_image}}' },
+    { label: 'Last order image 1', value: '{{last_order_image_1}}' },
+    { label: 'Last order image 2', value: '{{last_order_image_2}}' },
+    { label: 'Last order image 3', value: '{{last_order_image_3}}' },
+    { label: 'Last order image 4', value: '{{last_order_image_4}}' },
+    { label: 'Last order image 5', value: '{{last_order_image_5}}' },
     { label: 'Last order images (csv)', value: '{{last_order_line_items_images}}' },
   ],
   delivery: ALL_DELIVERY_VARS.map(v => ({ label: v.label, value: `{{${v.key}}}` })),
@@ -2016,9 +2033,21 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                     </div>
                   )}
                   {d.templateHeaderVariant === 'last_order_images' ? (
-                    <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-xs text-pink-700">
-                      <div className="font-semibold mb-1">Using last order line item images</div>
-                      <div>The header image will automatically use the product images from the customer's last order, just like the Confirmation workflow.</div>
+                    <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-xs text-pink-700 space-y-2">
+                      <div className="font-semibold">Using last order line item images</div>
+                      <div>Choose one image variable to use in the template header.</div>
+                      <select
+                        className="w-full border rounded-lg px-2 py-1.5 text-xs bg-white text-slate-700"
+                        value={d.templateHeaderUrl || '{{ last_order_first_image }}'}
+                        onChange={(e) => onUpdate({ templateHeaderUrl: e.target.value })}
+                      >
+                        <option value="{{ last_order_first_image }}">First image (recommended)</option>
+                        <option value="{{ last_order_image_1 }}">Image 1</option>
+                        <option value="{{ last_order_image_2 }}">Image 2</option>
+                        <option value="{{ last_order_image_3 }}">Image 3</option>
+                        <option value="{{ last_order_image_4 }}">Image 4</option>
+                        <option value="{{ last_order_image_5 }}">Image 5</option>
+                      </select>
                     </div>
                   ) : (
                     <GcsMediaUpload
@@ -2130,8 +2159,17 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           )}
 
           {/* â”€â”€ Tag / Remove Tag â”€â”€ */}
-          {(d.actionType === 'shopify_tag' || d.actionType === 'shopify_remove_tag') && (
-            <div><label className="text-xs font-semibold text-slate-500 mb-1 block">{d.actionType === 'shopify_remove_tag' ? 'Tag to remove' : 'Tag to add'}</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.tag || ''} onChange={(e) => onUpdate({ tag: e.target.value, description: `Tag: ${e.target.value}` })} placeholder="e.g. VIP, confirmed" /></div>
+          {(d.actionType === 'shopify_tag' || d.actionType === 'shopify_remove_tag' || d.actionType === 'shopify_order_tag') && (
+            <div className="space-y-2">
+              <div><label className="text-xs font-semibold text-slate-500 mb-1 block">{d.actionType === 'shopify_remove_tag' ? 'Tag to remove' : 'Tag to add'}</label><input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.tag || ''} onChange={(e) => onUpdate({ tag: e.target.value, description: `Tag: ${e.target.value}` })} placeholder="e.g. VIP, confirmed" /></div>
+              {d.actionType === 'shopify_order_tag' && (
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Order ID variable</label>
+                  <input className="w-full border rounded-lg px-3 py-2 text-sm" value={d.orderId || '{{ order_id }}'} onChange={(e) => onUpdate({ orderId: e.target.value || '{{ order_id }}' })} placeholder="{{ order_id }}" />
+                  <div className="text-[10px] text-slate-400 mt-1">Usually keep this as <span className="font-mono">{'{{ order_id }}'}</span>.</div>
+                </div>
+              )}
+            </div>
           )}
 
           {/* â”€â”€ Order Status Lookup â”€â”€ */}
@@ -2166,7 +2204,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
           {d.actionType === 'send_last_order_catalog_items' && (<>
             <div className="p-3 rounded-lg bg-pink-50 border border-pink-200 text-sm text-pink-700">
               <div className="font-semibold mb-1">Last Order Catalog Items</div>
-              <div className="text-xs">Sends the customer's last order items as interactive catalog product cards. You can add an Audio node below to send a voice note alongside.</div>
+              <div className="text-xs">Sends the customer's last order items as interactive catalog product cards.</div>
             </div>
             <div>
               <label className="text-xs font-semibold text-slate-500 mb-1 block">Max items to send</label>
@@ -2248,7 +2286,14 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                     <textarea className="w-full border rounded-lg px-3 py-1.5 text-sm h-14 resize-none" value={a.replyButtonsText || ''} onChange={(e) => onUpd({ replyButtonsText: e.target.value })} placeholder="Body text..." />
                     <textarea className="w-full border rounded-lg px-3 py-1.5 text-xs h-14 resize-none font-mono" value={a.replyButtonsLines || ''} onChange={(e) => onUpd({ replyButtonsLines: e.target.value })} placeholder={"id|Title per line"} />
                   </>)}
-                  {(ra === 'shopify_tag' || ra === 'shopify_remove_tag') && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTag || ''} onChange={(e) => onUpd({ replyTag: e.target.value })} placeholder="Tag name..." />}
+                  {(ra === 'shopify_tag' || ra === 'shopify_remove_tag' || ra === 'shopify_order_tag') && (
+                    <div className="space-y-1">
+                      <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyTag || ''} onChange={(e) => onUpd({ replyTag: e.target.value })} placeholder="Tag name..." />
+                      {ra === 'shopify_order_tag' && (
+                        <input className="w-full border rounded-lg px-3 py-1.5 text-xs font-mono" value={a.replyOrderId || '{{ order_id }}'} onChange={(e) => onUpd({ replyOrderId: e.target.value || '{{ order_id }}' })} placeholder="{{ order_id }}" />
+                      )}
+                    </div>
+                  )}
                   {ra === 'assign_agent' && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyAgent || ''} onChange={(e) => onUpd({ replyAgent: e.target.value })} placeholder="Agent name..." />}
                   {ra === 'send_last_order_catalog_items' && <input type="number" className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyLastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpd({ replyLastOrderItemsMax: Number(e.target.value) || 10 })} />}
                   {(ra === 'close_conversation' || ra === 'exit' || ra === 'shopify_order_status') && <div className="text-[10px] text-slate-400 italic">No config needed</div>}
@@ -2453,9 +2498,13 @@ export default function FlowBuilder() {
         } else if (at === 'send_audio' || at === 'send_audio_url') {
           actionType = 'send_audio'; label = 'Send Audio';
           extra.audioUrl = a.audio_url || '';
-        } else if (at === 'add_tag' || (at.includes('tag') && !at.includes('remove'))) {
+        } else if (at === 'add_tag' || (at.includes('tag') && !at.includes('remove') && at !== 'shopify_order_tag' && at !== 'add_order_tag')) {
           actionType = 'shopify_tag'; label = 'Tag Customer';
           extra.tag = a.tag || '';
+        } else if (at === 'shopify_order_tag' || at === 'add_order_tag') {
+          actionType = 'shopify_order_tag'; label = 'Tag Shopify Order';
+          extra.tag = a.tag || '';
+          extra.orderId = a.order_id || '{{ order_id }}';
         } else if (at === 'remove_tag' || (at.includes('remove') && at.includes('tag'))) {
           actionType = 'shopify_remove_tag'; label = 'Remove Tag';
           extra.tag = a.tag || '';

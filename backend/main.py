@@ -9061,6 +9061,14 @@ class MessageProcessor:
                                             })
                                         except Exception:
                                             pass
+                                elif at in ("shopify_order_tag", "add_order_tag"):
+                                    tag = str(act.get("tag") or "").strip()
+                                    order_id = self._render_template(str(act.get("order_id") or "{{ order_id }}"), ctx).strip()
+                                    if tag and order_id:
+                                        try:
+                                            await self._shopify_add_order_tag_best_effort(order_id, tag)
+                                        except Exception:
+                                            pass
                             if _once_per_customer and sent_any_message:
                                 try:
                                     await self.db_manager.mark_automation_rule_once_sent(
@@ -9215,12 +9223,22 @@ class MessageProcessor:
                 "phone": user_id,
                 "user_id": user_id,
                 "text": text,
+                "message_text": text,
             }
             # Include button metadata (interactive replies are coerced into text bubbles)
             try:
                 if isinstance(message_obj, dict):
+                    ctx["message_type"] = str(message_obj.get("type") or "")
+                    ctx["timestamp"] = str(message_obj.get("timestamp") or "")
+                    ctx["wa_message_id"] = str(message_obj.get("wa_message_id") or "")
+                    ctx["contact_name"] = str(message_obj.get("contact_name") or "")
                     ctx["button_id"] = str(message_obj.get("interactive_id") or "")
                     ctx["button_title"] = str(message_obj.get("interactive_title") or "")
+                    ctx["list_id"] = str(message_obj.get("interactive_id") or "")
+                    ctx["list_title"] = str(message_obj.get("interactive_title") or "")
+                    ctx["media_type"] = str(message_obj.get("type") or "")
+                    ctx["media_url"] = str(message_obj.get("url") or "")
+                    ctx["caption"] = str(message_obj.get("caption") or "")
             except Exception:
                 pass
 
@@ -9360,6 +9378,14 @@ class MessageProcessor:
                                                     if tag not in tags:
                                                         tags.append(tag)
                                                         await self.db_manager.set_conversation_tags(user_id, tags)
+                                                except Exception:
+                                                    pass
+                                        elif fb_at in ("shopify_order_tag", "add_order_tag"):
+                                            tag = str(matched_action.get("tag") or "").strip()
+                                            order_id = self._render_template(str(matched_action.get("order_id") or "{{ order_id }}"), fb_ctx_merged).strip()
+                                            if tag and order_id:
+                                                try:
+                                                    await self._shopify_add_order_tag_best_effort(order_id, tag)
                                                 except Exception:
                                                     pass
                                         elif fb_at in ("shopify_remove_tag",):
@@ -9806,6 +9832,14 @@ class MessageProcessor:
                                         pass
                                 except Exception:
                                     pass
+                        elif at in ("shopify_order_tag", "add_order_tag"):
+                            tag = str(act.get("tag") or "").strip()
+                            order_id = self._render_template(str(act.get("order_id") or "{{ order_id }}"), ctx).strip()
+                            if tag and order_id:
+                                try:
+                                    await self._shopify_add_order_tag_best_effort(order_id, tag)
+                                except Exception:
+                                    pass
                         # Flow Builder button_actions: store pending reply actions for this user
                         try:
                             ba_list = act.get("button_actions")
@@ -9820,6 +9854,7 @@ class MessageProcessor:
                                             "phone", "user_id", "text", "button_id", "button_title",
                                             "order_id", "order_number", "customer_name", "total_price",
                                             "last_order_first_image", "last_order_line_items_images",
+                                            "last_order_image_1", "last_order_image_2", "last_order_image_3", "last_order_image_4", "last_order_image_5",
                                             "order_first_item_image_url", "shipping_address", "billing_address",
                                             "line_items", "order", "payload",
                                         )
@@ -9939,6 +9974,7 @@ class MessageProcessor:
             ctx = {
                 "topic": topic_norm,
                 "phone": phone_digits,
+                "user_id": phone_digits,
                 "order_id": str(
                     order_obj.get("id")
                     or data.get("id")
@@ -9953,6 +9989,15 @@ class MessageProcessor:
                 ])) or str(shipping_address.get("name") or "").strip() or "",
                 "order_number": order_obj.get("name") or data.get("name") or data.get("order_number") or "",
                 "total_price": order_obj.get("total_price") or data.get("total_price") or "",
+                "subtotal_price": order_obj.get("subtotal_price") or data.get("subtotal_price") or "",
+                "total_discounts": order_obj.get("total_discounts") or data.get("total_discounts") or "",
+                "total_tax": order_obj.get("total_tax") or data.get("total_tax") or "",
+                "currency": order_obj.get("currency") or data.get("currency") or "",
+                "financial_status": order_obj.get("financial_status") or data.get("financial_status") or "",
+                "fulfillment_status": order_obj.get("fulfillment_status") or data.get("fulfillment_status") or "",
+                "tags": order_obj.get("tags") or data.get("tags") or "",
+                "note": order_obj.get("note") or data.get("note") or "",
+                "created_at": order_obj.get("created_at") or data.get("created_at") or "",
                 # Convenient aliases used by the UI dropdowns
                 "shipping_address": shipping_address,
                 "billing_address": billing_address,
@@ -9961,6 +10006,11 @@ class MessageProcessor:
                 # Aliases used by Flow Builder variable pickers
                 "last_order_first_image": first_item_image,
                 "last_order_line_items_images": ", ".join([u for u in line_item_images if u]),
+                "last_order_image_1": (line_item_images[0] if len(line_item_images) > 0 else ""),
+                "last_order_image_2": (line_item_images[1] if len(line_item_images) > 1 else ""),
+                "last_order_image_3": (line_item_images[2] if len(line_item_images) > 2 else ""),
+                "last_order_image_4": (line_item_images[3] if len(line_item_images) > 3 else ""),
+                "last_order_image_5": (line_item_images[4] if len(line_item_images) > 4 else ""),
                 # Full raw payload for power users
                 "payload": data,
             }
@@ -10275,6 +10325,26 @@ class MessageProcessor:
                                 await self.db_manager.inc_automation_rule_stat(str(rule.get("id") or ""), "messages_sent", 1)
                             except Exception:
                                 pass
+                        elif at in ("shopify_order_tag", "add_order_tag"):
+                            tag = str(act.get("tag") or "").strip()
+                            order_id = self._render_template(str(act.get("order_id") or "{{ order_id }}"), ctx).strip()
+                            if tag and order_id:
+                                try:
+                                    await self._shopify_add_order_tag_best_effort(order_id, tag)
+                                except Exception:
+                                    pass
+                        elif at in ("add_tag", "tag"):
+                            # Backward-compatible conversation tagging action
+                            tag = str(act.get("tag") or "").strip()
+                            if tag and to_id:
+                                try:
+                                    meta = await self.db_manager.get_conversation_meta(to_id)
+                                    tags = list((meta or {}).get("tags") or []) if isinstance(meta, dict) else []
+                                    if tag not in tags:
+                                        tags.append(tag)
+                                        await self.db_manager.set_conversation_tags(to_id, tags)
+                                except Exception:
+                                    pass
 
                         # Flow Builder button_actions: store pending reply actions (same as _run_simple_automations)
                         try:
@@ -10290,6 +10360,7 @@ class MessageProcessor:
                                             "phone", "user_id", "text", "button_id", "button_title",
                                             "order_id", "order_number", "customer_name", "total_price",
                                             "last_order_first_image", "last_order_line_items_images",
+                                            "last_order_image_1", "last_order_image_2", "last_order_image_3", "last_order_image_4", "last_order_image_5",
                                             "order_first_item_image_url", "shipping_address", "billing_address",
                                             "line_items", "order", "payload",
                                         )
@@ -10521,6 +10592,7 @@ class MessageProcessor:
             ctx = {
                 "event": event_norm,
                 "phone": phone_digits,
+                "user_id": phone_digits,
                 "status": status_norm,
                 "prev_status": (
                     data.get("prev_status")
@@ -10580,6 +10652,10 @@ class MessageProcessor:
                 # Common aliases for convenience in templates
                 "order_id": order_obj.get("id") or data.get("order_id") or "",
                 "order_name": order_obj.get("order_name") or data.get("order_name") or "",
+                "tracking_number": order_obj.get("tracking_number") or data.get("tracking_number") or "",
+                "tracking_url": order_obj.get("tracking_url") or data.get("tracking_url") or "",
+                "customer_name": order_obj.get("customer_name") or data.get("customer_name") or "",
+                "driver_name": order_obj.get("driver_name") or data.get("driver_name") or "",
                 "city": order_obj.get("city") or data.get("city") or "",
                 "cash_amount": order_obj.get("cash_amount") or data.get("cash_amount") or "",
                 "payload": data,
@@ -12364,6 +12440,7 @@ You ONLY output valid JSON — no markdown, no explanation, no code fences.
 - send_video: Video message. Data: {videoUrl, caption, to:"{{ phone }}"}
 - send_audio: Audio message. Data: {audioUrl, to:"{{ phone }}"}
 - shopify_tag (add_tag): Tag customer. Data: {tag}
+- shopify_order_tag (add_order_tag): Tag Shopify order. Data: {tag, order_id:"{{ order_id }}"}
 - shopify_remove_tag (remove_tag): Remove tag. Data: {tag}
 - order_confirmation_flow: Multi-step confirmation. Data: {templateName, templateLanguage:"en"}
 - shopify_order_status: Look up order status. Data: {}
@@ -12375,9 +12452,9 @@ You ONLY output valid JSON — no markdown, no explanation, no code fences.
 - exit: Stop workflow. Data: {}
 
 ## AVAILABLE VARIABLES (use as {{ variable_key }})
-Shopify: order_number, id, total_price, subtotal_price, total_discounts, currency, financial_status, fulfillment_status, tags, note, customer.phone, customer.first_name, customer.last_name, customer.email, customer.orders_count, customer.total_spent, customer.tags, shipping_address.city, shipping_address.province, shipping_address.country, line_items[].title, line_items[].quantity, line_items[].price, discount_codes[].code, tracking_number, tracking_url, tracking_company
-WhatsApp: phone, message_text, message_type, contact_name, button_title, button_id
-Delivery: order_id, tracking_number, tracking_url, status, previous_status, customer_phone, customer_name, driver_name, driver_phone, city, total_price, cod_amount
+Shopify: order_id, order_number, id, total_price, subtotal_price, total_discounts, total_tax, currency, financial_status, fulfillment_status, tags, note, created_at, customer.phone, customer.first_name, customer.last_name, customer.email, customer.orders_count, customer.total_spent, customer.tags, shipping_address.city, shipping_address.province, shipping_address.country, shipping_address.zip, shipping_address.address1, shipping_address.phone, billing_address.city, line_items[].title, line_items[].variant_title, line_items[].quantity, line_items[].price, line_items[].sku, line_items[].variant_id, line_items[].product_id, discount_codes[].code, tracking_number, tracking_url, tracking_company, last_order_first_image, last_order_image_1, last_order_image_2, last_order_image_3, last_order_image_4, last_order_image_5, last_order_line_items_images
+WhatsApp: phone, user_id, message_text, message_type, contact_name, timestamp, wa_message_id, reply_to, button_title, button_id, list_title, list_id, media_type, media_url, caption, conversation_status, minutes_waiting
+Delivery: order_id, order_name, status, previous_status, prev_status, event, timestamp, tracking_number, tracking_url, customer_phone, customer_name, driver_name, driver_phone, city, order_address, merchant_name, merchant_phone, total_price, cod_amount, delivery_fee, cash_amount, order.delivery_status, order.order_status, order.return_status, order.partner_code
 
 ## NODE TYPES
 - startTrigger: The trigger node. data = {configured:true, source, label, event, description}

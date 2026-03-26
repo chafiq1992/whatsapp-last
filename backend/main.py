@@ -9272,9 +9272,10 @@ class MessageProcessor:
                                 fb_data = fb_data.get("button_actions")
                             if isinstance(fb_data, list):
                                 matched_actions = []
+                                matched_index = -1
                                 rid_norm = self._normalize_button_title(reply_id_fb)
                                 ttl_norm = self._normalize_button_title(reply_title_fb)
-                                for ba in fb_data:
+                                for idx, ba in enumerate(fb_data):
                                     if not isinstance(ba, dict):
                                         continue
                                     ba_id = str(ba.get("button_id") or "").strip()
@@ -9291,10 +9292,25 @@ class MessageProcessor:
                                         matched_actions = ba.get("actions") or []
                                         if not matched_actions and ba.get("action"):
                                             matched_actions = [ba.get("action")]
+                                        matched_index = idx
                                         break
                                 if matched_actions:
-                                    # Remove the pending button_actions (one-shot)
-                                    await rds.delete(fb_key)
+                                    # Keep other button mappings pending for this template send.
+                                    try:
+                                        remaining = [
+                                            item for j, item in enumerate(fb_data)
+                                            if j != matched_index and isinstance(item, dict)
+                                        ]
+                                        if remaining:
+                                            await rds.setex(
+                                                fb_key,
+                                                24 * 3600,
+                                                _json.dumps({"button_actions": remaining, "ctx": fb_ctx}, ensure_ascii=False),
+                                            )
+                                        else:
+                                            await rds.delete(fb_key)
+                                    except Exception:
+                                        pass
                                     # Execute the matched button reply actions sequentially
                                     for matched_action in matched_actions:
                                         if not isinstance(matched_action, dict):
@@ -9348,6 +9364,21 @@ class MessageProcessor:
                                                     "caption": str(matched_action.get("caption") or ""),
                                                     "timestamp": datetime.utcnow().isoformat(), "agent_username": "automation",
                                                 })
+                                        elif fb_at in ("send_last_order_catalog_items", "send_last_order_items", "last_order_catalog_items"):
+                                            to_id = self._render_template(
+                                                str(matched_action.get("to") or "{{ phone }}"),
+                                                fb_ctx_merged,
+                                            ).strip() or user_id
+                                            try:
+                                                max_items = int(
+                                                    matched_action.get("max_items")
+                                                    or matched_action.get("last_order_items_max")
+                                                    or matched_action.get("lastOrderItemsMax")
+                                                    or 10
+                                                )
+                                            except Exception:
+                                                max_items = 10
+                                            await self._send_last_order_catalog_items(to_id, max_items=max_items)
                                         elif fb_at == "close_conversation":
                                             try:
                                                 meta = await self.db_manager.get_conversation_meta(user_id)

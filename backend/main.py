@@ -6114,7 +6114,14 @@ class MessageProcessor:
         return optimistic_message
 
     # -------------------- Shopify helpers --------------------
-    async def _shopify_add_order_tag_best_effort(self, order_id: str, tag: str) -> None:
+    async def _shopify_add_order_tag_best_effort(
+        self,
+        order_id: str,
+        tag: str,
+        *,
+        ws: str | None = None,
+        order_number: str | None = None,
+    ) -> None:
         """Best-effort add a tag to a Shopify order (safe: fetches tags first).
 
         Requires the configured Shopify token to have read_orders + write_orders.
@@ -6122,19 +6129,58 @@ class MessageProcessor:
         _log = logging.getLogger(__name__)
         try:
             oid = str(order_id or "").strip()
+            # Normalize decimal-like ids from accidental float coercion.
+            if re.fullmatch(r"\d+\.\d+", oid or ""):
+                oid = oid.split(".", 1)[0]
             t = str(tag or "").strip()
             if not oid or not oid.isdigit() or not t:
                 _log.info("shopify_tag skipped: oid=%r (isdigit=%s) tag=%r", oid, oid.isdigit() if oid else False, t)
                 return
             import httpx  # type: ignore
-            from .shopify_integration import admin_api_base, _client_args  # type: ignore
+            from .shopify_integration import admin_api_base, _client_args, _resolve_store_from_workspace  # type: ignore
 
-            base = admin_api_base()
+            try:
+                store = _resolve_store_from_workspace(None, _coerce_workspace(ws or get_current_workspace()))
+            except Exception:
+                store = None
+            base = admin_api_base(store)
             async with httpx.AsyncClient(timeout=15.0) as client:
-                get_resp = await client.get(f"{base}/orders/{oid}.json", **_client_args())
+                get_resp = await client.get(f"{base}/orders/{oid}.json", **_client_args(store=store))
                 if get_resp.status_code != 200:
-                    _log.warning("shopify_tag GET order %s failed: status=%s", oid, get_resp.status_code)
-                    return
+                    # Fallback for flows that only carry order name/number or wrong id source.
+                    fallback_order_id = ""
+                    try:
+                        name_ref = str(order_number or "").strip()
+                        if name_ref:
+                            if not name_ref.startswith("#"):
+                                name_ref = f"#{name_ref}"
+                            r2 = await client.get(
+                                f"{base}/orders.json",
+                                params={"status": "any", "limit": 5, "name": name_ref},
+                                **_client_args(store=store),
+                            )
+                            if r2.status_code == 200:
+                                hits = (r2.json() or {}).get("orders") or []
+                                if hits and isinstance(hits[0], dict):
+                                    fallback_order_id = str(hits[0].get("id") or "").strip()
+                                    if fallback_order_id.isdigit():
+                                        oid = fallback_order_id
+                                        get_resp = await client.get(
+                                            f"{base}/orders/{oid}.json",
+                                            **_client_args(store=store),
+                                        )
+                    except Exception:
+                        pass
+                    if get_resp.status_code != 200:
+                        _log.warning(
+                            "shopify_tag GET order %s failed: status=%s ws=%s store=%s order_number=%s",
+                            oid,
+                            get_resp.status_code,
+                            _coerce_workspace(ws or get_current_workspace()),
+                            store,
+                            str(order_number or ""),
+                        )
+                        return
                 order_obj = (get_resp.json() or {}).get("order") or {}
                 current_tags_str = order_obj.get("tags") or ""
                 current_tags = [x.strip() for x in str(current_tags_str).split(",") if x and x.strip()]
@@ -6142,7 +6188,7 @@ class MessageProcessor:
                 if t.lower() not in lower:
                     current_tags.append(t)
                 payload = {"order": {"id": int(oid), "tags": ", ".join(current_tags)}}
-                put_resp = await client.put(f"{base}/orders/{oid}.json", json=payload, **_client_args())
+                put_resp = await client.put(f"{base}/orders/{oid}.json", json=payload, **_client_args(store=store))
                 if put_resp.status_code != 200:
                     _log.warning("shopify_tag PUT order %s failed: status=%s body=%s", oid, put_resp.status_code, put_resp.text[:300])
                     return
@@ -6372,6 +6418,12 @@ class MessageProcessor:
                 return ""
             if s.startswith("#"):
                 s = s[1:]
+            # Normalize decimal-like refs emitted by some payload transforms: "141963.1" -> "141963"
+            try:
+                if re.fullmatch(r"\d+\.\d+", s):
+                    s = s.split(".", 1)[0]
+            except Exception:
+                pass
             return s.strip().lower()
 
         order_refs: set[str] = set()
@@ -6453,14 +6505,77 @@ class MessageProcessor:
                     payload_refs = {
                         _norm_order_ref(payload_obj.get("order_name")),
                         _norm_order_ref(payload_obj.get("order_id")),
+                        _norm_order_ref(payload_obj.get("partner_code")),
+                        _norm_order_ref(payload_obj.get("tracking_number")),
+                        _norm_order_ref(payload_obj.get("return_number")),
                         _norm_order_ref(order_obj.get("order_name")),
                         _norm_order_ref(order_obj.get("id")),
+                        _norm_order_ref(order_obj.get("partner_code")),
+                        _norm_order_ref(order_obj.get("tracking_number")),
+                        _norm_order_ref(order_obj.get("return_number")),
                     }
                     payload_refs.discard("")
                     if payload_refs.intersection(order_refs):
                         match_payload = payload_obj
                         match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
                         break
+
+            # Second pass: if workspace-scoped rows exist but didn't match, try all workspaces.
+            if not isinstance(match_payload, dict):
+                try:
+                    rows_all = []
+                    async with self.db_manager._conn() as db:
+                        if self.db_manager.use_postgres:
+                            rows_all = await db.fetch(
+                                """
+                                SELECT payload, event, received_at
+                                FROM integration_events
+                                WHERE source='delivery'
+                                ORDER BY id DESC
+                                LIMIT 400
+                                """
+                            )
+                        else:
+                            cur_all = await db.execute(
+                                """
+                                SELECT payload, event, received_at
+                                FROM integration_events
+                                WHERE source='delivery'
+                                ORDER BY id DESC
+                                LIMIT 400
+                                """
+                            )
+                            rows_all = await cur_all.fetchall()
+                    for r in rows_all or []:
+                        payload_obj = _parse_payload(r["payload"] if isinstance(r, dict) else r[0])
+                        if not isinstance(payload_obj, dict):
+                            continue
+                        order_obj = payload_obj.get("order") if isinstance(payload_obj.get("order"), dict) else {}
+                        p_digits = _payload_digits(payload_obj)
+                        if user_digits and p_digits and _same_phone(user_digits, p_digits):
+                            match_payload = payload_obj
+                            match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
+                            break
+                        if order_refs:
+                            payload_refs = {
+                                _norm_order_ref(payload_obj.get("order_name")),
+                                _norm_order_ref(payload_obj.get("order_id")),
+                                _norm_order_ref(payload_obj.get("partner_code")),
+                                _norm_order_ref(payload_obj.get("tracking_number")),
+                                _norm_order_ref(payload_obj.get("return_number")),
+                                _norm_order_ref(order_obj.get("order_name")),
+                                _norm_order_ref(order_obj.get("id")),
+                                _norm_order_ref(order_obj.get("partner_code")),
+                                _norm_order_ref(order_obj.get("tracking_number")),
+                                _norm_order_ref(order_obj.get("return_number")),
+                            }
+                            payload_refs.discard("")
+                            if payload_refs.intersection(order_refs):
+                                match_payload = payload_obj
+                                match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
+                                break
+                except Exception:
+                    pass
 
             if not isinstance(match_payload, dict):
                 _log.info(
@@ -7289,7 +7404,8 @@ class MessageProcessor:
                 tag = str(message.get("shopify_tag_on_sent") or "").strip()
                 _vlog(f"shopify_tag_on_sent check: order_id={order_id!r} tag={tag!r} user={user_id}")
                 if order_id and tag:
-                    asyncio.create_task(self._shopify_add_order_tag_best_effort(order_id, tag))
+                    ws_msg = _coerce_workspace(str(message.get("workspace") or get_current_workspace()))
+                    asyncio.create_task(self._shopify_add_order_tag_best_effort(order_id, tag, ws=ws_msg))
             except Exception:
                 pass
             
@@ -7335,7 +7451,8 @@ class MessageProcessor:
                 fail_tag = str(message.get("shopify_tag_on_fail") or "").strip()
                 _vlog(f"shopify_tag_on_fail check: order_id={fail_order_id!r} tag={fail_tag!r} user={user_id}")
                 if fail_order_id and fail_tag:
-                    asyncio.create_task(self._shopify_add_order_tag_best_effort(fail_order_id, fail_tag))
+                    ws_msg = _coerce_workspace(str(message.get("workspace") or get_current_workspace()))
+                    asyncio.create_task(self._shopify_add_order_tag_best_effort(fail_order_id, fail_tag, ws=ws_msg))
             except Exception:
                 pass
         finally:
@@ -7764,7 +7881,9 @@ class MessageProcessor:
                     if meta:
                         asyncio.create_task(
                             self._shopify_add_order_tag_best_effort(
-                                meta["shopify_order_id"], meta["shopify_tag_on_fail"]
+                                meta["shopify_order_id"],
+                                meta["shopify_tag_on_fail"],
+                                ws=get_current_workspace(),
                             )
                         )
                 except Exception:
@@ -9508,7 +9627,12 @@ class MessageProcessor:
                                     order_id = self._render_template(str(act.get("order_id") or "{{ order_id }}"), ctx).strip()
                                     if tag and order_id:
                                         try:
-                                            await self._shopify_add_order_tag_best_effort(order_id, tag)
+                                            await self._shopify_add_order_tag_best_effort(
+                                                order_id,
+                                                tag,
+                                                ws=ws,
+                                                order_number=str(ctx.get("order_number") or ""),
+                                            )
                                         except Exception:
                                             pass
                             if _once_per_customer and sent_any_message:
@@ -9885,7 +10009,12 @@ class MessageProcessor:
                                             order_id = self._render_template(str(matched_action.get("order_id") or "{{ order_id }}"), fb_ctx_merged).strip()
                                             if tag and order_id:
                                                 try:
-                                                    await self._shopify_add_order_tag_best_effort(order_id, tag)
+                                                    await self._shopify_add_order_tag_best_effort(
+                                                        order_id,
+                                                        tag,
+                                                        ws=ws_fb,
+                                                        order_number=str(fb_ctx_merged.get("order_number") or ""),
+                                                    )
                                                 except Exception:
                                                     pass
                                         elif fb_at in ("shopify_remove_tag",):
@@ -10342,7 +10471,12 @@ class MessageProcessor:
                             order_id = self._render_template(str(act.get("order_id") or "{{ order_id }}"), ctx).strip()
                             if tag and order_id:
                                 try:
-                                    await self._shopify_add_order_tag_best_effort(order_id, tag)
+                                    await self._shopify_add_order_tag_best_effort(
+                                        order_id,
+                                        tag,
+                                        ws=ws,
+                                        order_number=str(ctx.get("order_number") or ""),
+                                    )
                                 except Exception:
                                     pass
                         # Flow Builder button_actions: store pending reply actions for this user
@@ -10476,17 +10610,21 @@ class MessageProcessor:
                 line_item_images = [first_item_image] + line_item_images
             # IMPORTANT: no fallback image. If Shopify doesn't provide/resolve an image URL,
             # templates with required IMAGE headers must NOT be sent (WhatsApp will fail).
+            resolved_order_id = str(
+                (
+                    data.get("order_id")
+                    or ((data.get("order") or {}).get("id") if isinstance(data.get("order"), dict) else "")
+                    or ((data.get("fulfillment") or {}).get("order_id") if isinstance(data.get("fulfillment"), dict) else "")
+                    or order_obj.get("id")
+                    or data.get("id")
+                    or ""
+                )
+            )
             ctx = {
                 "topic": topic_norm,
                 "phone": phone_digits,
                 "user_id": phone_digits,
-                "order_id": str(
-                    order_obj.get("id")
-                    or data.get("id")
-                    or data.get("order_id")
-                    or ((data.get("order") or {}).get("id") if isinstance(data.get("order"), dict) else "")
-                    or ""
-                ),
+                "order_id": resolved_order_id,
                 "customer": (order_obj.get("customer") if isinstance(order_obj.get("customer"), dict) else (data.get("customer") if isinstance(data.get("customer"), dict) else {})),
                 "customer_name": " ".join(filter(None, [
                     str((order_obj.get("customer") or {}).get("first_name") or "").strip(),
@@ -10835,7 +10973,12 @@ class MessageProcessor:
                             order_id = self._render_template(str(act.get("order_id") or "{{ order_id }}"), ctx).strip()
                             if tag and order_id:
                                 try:
-                                    await self._shopify_add_order_tag_best_effort(order_id, tag)
+                                    await self._shopify_add_order_tag_best_effort(
+                                        order_id,
+                                        tag,
+                                        ws=ws,
+                                        order_number=str(ctx.get("order_number") or ""),
+                                    )
                                 except Exception:
                                     pass
                         elif at in ("add_tag", "tag"):

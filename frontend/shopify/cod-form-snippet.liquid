@@ -349,23 +349,46 @@
 <script>
 (function(){
   // Move primary inline button below Add To Cart (product pages)
-  // On cart pages, inject button into cart form
+  // On cart pages, dynamically create a COD button
   document.addEventListener("DOMContentLoaded", function() {
-    var codBtn = document.getElementById("cod-open-btn");
-    if (!codBtn) return;
-
     var isCartPage = /\/cart\b/.test(window.location.pathname);
+
     if (isCartPage) {
-      // Cart page: inject button into the cart form or after cart actions
-      var cartForm = document.querySelector('form[action="/cart"]') || document.querySelector('.cart__footer') || document.querySelector('.cart-footer');
-      if (cartForm) {
-        cartForm.appendChild(codBtn);
+      // Cart page: create and inject a COD button dynamically
+      var existingBtn = document.getElementById('cod-open-btn');
+      var cartBtn = existingBtn || document.createElement('button');
+      if (!existingBtn) {
+        cartBtn.type = 'button';
+        cartBtn.id = 'cod-cart-btn';
+        cartBtn.className = 'cod-btn cod-btn-primary';
+        cartBtn.style.cssText = 'width:100%;margin-top:12px;margin-bottom:12px;background:#059669;color:#fff;padding:16px 24px;font-size:16px;font-weight:700;border:none;border-radius:12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 14px rgba(5,150,105,.25);font-family:inherit';
+        cartBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg> اطلب الآن — الدفع عند الاستلام';
+        cartBtn.onclick = function(){ window.__codForm.open(); };
+      }
+      // Try multiple common cart selectors
+      var cartTarget = document.querySelector('[action="/cart"] [type="submit"]')
+        || document.querySelector('form[action="/cart"]')
+        || document.querySelector('.cart__footer')
+        || document.querySelector('.cart-footer')
+        || document.querySelector('.cart__ctas')
+        || document.querySelector('.cart__blocks')
+        || document.querySelector('#cart')
+        || document.querySelector('.cart');
+      if (cartTarget) {
+        cartTarget.parentNode.insertBefore(cartBtn, cartTarget.nextSibling);
+      } else {
+        // Fallback: append to main content
+        var main = document.querySelector('main') || document.body;
+        main.appendChild(cartBtn);
       }
     } else {
       // Product page: place below Add To Cart
-      var addToCartBtn = document.querySelector('.product-form__submit') || document.querySelector('button[name="add"]');
-      if (addToCartBtn && addToCartBtn.parentNode) {
-        addToCartBtn.parentNode.insertBefore(codBtn, addToCartBtn.nextSibling);
+      var codBtn = document.getElementById('cod-open-btn');
+      if (codBtn) {
+        var addToCartBtn = document.querySelector('.product-form__submit') || document.querySelector('button[name="add"]');
+        if (addToCartBtn && addToCartBtn.parentNode) {
+          addToCartBtn.parentNode.insertBefore(codBtn, addToCartBtn.nextSibling);
+        }
       }
     }
   });
@@ -472,21 +495,30 @@
 
   // ── Update modal header to show item count ──
   function _updateModalHeader() {
+    var isCartPage = /\/cart\b/.test(window.location.pathname);
     var badge = document.querySelector('.cod-qty-badge');
-    var totalQty = 0;
-    _lineItems.forEach(function(li){ totalQty += li.quantity; });
-    if (badge) badge.textContent = totalQty || 1;
+    var titleEl = document.querySelector('.cod-product-title');
 
-    // Update summary prices — we don't have all prices client-side for cart items,
-    // so show the item count instead and let total be computed server-side
-    var totalItems = _lineItems.length;
-    if (totalItems > 1) {
-      var titleEl = document.querySelector('.cod-product-title');
-      if (titleEl) {
-        var isCartPage = /\/cart\b/.test(window.location.pathname);
-        if (isCartPage) {
-          titleEl.textContent = totalItems + ' منتجات في السلة';
+    if (isCartPage) {
+      // Cart page: show total item count
+      var totalQty = 0;
+      _lineItems.forEach(function(li){ totalQty += li.quantity; });
+      if (badge) badge.textContent = totalQty || 1;
+      if (titleEl) titleEl.textContent = _lineItems.length + ' منتجات في السلة';
+    } else {
+      // Product page: keep badge at 1 (current product), show cart items note
+      if (badge) badge.textContent = 1;
+      var cartCount = _cartItems.length;
+      if (cartCount > 0 && titleEl) {
+        // Add a subtitle showing cart items are included
+        var subtitle = document.querySelector('.cod-cart-included-note');
+        if (!subtitle) {
+          subtitle = document.createElement('p');
+          subtitle.className = 'cod-cart-included-note';
+          subtitle.style.cssText = 'color:#059669;font-size:12px;margin:4px 0 0;font-weight:600';
+          titleEl.parentNode.insertBefore(subtitle, titleEl.nextSibling);
         }
+        subtitle.textContent = '+ ' + cartCount + ' منتجات من السلة سيتم تضمينها';
       }
     }
   }

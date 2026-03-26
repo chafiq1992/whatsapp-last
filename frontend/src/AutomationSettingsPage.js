@@ -134,6 +134,13 @@ export default function AutomationSettingsPage() {
     webhook_url_example: '',
   });
   const [savingShopify, setSavingShopify] = useState(false);
+  const [integrationStats, setIntegrationStats] = useState({
+    workspace: '',
+    hours: 72,
+    counts: {},
+    recent_failed: [],
+  });
+  const [loadingIntegrationStats, setLoadingIntegrationStats] = useState(false);
 
   const selectedWsObj = useMemo(() => {
     const ws = normalizeWorkspaceId(workspace);
@@ -282,8 +289,40 @@ export default function AutomationSettingsPage() {
     }));
   };
 
+  const loadIntegrationStats = async (ws, hours = 72) => {
+    setLoadingIntegrationStats(true);
+    try {
+      const res = await api.get('/admin/integration-events/stats', {
+        params: { hours: Number(hours) || 72 },
+        headers: { 'X-Workspace': normalizeWorkspaceId(ws) },
+      });
+      const d = res?.data || {};
+      setIntegrationStats({
+        workspace: String(d.workspace || normalizeWorkspaceId(ws) || ''),
+        hours: Number(d.hours || hours || 72),
+        counts: d.counts && typeof d.counts === 'object' ? d.counts : {},
+        recent_failed: Array.isArray(d.recent_failed) ? d.recent_failed : [],
+      });
+    } catch (e) {
+      setIntegrationStats({
+        workspace: String(normalizeWorkspaceId(ws) || ''),
+        hours: Number(hours || 72),
+        counts: {},
+        recent_failed: [],
+      });
+      setError(getApiErrorMessage(e, 'Failed to load integration stats.'));
+    } finally {
+      setLoadingIntegrationStats(false);
+    }
+  };
+
   const refreshAllForWorkspace = async (ws) => {
-    await Promise.allSettled([loadCatalogFilters(ws), loadInboxEnv(ws), loadShopifyWebhookAuth(ws)]);
+    await Promise.allSettled([
+      loadCatalogFilters(ws),
+      loadInboxEnv(ws),
+      loadShopifyWebhookAuth(ws),
+      loadIntegrationStats(ws),
+    ]);
   };
 
   useEffect(() => {
@@ -1159,6 +1198,61 @@ export default function AutomationSettingsPage() {
                     >
                       {savingShopify ? 'Saving…' : 'Save Shopify webhook auth'}
                     </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border rounded bg-white">
+                <div className="px-3 py-2 border-b text-sm font-medium flex items-center justify-between">
+                  <span>Integration health & debug</span>
+                  <button
+                    type="button"
+                    className="text-xs px-2 py-1 rounded border bg-white hover:bg-slate-50 disabled:opacity-50"
+                    disabled={loadingIntegrationStats}
+                    onClick={() => loadIntegrationStats(workspace, integrationStats?.hours || 72)}
+                  >
+                    {loadingIntegrationStats ? 'Refreshing…' : 'Refresh'}
+                  </button>
+                </div>
+                <div className="p-3 space-y-3">
+                  <div className="text-[11px] text-slate-500">
+                    Every Shopify/Delivery webhook is stored in <span className="font-mono">integration_events</span> with processing status.
+                    This keeps a durable verification trail even if downstream automation fails.
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {Object.entries(integrationStats?.counts || {}).length === 0 && (
+                      <div className="text-xs text-slate-500">No integration events found in the selected window.</div>
+                    )}
+                    {Object.entries(integrationStats?.counts || {}).map(([source, stats]) => {
+                      const received = Number(stats?.received || 0);
+                      const processed = Number(stats?.processed || 0);
+                      const failed = Number(stats?.failed || 0);
+                      return (
+                        <div key={source} className="border rounded p-2">
+                          <div className="text-xs font-semibold mb-1 capitalize">{source}</div>
+                          <div className="text-xs text-slate-700">Received: <span className="font-mono">{received}</span></div>
+                          <div className="text-xs text-emerald-700">Processed: <span className="font-mono">{processed}</span></div>
+                          <div className="text-xs text-rose-700">Failed: <span className="font-mono">{failed}</span></div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold mb-1">Recent failures</div>
+                    {Array.isArray(integrationStats?.recent_failed) && integrationStats.recent_failed.length > 0 ? (
+                      <div className="max-h-44 overflow-auto border rounded">
+                        {(integrationStats.recent_failed || []).map((row, idx) => (
+                          <div key={String(row?.id || `${row?.source || 'src'}-${idx}`)} className="px-2 py-1 border-b last:border-b-0 text-[11px]">
+                            <div className="font-mono text-slate-700">
+                              #{row?.id} • {row?.source || 'unknown'} • {row?.event || 'unknown'}
+                            </div>
+                            <div className="text-rose-700 break-all">{String(row?.process_error || '').slice(0, 240) || 'Unknown error'}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-slate-500">No recent failed integration events.</div>
+                    )}
                   </div>
                 </div>
               </div>

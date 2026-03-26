@@ -438,6 +438,35 @@ async def _get_effective_shopify_webhook_secret(ws: str) -> tuple[str, str]:
         return env_val, "env"
     return "", "missing"
 
+
+def _delivery_webhook_secret_env(ws: str) -> str:
+    """Per-workspace delivery webhook secret -> global fallback."""
+    w = _coerce_workspace(ws)
+    try:
+        return (
+            os.getenv(f"DELIVERY_WEBHOOK_SECRET_{w.upper()}", "")
+            or os.getenv("DELIVERY_WEBHOOK_SECRET", "")
+        ).strip()
+    except Exception:
+        return (os.getenv("DELIVERY_WEBHOOK_SECRET", "") or "").strip()
+
+
+def _extract_hmac256_hex(sig_header: str) -> str:
+    raw = str(sig_header or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    if low.startswith("sha256="):
+        raw = raw.split("=", 1)[1].strip()
+    raw = raw.strip().strip('"').strip("'").lower()
+    if len(raw) != 64:
+        return ""
+    try:
+        int(raw, 16)
+    except Exception:
+        return ""
+    return raw
+
 async def _get_effective_catalog_id(workspace: str | None = None) -> str:
     """Resolve catalog_id for a workspace (DB override -> env per-workspace -> global env)."""
     ws = _coerce_workspace(workspace or get_current_workspace())
@@ -2980,6 +3009,25 @@ class DatabaseManager:
                 );
                 CREATE INDEX IF NOT EXISTS idx_webhook_events_due
                     ON webhook_events (status, datetime(next_attempt_at), id);
+
+                -- Partner integration events (Shopify/Delivery): append-only audit log
+                CREATE TABLE IF NOT EXISTS integration_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace       TEXT NOT NULL,
+                    source          TEXT NOT NULL,  -- shopify | delivery | other
+                    event           TEXT NOT NULL,
+                    external_id     TEXT,
+                    payload         TEXT NOT NULL,
+                    headers         TEXT,
+                    process_status  TEXT NOT NULL DEFAULT 'received', -- received | processed | failed
+                    process_error   TEXT,
+                    received_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    processed_at    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_integration_events_recent
+                    ON integration_events (workspace, source, process_status, received_at);
+                CREATE INDEX IF NOT EXISTS idx_integration_events_external
+                    ON integration_events (workspace, source, external_id);
                 """
             if self.use_postgres:
                 script = base_script.replace(
@@ -4796,6 +4844,179 @@ class DatabaseManager:
                     await db.commit()
             except Exception:
                 return
+
+    # -- Partner integration event log (durable audit) --
+    async def create_integration_event(
+        self,
+        *,
+        workspace: str,
+        source: str,
+        event: str,
+        payload: dict,
+        headers: dict | None = None,
+        external_id: str | None = None,
+    ) -> Optional[int]:
+        ws = _coerce_workspace(workspace or get_current_workspace())
+        src = str(source or "").strip().lower() or "other"
+        ev = str(event or "").strip() or "unknown"
+        ext = str(external_id or "").strip() or None
+        payload_json = json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=False)
+        headers_json = json.dumps(headers if isinstance(headers, dict) else {}, ensure_ascii=False)
+        async with self._conn() as db:
+            if self.use_postgres:
+                row = await db.fetchrow(
+                    """
+                    INSERT INTO integration_events
+                        (workspace, source, event, external_id, payload, headers, process_status, received_at)
+                    VALUES
+                        ($1, $2, $3, $4, $5, $6, 'received', NOW())
+                    RETURNING id
+                    """,
+                    ws,
+                    src,
+                    ev,
+                    ext,
+                    payload_json,
+                    headers_json,
+                )
+                return int(row["id"]) if row and ("id" in row) else None
+            cur = await db.execute(
+                """
+                INSERT INTO integration_events
+                    (workspace, source, event, external_id, payload, headers, process_status, received_at)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, 'received', CURRENT_TIMESTAMP)
+                """,
+                (ws, src, ev, ext, payload_json, headers_json),
+            )
+            await db.commit()
+            try:
+                return int(cur.lastrowid)
+            except Exception:
+                return None
+
+    async def mark_integration_event_processed(self, event_id: int) -> None:
+        async with self._conn() as db:
+            if self.use_postgres:
+                await db.execute(
+                    """
+                    UPDATE integration_events
+                    SET process_status='processed',
+                        process_error=NULL,
+                        processed_at=NOW()
+                    WHERE id=$1
+                    """,
+                    int(event_id),
+                )
+            else:
+                await db.execute(
+                    """
+                    UPDATE integration_events
+                    SET process_status='processed',
+                        process_error=NULL,
+                        processed_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (int(event_id),),
+                )
+                await db.commit()
+
+    async def mark_integration_event_failed(self, event_id: int, error: str) -> None:
+        err = str(error or "").strip()[:4000]
+        async with self._conn() as db:
+            if self.use_postgres:
+                await db.execute(
+                    """
+                    UPDATE integration_events
+                    SET process_status='failed',
+                        process_error=$2,
+                        processed_at=NOW()
+                    WHERE id=$1
+                    """,
+                    int(event_id),
+                    err,
+                )
+            else:
+                await db.execute(
+                    """
+                    UPDATE integration_events
+                    SET process_status='failed',
+                        process_error=?,
+                        processed_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (err, int(event_id)),
+                )
+                await db.commit()
+
+    async def get_integration_event_stats(self, *, hours: int = 72, workspace: str | None = None) -> dict:
+        ws = _coerce_workspace(workspace or get_current_workspace())
+        h = max(1, min(24 * 30, int(hours or 72)))
+        async with self._conn() as db:
+            if self.use_postgres:
+                counts_rows = await db.fetch(
+                    """
+                    SELECT source, process_status, COUNT(*) AS c
+                    FROM integration_events
+                    WHERE workspace=$1
+                      AND CAST(received_at AS TIMESTAMPTZ) >= NOW() - ($2 * INTERVAL '1 hour')
+                    GROUP BY source, process_status
+                    """,
+                    ws,
+                    h,
+                )
+                recent_rows = await db.fetch(
+                    """
+                    SELECT id, source, event, external_id, process_status, process_error, received_at, processed_at
+                    FROM integration_events
+                    WHERE workspace=$1
+                      AND CAST(received_at AS TIMESTAMPTZ) >= NOW() - ($2 * INTERVAL '1 hour')
+                      AND process_status='failed'
+                    ORDER BY id DESC
+                    LIMIT 30
+                    """,
+                    ws,
+                    h,
+                )
+            else:
+                cur = await db.execute(
+                    """
+                    SELECT source, process_status, COUNT(*) AS c
+                    FROM integration_events
+                    WHERE workspace=?
+                      AND datetime(received_at) >= datetime('now', ?)
+                    GROUP BY source, process_status
+                    """,
+                    (ws, f"-{h} hours"),
+                )
+                counts_rows = await cur.fetchall()
+                cur2 = await db.execute(
+                    """
+                    SELECT id, source, event, external_id, process_status, process_error, received_at, processed_at
+                    FROM integration_events
+                    WHERE workspace=?
+                      AND datetime(received_at) >= datetime('now', ?)
+                      AND process_status='failed'
+                    ORDER BY id DESC
+                    LIMIT 30
+                    """,
+                    (ws, f"-{h} hours"),
+                )
+                recent_rows = await cur2.fetchall()
+
+        counts: dict[str, dict[str, int]] = {}
+        for r in counts_rows or []:
+            src = str(r["source"] or "other")
+            st = str(r["process_status"] or "received")
+            counts.setdefault(src, {"received": 0, "processed": 0, "failed": 0})
+            counts[src][st] = int(r["c"] or 0)
+
+        return {
+            "workspace": ws,
+            "hours": h,
+            "counts": counts,
+            "recent_failed": [dict(x) for x in (recent_rows or [])],
+        }
 
     # ── Automation stats (durable) ────────────────────────────────
     async def _ensure_automation_stats_table(self) -> None:
@@ -14561,6 +14782,19 @@ async def webhook_events_replay(payload: dict = Body(...), _: dict = Depends(req
         raise HTTPException(status_code=500, detail=f"Failed to replay webhook_events: {exc}")
 
 
+@app.get("/admin/integration-events/stats")
+async def integration_events_stats(_: dict = Depends(require_admin), hours: int = 72):
+    """Workspace-scoped partner integration stats (Shopify/Delivery)."""
+    try:
+        out = await db_manager.get_integration_event_stats(
+            hours=max(1, min(24 * 30, int(hours or 72))),
+            workspace=get_current_workspace(),
+        )
+        return {"ok": True, **out}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to query integration_events stats: {exc}")
+
+
 # ---- Workspace registry + per-workspace UI settings (admin) ----
 
 async def _load_workspace_registry() -> list[dict]:
@@ -16214,9 +16448,41 @@ async def shopify_webhook_endpoint(workspace: str, request: Request):
         except Exception:
             payload = {}
 
-        # ACK fast; process in background
+        # Durable audit trail for partner events (for verification + replay/debug).
+        integration_event_id: int | None = None
         try:
-            asyncio.create_task(message_processor._run_shopify_automations(topic, payload, workspace=ws))
+            integration_event_id = await db_manager.create_integration_event(
+                workspace=ws,
+                source="shopify",
+                event=topic,
+                payload=(payload if isinstance(payload, dict) else {}),
+                headers={
+                    "x_shopify_topic": str(request.headers.get("X-Shopify-Topic") or ""),
+                    "x_shopify_shop_domain": str(request.headers.get("X-Shopify-Shop-Domain") or ""),
+                    "x_shopify_webhook_id": str(request.headers.get("X-Shopify-Webhook-Id") or ""),
+                    "x_shopify_api_version": str(request.headers.get("X-Shopify-API-Version") or ""),
+                },
+                external_id=str(request.headers.get("X-Shopify-Webhook-Id") or "").strip() or None,
+            )
+        except Exception:
+            integration_event_id = None
+
+        # ACK fast; process in background
+        async def _run_shopify_event() -> None:
+            try:
+                await message_processor._run_shopify_automations(topic, payload, workspace=ws)
+                if integration_event_id:
+                    await db_manager.mark_integration_event_processed(integration_event_id)
+            except Exception as exc:
+                if integration_event_id:
+                    try:
+                        await db_manager.mark_integration_event_failed(integration_event_id, str(exc))
+                    except Exception:
+                        pass
+                raise
+
+        try:
+            asyncio.create_task(_run_shopify_event())
         except Exception:
             pass
 
@@ -16267,6 +16533,25 @@ async def delivery_webhook_endpoint(workspace: str, request: Request):
     try:
         body = await request.body()
 
+        # Optional HMAC verification for delivery providers.
+        # If no secret is configured, the endpoint remains open (backward compatible).
+        try:
+            delivery_secret = _delivery_webhook_secret_env(ws)
+        except Exception:
+            delivery_secret = ""
+        if delivery_secret:
+            sig_header = (
+                request.headers.get("X-Delivery-Signature")
+                or request.headers.get("X-Hub-Signature-256")
+                or ""
+            )
+            presented = _extract_hmac256_hex(sig_header)
+            if not presented:
+                raise HTTPException(status_code=401, detail="Missing/invalid delivery webhook signature")
+            expected = hmac.new(delivery_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(presented, expected):
+                raise HTTPException(status_code=401, detail="Invalid delivery webhook signature")
+
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
         except Exception:
@@ -16276,8 +16561,42 @@ async def delivery_webhook_endpoint(workspace: str, request: Request):
         if isinstance(payload, dict):
             event = str(payload.get("event") or payload.get("type") or event).strip() or event
 
+        integration_event_id: int | None = None
         try:
-            asyncio.create_task(message_processor._run_delivery_automations(event, payload, workspace=ws))
+            integration_event_id = await db_manager.create_integration_event(
+                workspace=ws,
+                source="delivery",
+                event=event,
+                payload=(payload if isinstance(payload, dict) else {}),
+                headers={
+                    "x_delivery_event_id": str(request.headers.get("X-Delivery-Event-Id") or ""),
+                    "x_request_id": str(request.headers.get("X-Request-Id") or ""),
+                    "x_provider": str(request.headers.get("X-Provider") or ""),
+                },
+                external_id=(
+                    str(request.headers.get("X-Delivery-Event-Id") or "").strip()
+                    or str(request.headers.get("X-Request-Id") or "").strip()
+                    or None
+                ),
+            )
+        except Exception:
+            integration_event_id = None
+
+        async def _run_delivery_event() -> None:
+            try:
+                await message_processor._run_delivery_automations(event, payload, workspace=ws)
+                if integration_event_id:
+                    await db_manager.mark_integration_event_processed(integration_event_id)
+            except Exception as exc:
+                if integration_event_id:
+                    try:
+                        await db_manager.mark_integration_event_failed(integration_event_id, str(exc))
+                    except Exception:
+                        pass
+                raise
+
+        try:
+            asyncio.create_task(_run_delivery_event())
         except Exception:
             pass
 

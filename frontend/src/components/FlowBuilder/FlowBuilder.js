@@ -273,6 +273,7 @@ function _getTemplateBodyText(tpl) {
 const ACTION_CATEGORIES = [
   { id: 'whatsapp', label: 'WhatsApp Messaging', icon: <MessageSquare className="w-3.5 h-3.5" />, color: 'green' },
   { id: 'shopify',  label: 'Shopify Actions',    icon: <ShoppingCart className="w-3.5 h-3.5" />,  color: 'emerald' },
+  { id: 'delivery', label: 'Delivery Actions',   icon: <ScanLine className="w-3.5 h-3.5" />,      color: 'sky' },
   { id: 'catalog',  label: 'Catalog & Orders',   icon: <Package className="w-3.5 h-3.5" />,       color: 'indigo' },
   { id: 'workflow', label: 'Workflow Control',   icon: <Zap className="w-3.5 h-3.5" />,           color: 'slate' },
 ];
@@ -292,6 +293,7 @@ const ACTION_CATALOG = [
   { id: 'remove_tag',        label: 'Remove Tag',              icon: <Zap className="w-4 h-4 text-orange-500" />,            type: 'shopify_remove_tag',            cat: 'shopify',  desc: 'Remove a tag from the Shopify customer' },
   { id: 'order_confirm',     label: 'Confirmation Flow',       icon: <CheckCircle className="w-4 h-4 text-emerald-500" />,   type: 'order_confirmation_flow',       cat: 'shopify',  desc: 'Multi-step order confirmation with buttons' },
   { id: 'order_status',      label: 'Order Status Lookup',     icon: <Search className="w-4 h-4 text-sky-500" />,            type: 'shopify_order_status',           cat: 'shopify',  desc: 'Look up and send order status to customer' },
+  { id: 'delivery_status',   label: 'Delivery Status Lookup',  icon: <ScanLine className="w-4 h-4 text-sky-500" />,          type: 'delivery_order_status',         cat: 'delivery', desc: 'Look up and send latest delivery status' },
   // â”€â”€ Catalog & Orders â”€â”€
   { id: 'catalog_item',      label: 'Send Catalog Item',       icon: <Package className="w-4 h-4 text-indigo-500" />,        type: 'send_catalog_item',             cat: 'catalog',  desc: 'Send a single product from your catalog' },
   { id: 'catalog_set',       label: 'Send Catalog Set',        icon: <Package className="w-4 h-4 text-purple-500" />,        type: 'send_catalog_set',              cat: 'catalog',  desc: 'Send a product set from your catalog' },
@@ -896,7 +898,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     else if (ra === 'send_image') { a.to = '{{ phone }}'; a.image_url = cd.replyImageUrl || ''; a.caption = cd.replyImageCaption || ''; }
     else if (ra === 'send_video') { a.to = '{{ phone }}'; a.video_url = cd.replyVideoUrl || ''; a.caption = cd.replyVideoCaption || ''; }
     else if (ra === 'send_last_order_catalog_items') { a.to = '{{ phone }}'; a.max_items = Number(cd.replyLastOrderItemsMax || 10); }
-    else if (ra === 'shopify_order_status') { /* no config needed */ }
+    else if (ra === 'shopify_order_status' || ra === 'delivery_order_status') { /* no config needed */ }
     else if (ra === 'shopify_tag') { a.tag = cd.replyTag || cd.tag || ''; }
     else if (ra === 'shopify_order_tag') { a.tag = cd.replyTag || cd.tag || ''; a.order_id = cd.replyOrderId || cd.orderId || '{{ order_id }}'; }
     else if (ra === 'shopify_remove_tag') { a.tag = cd.replyTag || cd.tag || ''; }
@@ -1040,6 +1042,8 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             });
           } else if (at === 'shopify_order_status') {
             actions.push({ type: 'shopify_order_status' });
+          } else if (at === 'delivery_order_status') {
+            actions.push({ type: 'delivery_order_status' });
           } else if (at === 'send_catalog_item') {
             actions.push({ type: 'send_catalog_item', to: '{{ phone }}', retailer_id: d.catalogItemRetailerId || '', caption: d.catalogItemCaption || '' });
           } else if (at === 'send_catalog_set') {
@@ -2179,6 +2183,12 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
               <div className="text-xs">Automatically looks up the customer's latest orders from Shopify and sends the status in Arabic. No configuration needed.</div>
             </div>
           )}
+          {d.actionType === 'delivery_order_status' && (
+            <div className="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
+              <div className="font-semibold mb-1">Delivery Status Lookup</div>
+              <div className="text-xs">Looks up the latest delivery event for this phone and sends status, tracking number, and tracking URL when available.</div>
+            </div>
+          )}
 
           {/* â”€â”€ Catalog Item â”€â”€ */}
           {d.actionType === 'send_catalog_item' && (<>
@@ -2296,7 +2306,7 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                   )}
                   {ra === 'assign_agent' && <input className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyAgent || ''} onChange={(e) => onUpd({ replyAgent: e.target.value })} placeholder="Agent name..." />}
                   {ra === 'send_last_order_catalog_items' && <input type="number" className="w-full border rounded-lg px-3 py-1.5 text-sm" value={a.replyLastOrderItemsMax || 10} min={1} max={30} onChange={(e) => onUpd({ replyLastOrderItemsMax: Number(e.target.value) || 10 })} />}
-                  {(ra === 'close_conversation' || ra === 'exit' || ra === 'shopify_order_status') && <div className="text-[10px] text-slate-400 italic">No config needed</div>}
+                  {(ra === 'close_conversation' || ra === 'exit' || ra === 'shopify_order_status' || ra === 'delivery_order_status') && <div className="text-[10px] text-slate-400 italic">No config needed</div>}
                 </div>
               );
             };
@@ -2510,6 +2520,8 @@ export default function FlowBuilder() {
           extra.tag = a.tag || '';
         } else if (at === 'shopify_order_status') {
           actionType = 'shopify_order_status'; label = 'Order Status';
+        } else if (at === 'delivery_order_status') {
+          actionType = 'delivery_order_status'; label = 'Delivery Status';
         } else if (at === 'send_catalog_item') {
           actionType = 'send_catalog_item'; label = 'Catalog Item';
           extra.catalogItemRetailerId = a.retailer_id || ''; extra.catalogItemCaption = a.caption || '';

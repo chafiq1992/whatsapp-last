@@ -6325,6 +6325,185 @@ class MessageProcessor:
                 "timestamp": datetime.utcnow().isoformat(),
             })
 
+    async def _handle_delivery_status_request(self, user_id: str, ws: str | None = None) -> None:
+        """Fetch latest delivery integration event for this phone and send a status summary."""
+        _log = logging.getLogger(__name__)
+        ws0 = _coerce_workspace(ws or get_current_workspace())
+        user_digits = _digits_only(user_id)
+
+        def _parse_payload(raw_val):
+            try:
+                if isinstance(raw_val, dict):
+                    return raw_val
+                if isinstance(raw_val, str):
+                    return json.loads(raw_val or "{}")
+            except Exception:
+                return {}
+            return {}
+
+        def _payload_digits(payload_obj: dict) -> str:
+            try:
+                order_obj = payload_obj.get("order") if isinstance(payload_obj.get("order"), dict) else {}
+                for v in (
+                    payload_obj.get("customer_phone"),
+                    payload_obj.get("phone"),
+                    payload_obj.get("user_id"),
+                    order_obj.get("customer_phone"),
+                    order_obj.get("phone"),
+                    order_obj.get("user_id"),
+                ):
+                    d = _digits_only(str(v or ""))
+                    if d:
+                        return d
+            except Exception:
+                pass
+            return ""
+
+        def _same_phone(a: str, b: str) -> bool:
+            if not a or not b:
+                return False
+            if a == b:
+                return True
+            return a.endswith(b[-9:]) or b.endswith(a[-9:])
+
+        try:
+            rows = []
+            async with self.db_manager._conn() as db:
+                if self.db_manager.use_postgres:
+                    try:
+                        rows = await db.fetch(
+                            """
+                            SELECT payload, event, received_at
+                            FROM integration_events
+                            WHERE workspace=$1 AND source='delivery'
+                            ORDER BY id DESC
+                            LIMIT 150
+                            """,
+                            ws0,
+                        )
+                    except Exception:
+                        rows = await db.fetch(
+                            """
+                            SELECT payload, event, received_at
+                            FROM integration_events
+                            WHERE source='delivery'
+                            ORDER BY id DESC
+                            LIMIT 150
+                            """
+                        )
+                else:
+                    try:
+                        cur = await db.execute(
+                            """
+                            SELECT payload, event, received_at
+                            FROM integration_events
+                            WHERE workspace=? AND source='delivery'
+                            ORDER BY id DESC
+                            LIMIT 150
+                            """,
+                            (ws0,),
+                        )
+                    except Exception:
+                        cur = await db.execute(
+                            """
+                            SELECT payload, event, received_at
+                            FROM integration_events
+                            WHERE source='delivery'
+                            ORDER BY id DESC
+                            LIMIT 150
+                            """
+                        )
+                    rows = await cur.fetchall()
+
+            match_payload = None
+            match_event = ""
+            for r in rows or []:
+                payload_obj = _parse_payload(r["payload"] if isinstance(r, dict) else r[0])
+                if not isinstance(payload_obj, dict):
+                    continue
+                p_digits = _payload_digits(payload_obj)
+                if user_digits and p_digits and _same_phone(user_digits, p_digits):
+                    match_payload = payload_obj
+                    match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
+                    break
+
+            if not isinstance(match_payload, dict):
+                await self.process_outgoing_message({
+                    "user_id": user_id,
+                    "type": "text",
+                    "from_me": True,
+                    "message": (
+                        "لم نجد حالة توصيل حديثة مرتبطة برقمك.\n"
+                        "أرسل رقم الطلب وسنراجعها لك مباشرة."
+                    ),
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+                return
+
+            order_obj = match_payload.get("order") if isinstance(match_payload.get("order"), dict) else {}
+            status_val = (
+                match_payload.get("status")
+                or match_payload.get("new_status")
+                or order_obj.get("delivery_status")
+                or order_obj.get("status")
+                or order_obj.get("order_status")
+                or ""
+            )
+            order_ref = (
+                order_obj.get("order_name")
+                or order_obj.get("id")
+                or match_payload.get("order_name")
+                or match_payload.get("order_id")
+                or ""
+            )
+            tracking_no = (
+                order_obj.get("tracking_number")
+                or order_obj.get("partner_code")
+                or match_payload.get("tracking_number")
+                or ""
+            )
+            tracking_url = (
+                order_obj.get("tracking_url")
+                or match_payload.get("tracking_url")
+                or ""
+            )
+            driver_name = (
+                order_obj.get("driver_name")
+                or match_payload.get("driver_name")
+                or ""
+            )
+
+            lines = ["حالة التوصيل الحالية"]
+            if order_ref:
+                lines.append(f"رقم الطلب: {order_ref}")
+            if status_val:
+                lines.append(f"الحالة: {status_val}")
+            if tracking_no:
+                lines.append(f"رقم التتبع: {tracking_no}")
+            if tracking_url:
+                lines.append(f"رابط التتبع: {tracking_url}")
+            if driver_name:
+                lines.append(f"الموصل: {driver_name}")
+            if match_event:
+                lines.append(f"الحدث: {match_event}")
+
+            await self.process_outgoing_message({
+                "user_id": user_id,
+                "type": "text",
+                "from_me": True,
+                "message": "\n".join(lines),
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+        except Exception as exc:
+            _log.exception("delivery status lookup failed ws=%s user=%s: %s", ws0, user_id, exc)
+            await self.process_outgoing_message({
+                "user_id": user_id,
+                "type": "text",
+                "from_me": True,
+                "message": "تعذر جلب حالة التوصيل حاليا. حاول مرة أخرى بعد قليل.",
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+
     async def _send_catalog_items_from_line_items(self, user_id: str, line_items: list[dict], *, max_items: int = 10) -> int:
         """Send catalog cards from explicit line items with robust fallbacks."""
         try:
@@ -9616,11 +9795,34 @@ class MessageProcessor:
                                                     await self.db_manager.set_conversation_meta(user_id, {"assigned_agent": agent})
                                             except Exception:
                                                 pass
-                                        elif fb_at == "shopify_order_status":
+                                        elif fb_at in ("shopify_order_status", "order_status", "order_status_lookup"):
                                             try:
-                                                await self._send_order_status_for_user(user_id=user_id, ws=ws_fb)
-                                            except Exception:
-                                                pass
+                                                to_id = self._render_template(
+                                                    str(matched_action.get("to") or "{{ phone }}"),
+                                                    fb_ctx_merged,
+                                                ).strip() or user_id
+                                                await self._handle_order_status_request(to_id)
+                                            except Exception as exc:
+                                                logging.getLogger(__name__).exception(
+                                                    "button_action shopify_order_status failed ws=%s user=%s: %s",
+                                                    ws_fb,
+                                                    user_id,
+                                                    exc,
+                                                )
+                                        elif fb_at in ("delivery_order_status", "delivery_status_lookup", "order_delivery_status"):
+                                            try:
+                                                to_id = self._render_template(
+                                                    str(matched_action.get("to") or "{{ phone }}"),
+                                                    fb_ctx_merged,
+                                                ).strip() or user_id
+                                                await self._handle_delivery_status_request(to_id, ws=ws_fb)
+                                            except Exception as exc:
+                                                logging.getLogger(__name__).exception(
+                                                    "button_action delivery_status_lookup failed ws=%s user=%s: %s",
+                                                    ws_fb,
+                                                    user_id,
+                                                    exc,
+                                                )
                                         elif fb_at in ("shopify_tag",):
                                             tag = str(matched_action.get("tag") or "").strip()
                                             if tag:
@@ -10047,9 +10249,14 @@ class MessageProcessor:
                                 "timestamp": datetime.utcnow().isoformat(),
                                 "agent_username": "automation",
                             })
-                        elif at in ("shopify_order_status", "order_status"):
+                        elif at in ("shopify_order_status", "order_status", "order_status_lookup"):
                             try:
                                 await self._handle_order_status_request(user_id)
+                            except Exception:
+                                pass
+                        elif at in ("delivery_order_status", "delivery_status_lookup", "order_delivery_status"):
+                            try:
+                                await self._handle_delivery_status_request(user_id, ws=ws)
                             except Exception:
                                 pass
                         elif at in ("add_tag", "tag"):
@@ -12696,6 +12903,7 @@ You ONLY output valid JSON — no markdown, no explanation, no code fences.
 - shopify_remove_tag (remove_tag): Remove tag. Data: {tag}
 - order_confirmation_flow: Multi-step confirmation. Data: {templateName, templateLanguage:"en"}
 - shopify_order_status: Look up order status. Data: {}
+- delivery_order_status: Look up latest delivery status. Data: {}
 - send_catalog_item: Single product. Data: {catalogItemRetailerId, catalogItemCaption}
 - send_catalog_set: Product set. Data: {catalogSetId, catalogSetCaption}
 - send_last_order_catalog_items: Last order items. Data: {lastOrderItemsMax:10}

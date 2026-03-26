@@ -57,8 +57,9 @@
 
       <!-- ====== FORM STATE ====== -->
       <div id="cod-form-state">
-        <div class="cod-product-header">
-          <div class="cod-product-row">
+        <div class="cod-product-header" id="cod-items-list">
+          <!-- JS will populate this with cart item rows -->
+          <div class="cod-product-row" id="cod-current-product-row">
             <div class="cod-product-img-wrap">
               {% if product.featured_image %}
                 <img src="{{ product.featured_image | img_url: '80x80', crop: 'center' }}" alt="{{ product.title | escape }}" class="cod-product-img" />
@@ -116,7 +117,7 @@
           <div class="cod-summary">
             <div class="cod-summary-row">
               <span>قبل المجموع:</span>
-              <span>{{ product.selected_or_first_available_variant.price | money }}</span>
+              <span id="cod-subtotal-amount">{{ product.selected_or_first_available_variant.price | money }}</span>
             </div>
             <div class="cod-summary-row">
               <span>شحن:</span>
@@ -124,14 +125,14 @@
             </div>
             <div class="cod-summary-total">
               <span>المجموع:</span>
-              <span>{{ product.selected_or_first_available_variant.price | money }}</span>
+              <span id="cod-total-amount">{{ product.selected_or_first_available_variant.price | money }}</span>
             </div>
           </div>
 
           <div id="cod-error-msg" class="cod-error cod-hidden"></div>
 
           <button type="submit" id="cod-submit-btn" class="cod-btn cod-btn-submit">
-            <span id="cod-submit-text">أكمل الطلب — {{ product.selected_or_first_available_variant.price | money }}</span>
+            <span id="cod-submit-text">أكمل الطلب</span>
             <span id="cod-submit-loading" class="cod-hidden">
               <svg class="cod-spinner" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
               جاري معالجة الطلب...
@@ -346,456 +347,251 @@
 }
 </style>
 
+
 <script>
 (function(){
-  // Move primary inline button below Add To Cart (product pages)
-  // On cart pages, dynamically create a COD button
-  document.addEventListener("DOMContentLoaded", function() {
-    var isCartPage = /\/cart\b/.test(window.location.pathname);
+  var COD_BTN_HTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg> اطلب الآن — الدفع عند الاستلام';
+  var COD_BTN_STYLE = 'width:100%;margin-top:12px;margin-bottom:12px;background:#059669;color:#fff;padding:16px 24px;font-size:16px;font-weight:700;border:none;border-radius:12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 14px rgba(5,150,105,.25);font-family:inherit';
 
-    if (isCartPage) {
-      // Cart page: create and inject a COD button dynamically
-      var existingBtn = document.getElementById('cod-open-btn');
-      var cartBtn = existingBtn || document.createElement('button');
-      if (!existingBtn) {
-        cartBtn.type = 'button';
-        cartBtn.id = 'cod-cart-btn';
-        cartBtn.className = 'cod-btn cod-btn-primary';
-        cartBtn.style.cssText = 'width:100%;margin-top:12px;margin-bottom:12px;background:#059669;color:#fff;padding:16px 24px;font-size:16px;font-weight:700;border:none;border-radius:12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 14px rgba(5,150,105,.25);font-family:inherit';
-        cartBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg> اطلب الآن — الدفع عند الاستلام';
-        cartBtn.onclick = function(){ window.__codForm.open(); };
-      }
-      // Try multiple common cart selectors
-      var cartTarget = document.querySelector('[action="/cart"] [type="submit"]')
-        || document.querySelector('form[action="/cart"]')
-        || document.querySelector('.cart__footer')
-        || document.querySelector('.cart-footer')
-        || document.querySelector('.cart__ctas')
-        || document.querySelector('.cart__blocks')
-        || document.querySelector('#cart')
-        || document.querySelector('.cart');
-      if (cartTarget) {
-        cartTarget.parentNode.insertBefore(cartBtn, cartTarget.nextSibling);
-      } else {
-        // Fallback: append to main content
-        var main = document.querySelector('main') || document.body;
-        main.appendChild(cartBtn);
-      }
-    } else {
-      // Product page: place below Add To Cart
-      var codBtn = document.getElementById('cod-open-btn');
-      if (codBtn) {
-        var addToCartBtn = document.querySelector('.product-form__submit') || document.querySelector('button[name="add"]');
-        if (addToCartBtn && addToCartBtn.parentNode) {
-          addToCartBtn.parentNode.insertBefore(codBtn, addToCartBtn.nextSibling);
-        }
-      }
+  function _mkBtn(id){
+    var b=document.createElement('button');b.type='button';b.id=id;
+    b.className='cod-btn cod-btn-primary';b.style.cssText=COD_BTN_STYLE;
+    b.innerHTML=COD_BTN_HTML;b.onclick=function(){window.__codForm.open();};return b;
+  }
+
+  document.addEventListener("DOMContentLoaded",function(){
+    var isCart=/\/cart\b/.test(window.location.pathname);
+    if(!isCart){
+      var cb=document.getElementById('cod-open-btn');
+      if(cb){var atc=document.querySelector('.product-form__submit')||document.querySelector('button[name="add"]');if(atc&&atc.parentNode)atc.parentNode.insertBefore(cb,atc.nextSibling);}
     }
+    if(isCart) _injectCartPageBtn();
+    _watchCartDrawer();
   });
 
-  var BACKEND_URL = {{ cod_backend_url | json }};
-  var API_KEY = {{ cod_api_key | json }};
-  var WORKSPACE = {{ cod_shop_domain | json }};
-  var VARIANT_ID = {{ product.selected_or_first_available_variant.id | json }};
-
-  var UPSELL_ENABLED = {{ upsell_on | json | default: 'false' }};
-  var UPSELL_VARIANT_ID = {% if upsell_product != blank %}{{ upsell_product.selected_or_first_available_variant.id | json }}{% else %}null{% endif %};
-  var UPSELL_DISCOUNT = {{ upsell_discount | json | default: 0 }};
-  var UPSELL_TIMER_SEC = {{ upsell_timer | json | default: 300 }};
-  var MONEY_FORMAT = {{ 999111 | money | json }};
-
-  var _timerInterval = null;
-  var _customerData = {};
-  var _upsellVariants = [];
-  var _draftOrderId = null;
-  var _abandonSent = false;
-  var _orderCompleted = false;
-  var _modalOpened = false;
-  var _cartItems = [];   // [{variant_id, quantity}] fetched from Shopify cart
-  var _lineItems = [];   // final line items for the order
-
-  function $(id){ return document.getElementById(id); }
-
-  function formatMoney(cents) {
-    if(!MONEY_FORMAT) return (cents/100).toFixed(2);
-    var val1 = (9991.11).toFixed(2);
-    var val2 = (9991.11).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-    var newVal1 = (cents/100).toFixed(2);
-    var newVal2 = (cents/100).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-    if(MONEY_FORMAT.indexOf(val2) !== -1) return MONEY_FORMAT.replace(val2, newVal2);
-    if(MONEY_FORMAT.indexOf(val1) !== -1) return MONEY_FORMAT.replace(val1, newVal1);
-    return MONEY_FORMAT.replace(/[0-9.,]+/, newVal1);
+  function _injectCartPageBtn(){
+    if(document.getElementById('cod-cart-btn'))return;
+    var b=_mkBtn('cod-cart-btn');
+    var t=document.querySelector('.cart__ctas')||document.querySelector('.cart__footer')||document.querySelector('form[action="/cart"]')||document.querySelector('#cart')||document.querySelector('.cart');
+    if(t){t.parentNode.insertBefore(b,t.nextSibling);}else{(document.querySelector('main')||document.body).appendChild(b);}
   }
 
-  function fmtTime(sec){
-    var m = Math.floor(sec / 60); var s = sec % 60;
-    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
-  }
-
-  function startTimer(){
-    var remaining = UPSELL_TIMER_SEC;
-    function tick(){
-      if(remaining <= 0){ clearInterval(_timerInterval); _timerInterval = null; window.__codForm.skipUpsell(); return; }
-      remaining--;
-      var display = fmtTime(remaining);
-      var el1 = $('cod-upsell-timer');
-      if(el1) el1.textContent = display;
+  function _watchCartDrawer(){
+    function inject(){
+      var d=document.querySelector('cart-drawer')||document.getElementById('cart-drawer')||document.querySelector('.drawer__inner');
+      if(!d||d.querySelector('#cod-drawer-btn'))return;
+      var b=_mkBtn('cod-drawer-btn');
+      var f=d.querySelector('.cart-drawer__footer')||d.querySelector('.drawer__footer')||d.querySelector('[name="checkout"]')||d.querySelector('button[type="submit"]');
+      if(f){f.parentNode.insertBefore(b,f);}else{d.appendChild(b);}
     }
-    _timerInterval = setInterval(tick, 1000);
+    inject();
+    new MutationObserver(function(){inject();}).observe(document.body,{childList:true,subtree:true});
   }
-  function stopTimer(){ if(_timerInterval){ clearInterval(_timerInterval); _timerInterval = null; } }
 
-  // ── Fetch cart items from Shopify AJAX API ──
-  function _fetchCart(callback) {
-    fetch('/cart.js', {method:'GET', headers:{'Accept':'application/json'}})
-      .then(function(r){ return r.json(); })
-      .then(function(cart){
-        _cartItems = [];
-        if(cart && cart.items && cart.items.length) {
-          cart.items.forEach(function(item){
-            _cartItems.push({variant_id: item.variant_id || item.id, quantity: item.quantity || 1});
+  var BACKEND_URL={{ cod_backend_url | json }};
+  var API_KEY={{ cod_api_key | json }};
+  var WORKSPACE={{ cod_shop_domain | json }};
+  var VARIANT_ID={{ product.selected_or_first_available_variant.id | json }};
+  var PRODUCT_TITLE={{ product.title | json }};
+  var PRODUCT_PRICE={{ product.selected_or_first_available_variant.price | json }};
+  var PRODUCT_IMG={{ product.featured_image | img_url: '80x80', crop: 'center' | json }};
+  var PRODUCT_VARIANT_TITLE={{ product.selected_or_first_available_variant.title | json }};
+
+  var UPSELL_ENABLED={{ upsell_on | json | default: 'false' }};
+  var UPSELL_VARIANT_ID={% if upsell_product != blank %}{{ upsell_product.selected_or_first_available_variant.id | json }}{% else %}null{% endif %};
+  var UPSELL_DISCOUNT={{ upsell_discount | json | default: 0 }};
+  var UPSELL_TIMER_SEC={{ upsell_timer | json | default: 300 }};
+  var MONEY_FORMAT={{ 999111 | money | json }};
+
+  var _timerInterval=null,_customerData={},_upsellVariants=[],_draftOrderId=null;
+  var _abandonSent=false,_orderCompleted=false,_modalOpened=false;
+  var _cartItems=[],_lineItems=[],_totalCents=0;
+
+  function $(id){return document.getElementById(id);}
+
+  function formatMoney(cents){
+    if(!MONEY_FORMAT)return(cents/100).toFixed(2);
+    var v1=(9991.11).toFixed(2),v2=(9991.11).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    var n1=(cents/100).toFixed(2),n2=(cents/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    if(MONEY_FORMAT.indexOf(v2)!==-1)return MONEY_FORMAT.replace(v2,n2);
+    if(MONEY_FORMAT.indexOf(v1)!==-1)return MONEY_FORMAT.replace(v1,n1);
+    return MONEY_FORMAT.replace(/[0-9.,]+/,n1);
+  }
+
+  function fmtTime(s){var m=Math.floor(s/60);var r=s%60;return(m<10?'0':'')+m+':'+(r<10?'0':'')+r;}
+  function startTimer(){var rem=UPSELL_TIMER_SEC;function tick(){if(rem<=0){clearInterval(_timerInterval);_timerInterval=null;window.__codForm.skipUpsell();return;}rem--;var e=$('cod-upsell-timer');if(e)e.textContent=fmtTime(rem);}_timerInterval=setInterval(tick,1000);}
+  function stopTimer(){if(_timerInterval){clearInterval(_timerInterval);_timerInterval=null;}}
+  function fbTrack(ev,data){try{if(typeof fbq==='function')fbq('track',ev,data);}catch(e){}}
+
+  function _fetchCart(cb){
+    fetch('/cart.js',{method:'GET',headers:{'Accept':'application/json'}})
+    .then(function(r){return r.json();})
+    .then(function(cart){
+      _cartItems=[];
+      if(cart&&cart.items&&cart.items.length){
+        cart.items.forEach(function(it){
+          _cartItems.push({
+            variant_id:it.variant_id||it.id,quantity:it.quantity||1,
+            title:it.product_title||it.title||'',
+            variant_title:(it.variant_title&&it.variant_title!=='Default Title')?it.variant_title:'',
+            image:it.image||(it.featured_image?it.featured_image.url:'')||'',
+            price:it.price||0
           });
-        }
-        if(callback) callback();
-      })
-      .catch(function(){ _cartItems = []; if(callback) callback(); });
+        });
+      }
+      if(cb)cb();
+    }).catch(function(){_cartItems=[];if(cb)cb();});
   }
 
-  // ── Build line items from current product + cart ──
-  function _buildLineItems() {
-    var isCartPage = /\/cart\b/.test(window.location.pathname);
-    var items = [];
-    var seenVariants = {};
-
-    // On product page, include the current product
-    if (!isCartPage && VARIANT_ID) {
-      items.push({variant_id: VARIANT_ID, quantity: 1});
-      seenVariants[VARIANT_ID] = true;
+  function _buildLineItems(){
+    var isCart=/\/cart\b/.test(window.location.pathname);
+    var items=[],seen={};_totalCents=0;
+    if(!isCart&&VARIANT_ID){
+      items.push({variant_id:VARIANT_ID,quantity:1,title:PRODUCT_TITLE,variant_title:(PRODUCT_VARIANT_TITLE!=='Default Title'?PRODUCT_VARIANT_TITLE:''),image:PRODUCT_IMG,price:PRODUCT_PRICE});
+      seen[VARIANT_ID]=true;_totalCents+=PRODUCT_PRICE;
     }
-
-    // Add cart items (skip duplicates of product variant)
     _cartItems.forEach(function(ci){
-      if (!seenVariants[ci.variant_id]) {
-        items.push({variant_id: ci.variant_id, quantity: ci.quantity});
-        seenVariants[ci.variant_id] = true;
-      } else {
-        // If the product variant is already there from the product page, add cart qty
-        for (var i = 0; i < items.length; i++) {
-          if (items[i].variant_id == ci.variant_id) {
-            items[i].quantity += ci.quantity;
-            break;
-          }
-        }
-      }
+      if(!seen[ci.variant_id]){items.push(ci);seen[ci.variant_id]=true;_totalCents+=ci.price*ci.quantity;}
+      else{for(var i=0;i<items.length;i++){if(items[i].variant_id==ci.variant_id){items[i].quantity+=ci.quantity;_totalCents+=ci.price*ci.quantity;break;}}}
     });
-
-    _lineItems = items;
-    return items;
+    _lineItems=items;return items;
   }
 
-  // ── Update modal header to show item count ──
-  function _updateModalHeader() {
-    var isCartPage = /\/cart\b/.test(window.location.pathname);
-    var badge = document.querySelector('.cod-qty-badge');
-    var titleEl = document.querySelector('.cod-product-title');
-
-    if (isCartPage) {
-      // Cart page: show total item count
-      var totalQty = 0;
-      _lineItems.forEach(function(li){ totalQty += li.quantity; });
-      if (badge) badge.textContent = totalQty || 1;
-      if (titleEl) titleEl.textContent = _lineItems.length + ' منتجات في السلة';
-    } else {
-      // Product page: keep badge at 1 (current product), show cart items note
-      if (badge) badge.textContent = 1;
-      var cartCount = _cartItems.length;
-      if (cartCount > 0 && titleEl) {
-        // Add a subtitle showing cart items are included
-        var subtitle = document.querySelector('.cod-cart-included-note');
-        if (!subtitle) {
-          subtitle = document.createElement('p');
-          subtitle.className = 'cod-cart-included-note';
-          subtitle.style.cssText = 'color:#059669;font-size:12px;margin:4px 0 0;font-weight:600';
-          titleEl.parentNode.insertBefore(subtitle, titleEl.nextSibling);
-        }
-        subtitle.textContent = '+ ' + cartCount + ' منتجات من السلة سيتم تضمينها';
-      }
-    }
+  function _renderItemsInModal(){
+    var container=$('cod-items-list');if(!container)return;
+    container.innerHTML='';
+    _lineItems.forEach(function(item){
+      var row=document.createElement('div');row.className='cod-product-row';
+      var imgHtml='<div class="cod-product-img cod-product-img-placeholder"></div>';
+      if(item.image){imgHtml='<img src="'+item.image+'" alt="" class="cod-product-img" />';}
+      var varHtml=item.variant_title?'<p class="cod-product-variant">'+item.variant_title+'</p>':'';
+      var lineTotal=item.price*item.quantity;
+      row.innerHTML='<div class="cod-product-img-wrap">'+imgHtml+'<span class="cod-qty-badge">'+item.quantity+'</span></div><div class="cod-product-info"><h4 class="cod-product-title">'+(item.title||'Product')+'</h4>'+varHtml+'<p class="cod-product-price">'+formatMoney(lineTotal)+'</p></div>';
+      container.appendChild(row);
+    });
+    var fmt=formatMoney(_totalCents);
+    var sub=$('cod-subtotal-amount');if(sub)sub.textContent=fmt;
+    var tot=$('cod-total-amount');if(tot)tot.textContent=fmt;
+    var btn=$('cod-submit-text');if(btn)btn.textContent='\u0623\u0643\u0645\u0644 \u0627\u0644\u0637\u0644\u0628 \u2014 '+fmt;
   }
 
   function updateOptionAvailability(){
-    if(!_upsellVariants.length) return;
-    var selects = document.querySelectorAll('.cod-upsell-select');
-    Array.prototype.forEach.call(selects, function(select, selIdx){
-      var otherSelections = [];
-      Array.prototype.forEach.call(selects, function(s, i){
-        otherSelections.push({ index: i, value: s.value.replace(/ \(\u0646\u0641\u062f\u062a\)$/, '') });
-      });
-      Array.prototype.forEach.call(select.options, function(opt){
-        var cleanVal = opt.value.replace(/ \(\u0646\u0641\u062f\u062a\)$/, '');
-        var hasAvailable = _upsellVariants.some(function(v){
-          if(v.options[selIdx] !== cleanVal) return false;
-          return otherSelections.every(function(os){
-            if(os.index === selIdx) return true;
-            return v.options[os.index] === os.value;
-          }) && v.available;
-        });
-        var anyExists = _upsellVariants.some(function(v){ return v.options[selIdx] === cleanVal; });
-        if(anyExists && !hasAvailable){
-          opt.value = cleanVal;
-          opt.textContent = cleanVal + ' (\u0646\u0641\u062f\u062a)';
-          opt.style.color = '#9ca3af';
-        } else {
-          opt.value = cleanVal;
-          opt.textContent = cleanVal;
-          opt.style.color = '';
-        }
+    if(!_upsellVariants.length)return;
+    var selects=document.querySelectorAll('.cod-upsell-select');
+    Array.prototype.forEach.call(selects,function(select,selIdx){
+      var others=[];Array.prototype.forEach.call(selects,function(s,i){others.push({index:i,value:s.value.replace(/ \(\u0646\u0641\u062f\u062a\)$/,'')});});
+      Array.prototype.forEach.call(select.options,function(opt){
+        var cv=opt.value.replace(/ \(\u0646\u0641\u062f\u062a\)$/,'');
+        var avail=_upsellVariants.some(function(v){if(v.options[selIdx]!==cv)return false;return others.every(function(o){if(o.index===selIdx)return true;return v.options[o.index]===o.value;})&&v.available;});
+        var exists=_upsellVariants.some(function(v){return v.options[selIdx]===cv;});
+        if(exists&&!avail){opt.value=cv;opt.textContent=cv+' (\u0646\u0641\u062f\u062a)';opt.style.color='#9ca3af';}
+        else{opt.value=cv;opt.textContent=cv;opt.style.color='';}
       });
     });
   }
 
-  window.__codForm = {
-    open: function(){
-      _modalOpened = true;
-      _abandonSent = false;
+  window.__codForm={
+    open:function(){
+      _modalOpened=true;_abandonSent=false;
       $('cod-modal-overlay').classList.remove('cod-hidden');
       $('cod-form-state').classList.remove('cod-hidden');
       $('cod-success-state').classList.add('cod-hidden');
-      var upsellEl = $('cod-upsell-state');
-      if(upsellEl) upsellEl.classList.add('cod-hidden');
+      var ue=$('cod-upsell-state');if(ue)ue.classList.add('cod-hidden');
       $('cod-error-msg').classList.add('cod-hidden');
-      document.body.style.overflow = 'hidden';
-      
-      // Fetch cart and build line items
-      _fetchCart(function(){
-        _buildLineItems();
-        _updateModalHeader();
-      });
-
-      // Load variants array lazily on open
-      var vdata = $('cod-upsell-variants-data');
-      if(vdata && _upsellVariants.length === 0) {
-        try { _upsellVariants = JSON.parse(vdata.textContent); } catch(e){}
-        updateOptionAvailability();
-      }
+      document.body.style.overflow='hidden';
+      _fetchCart(function(){_buildLineItems();_renderItemsInModal();});
+      fbTrack('InitiateCheckout',{content_type:'product',currency:'MAD'});
+      var vd=$('cod-upsell-variants-data');
+      if(vd&&_upsellVariants.length===0){try{_upsellVariants=JSON.parse(vd.textContent);}catch(e){}updateOptionAvailability();}
     },
-    close: function(){
+    close:function(){
       stopTimer();
-      // Send abandon checkout on modal close
-      if(!_orderCompleted && !_abandonSent) {
-        _fireAbandon();
-      }
-      $('cod-modal-overlay').classList.add('cod-hidden');
-      document.body.style.overflow = '';
-      $('cod-order-form').reset();
-      $('cod-error-msg').classList.add('cod-hidden');
-      ['name','phone','address','city'].forEach(function(f){ $('cod-wrap-'+f).classList.remove('cod-error-border'); });
+      if(!_orderCompleted&&!_abandonSent)_fireAbandon();
+      $('cod-modal-overlay').classList.add('cod-hidden');document.body.style.overflow='';
+      $('cod-order-form').reset();$('cod-error-msg').classList.add('cod-hidden');
+      ['name','phone','address','city'].forEach(function(f){$('cod-wrap-'+f).classList.remove('cod-error-border');});
     },
-    closeOnOverlay: function(e){
-      if(e.target === $('cod-modal-overlay')) window.__codForm.close();
-    },
-    onVariantChange: function(){
-      if(!_upsellVariants.length) return;
-      var selects = document.querySelectorAll('.cod-upsell-select');
-      var selectedOptions = Array.prototype.map.call(selects, function(s){ return s.value.replace(/ (نفدت)$/, ''); });
-      
-      var variant = _upsellVariants.find(function(v){
-        return v.options.every(function(opt, i){ return opt === selectedOptions[i]; });
-      });
-      
-      if(!variant) return;
-      UPSELL_VARIANT_ID = variant.id;
-      
-      if(variant.featured_image) {
-        var img = $('cod-upsell-img-tag');
-        if(img) img.src = variant.featured_image;
-      }
-      
-      var priceEl = $('cod-upsell-price-new');
-      var oldPriceEl = $('cod-upsell-price-old');
-      var btnText = $('cod-upsell-accept-text');
-      var icon = $('cod-upsell-accept-icon');
-      var btn = $('cod-upsell-accept');
-      
-      var finalPrice = variant.price;
-      if(UPSELL_DISCOUNT > 0) {
-        var discMult = 1 - (UPSELL_DISCOUNT / 100);
-        finalPrice = variant.price * discMult;
-        if(oldPriceEl) oldPriceEl.textContent = formatMoney(variant.price);
-      }
-      if(priceEl) priceEl.textContent = formatMoney(finalPrice);
-      
-      if(!variant.available) {
-        btn.disabled = true;
-        btnText.innerHTML = 'نفدت الكمية';
-        if(icon) icon.style.display = 'none';
-      } else {
-        btn.disabled = false;
-        btnText.innerHTML = 'أضف للطلب — ' + formatMoney(finalPrice);
-        if(icon) icon.style.display = 'inline-block';
-      }
-
+    closeOnOverlay:function(e){if(e.target===$('cod-modal-overlay'))window.__codForm.close();},
+    onVariantChange:function(){
+      if(!_upsellVariants.length)return;
+      var sels=document.querySelectorAll('.cod-upsell-select');
+      var selOpts=Array.prototype.map.call(sels,function(s){return s.value.replace(/ \(\u0646\u0641\u062f\u062a\)$/,'');});
+      var variant=_upsellVariants.find(function(v){return v.options.every(function(o,i){return o===selOpts[i];});});
+      if(!variant)return;UPSELL_VARIANT_ID=variant.id;
+      if(variant.featured_image){var img=$('cod-upsell-img-tag');if(img)img.src=variant.featured_image;}
+      var pe=$('cod-upsell-price-new'),ope=$('cod-upsell-price-old'),bt=$('cod-upsell-accept-text'),ic=$('cod-upsell-accept-icon'),bn=$('cod-upsell-accept');
+      var fp=variant.price;
+      if(UPSELL_DISCOUNT>0){fp=variant.price*(1-UPSELL_DISCOUNT/100);if(ope)ope.textContent=formatMoney(variant.price);}
+      if(pe)pe.textContent=formatMoney(fp);
+      if(!variant.available){bn.disabled=true;bt.innerHTML='\u0646\u0641\u062f\u062a \u0627\u0644\u0643\u0645\u064a\u0629';if(ic)ic.style.display='none';}
+      else{bn.disabled=false;bt.innerHTML='\u0623\u0636\u0641 \u0644\u0644\u0637\u0644\u0628 \u2014 '+formatMoney(fp);if(ic)ic.style.display='inline-block';}
       updateOptionAvailability();
     },
-    submit: function(e){
-      e.preventDefault();
-      var form = $('cod-order-form');
-      var data = { name: form.name.value.trim(), phone: form.phone.value.trim(), address: form.address.value.trim(), city: form.city.value.trim() };
-      var hasError = false;
-      ['name','phone','address','city'].forEach(function(f){
-        var wrap = $('cod-wrap-'+f);
-        if(!data[f]){ wrap.classList.add('cod-error-border'); hasError = true; } else { wrap.classList.remove('cod-error-border'); }
-      });
-      if(hasError) return false;
-
-      _customerData = data;
-      var btn = $('cod-submit-btn');
-      btn.disabled = true;
-      $('cod-submit-text').classList.add('cod-hidden');
-      $('cod-submit-loading').classList.remove('cod-hidden');
-      $('cod-error-msg').classList.add('cod-hidden');
-
-      var url = BACKEND_URL.replace(/\/$/,'') + '/cod/create-order';
-      if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
-
-      // Build the payload with line_items
-      var items = _lineItems.length ? _lineItems : [{variant_id: VARIANT_ID, quantity: 1}];
-
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: JSON.stringify({ line_items: items, name: data.name, phone: data.phone, address: data.address, city: data.city, tags: ['easysell_cod_form'] })
+    submit:function(e){
+      e.preventDefault();var form=$('cod-order-form');
+      var data={name:form.name.value.trim(),phone:form.phone.value.trim(),address:form.address.value.trim(),city:form.city.value.trim()};
+      var err=false;
+      ['name','phone','address','city'].forEach(function(f){var w=$('cod-wrap-'+f);if(!data[f]){w.classList.add('cod-error-border');err=true;}else{w.classList.remove('cod-error-border');}});
+      if(err)return false;
+      _customerData=data;var btn=$('cod-submit-btn');btn.disabled=true;
+      $('cod-submit-text').classList.add('cod-hidden');$('cod-submit-loading').classList.remove('cod-hidden');$('cod-error-msg').classList.add('cod-hidden');
+      var url=BACKEND_URL.replace(/\/$/,'')+'/cod/create-order';if(WORKSPACE)url+='?shop='+encodeURIComponent(WORKSPACE);
+      var items=_lineItems.length?_lineItems.map(function(l){return{variant_id:l.variant_id,quantity:l.quantity};}):
+        [{variant_id:VARIANT_ID,quantity:1}];
+      fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-COD-API-Key':API_KEY},
+        body:JSON.stringify({line_items:items,name:data.name,phone:data.phone,address:data.address,city:data.city,tags:['easysell_cod_form']})
       })
-      .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
+      .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
       .then(function(res){
-        if(res.ok && res.data.ok){
-          _orderCompleted = true;
-          _draftOrderId = res.data.draft_order_id;
-          var ref = res.data.order_ref || '';
-          if(ref) $('cod-order-ref').innerHTML = 'رقم الطلب الخاص بك: <span>' + ref + '</span>';
-          
+        if(res.ok&&res.data.ok){
+          _orderCompleted=true;_draftOrderId=res.data.draft_order_id;
+          var ref=res.data.order_ref||'';if(ref)$('cod-order-ref').innerHTML='\u0631\u0642\u0645 \u0627\u0644\u0637\u0644\u0628 \u0627\u0644\u062e\u0627\u0635 \u0628\u0643: <span>'+ref+'</span>';
+          fbTrack('Purchase',{content_type:'product',value:(_totalCents/100).toFixed(2),currency:'MAD',content_ids:items.map(function(l){return String(l.variant_id);}),num_items:items.length});
           $('cod-form-state').classList.add('cod-hidden');
-          if(UPSELL_ENABLED && UPSELL_VARIANT_ID && $('cod-upsell-state')){
-            $('cod-upsell-state').classList.remove('cod-hidden');
-            startTimer();
-          } else {
-            $('cod-success-state').classList.remove('cod-hidden');
-          }
-        } else {
-          var msg = (res.data && res.data.detail) || (res.data && res.data.message) || 'حدث خطأ، يرجى المحاولة مرة أخرى.';
-          $('cod-error-msg').textContent = msg; $('cod-error-msg').classList.remove('cod-hidden');
-        }
+          if(UPSELL_ENABLED&&UPSELL_VARIANT_ID&&$('cod-upsell-state')){$('cod-upsell-state').classList.remove('cod-hidden');startTimer();}
+          else{$('cod-success-state').classList.remove('cod-hidden');}
+        }else{var msg=(res.data&&res.data.detail)||(res.data&&res.data.message)||'\u062d\u062f\u062b \u062e\u0637\u0623\u060c \u064a\u0631\u062c\u0649 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629 \u0645\u0631\u0629 \u0623\u062e\u0631\u0649.';
+          $('cod-error-msg').textContent=msg;$('cod-error-msg').classList.remove('cod-hidden');}
       })
-      .catch(function(){ $('cod-error-msg').textContent = 'تعذر الاتصال بالخادم.'; $('cod-error-msg').classList.remove('cod-hidden'); })
-      .finally(function(){ btn.disabled = false; $('cod-submit-text').classList.remove('cod-hidden'); $('cod-submit-loading').classList.add('cod-hidden'); });
+      .catch(function(){$('cod-error-msg').textContent='\u062a\u0639\u0630\u0631 \u0627\u0644\u0627\u062a\u0635\u0627\u0644 \u0628\u0627\u0644\u062e\u0627\u062f\u0645.';$('cod-error-msg').classList.remove('cod-hidden');})
+      .finally(function(){btn.disabled=false;$('cod-submit-text').classList.remove('cod-hidden');$('cod-submit-loading').classList.add('cod-hidden');});
       return false;
     },
-    acceptUpsell: function(){
-      stopTimer();
-      var btn = $('cod-upsell-accept');
-      btn.disabled = true;
-      $('cod-upsell-accept-text').classList.add('cod-hidden');
-      $('cod-upsell-accept-loading').classList.remove('cod-hidden');
-      
-      var errEl = $('cod-upsell-error');
-      if(errEl) errEl.classList.add('cod-hidden');
-
-      var url = BACKEND_URL.replace(/\/$/,'') + '/cod/add-upsell';
-      if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
-
-      // Calculate discount amount in cents for the upsell variant
-      var upsellDiscountAmount = 0;
-      if(UPSELL_DISCOUNT > 0 && _upsellVariants.length){
-        var selVariant = _upsellVariants.find(function(v){ return v.id === UPSELL_VARIANT_ID; });
-        if(selVariant){
-          upsellDiscountAmount = (selVariant.price * UPSELL_DISCOUNT / 100) / 100;
-        }
-      }
-
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: JSON.stringify({
-          draft_order_id: _draftOrderId,
-          variant_id: UPSELL_VARIANT_ID,
-          quantity: 1,
-          discount: upsellDiscountAmount
-        })
+    acceptUpsell:function(){
+      stopTimer();var btn=$('cod-upsell-accept');btn.disabled=true;
+      $('cod-upsell-accept-text').classList.add('cod-hidden');$('cod-upsell-accept-loading').classList.remove('cod-hidden');
+      var errEl=$('cod-upsell-error');if(errEl)errEl.classList.add('cod-hidden');
+      var url=BACKEND_URL.replace(/\/$/,'')+'/cod/add-upsell';if(WORKSPACE)url+='?shop='+encodeURIComponent(WORKSPACE);
+      var da=0;if(UPSELL_DISCOUNT>0&&_upsellVariants.length){var sv=_upsellVariants.find(function(v){return v.id===UPSELL_VARIANT_ID;});if(sv)da=(sv.price*UPSELL_DISCOUNT/100)/100;}
+      fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-COD-API-Key':API_KEY},
+        body:JSON.stringify({draft_order_id:_draftOrderId,variant_id:UPSELL_VARIANT_ID,quantity:1,discount:da})
       })
-      .then(function(r){ return r.json().then(function(d){return {ok:r.ok,data:d};}); })
+      .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
       .then(function(res){
-        if(res.ok && res.data.ok){
-          $('cod-upsell-state').classList.add('cod-hidden');
-          $('cod-success-state').classList.remove('cod-hidden');
-        } else {
-          var msg = (res.data && res.data.detail) || (res.data && res.data.message) || 'حدث خطأ أثناء إضافة المنتج.';
-          if(errEl){ errEl.textContent = msg; errEl.classList.remove('cod-hidden'); }
-        }
+        if(res.ok&&res.data.ok){$('cod-upsell-state').classList.add('cod-hidden');$('cod-success-state').classList.remove('cod-hidden');}
+        else{var m=(res.data&&res.data.detail)||(res.data&&res.data.message)||'\u062d\u062f\u062b \u062e\u0637\u0623 \u0623\u062b\u0646\u0627\u0621 \u0625\u0636\u0627\u0641\u0629 \u0627\u0644\u0645\u0646\u062a\u062c.';if(errEl){errEl.textContent=m;errEl.classList.remove('cod-hidden');}}
       })
-      .catch(function(){ if(errEl){ errEl.textContent = 'تعذر الاتصال بالخادم.'; errEl.classList.remove('cod-hidden'); } })
-      .finally(function(){ btn.disabled = false; $('cod-upsell-accept-text').classList.remove('cod-hidden'); $('cod-upsell-accept-loading').classList.add('cod-hidden'); });
+      .catch(function(){if(errEl){errEl.textContent='\u062a\u0639\u0630\u0631 \u0627\u0644\u0627\u062a\u0635\u0627\u0644 \u0628\u0627\u0644\u062e\u0627\u062f\u0645.';errEl.classList.remove('cod-hidden');}})
+      .finally(function(){btn.disabled=false;$('cod-upsell-accept-text').classList.remove('cod-hidden');$('cod-upsell-accept-loading').classList.add('cod-hidden');});
     },
-    skipUpsell: function(){
-      stopTimer();
-      var u = $('cod-upsell-state'); if(u) u.classList.add('cod-hidden');
-      $('cod-success-state').classList.remove('cod-hidden');
-    }
+    skipUpsell:function(){stopTimer();var u=$('cod-upsell-state');if(u)u.classList.add('cod-hidden');$('cod-success-state').classList.remove('cod-hidden');}
   };
 
-  // ── Abandon Checkout Tracking ──
-  // Fires on ANY exit: modal close, page navigation, tab close, connection loss
-  // Works even without customer info (sends with empty/Unknown fields)
   function _fireAbandon(){
-    if(_abandonSent || _orderCompleted) return;
-    if(!_modalOpened) return; // Only abandon if modal was opened
-    _abandonSent = true;
-
-    var form = $('cod-order-form');
-    var name = '', phone = '', address = '', city = '';
-    if(form) {
-      name = (form.name ? form.name.value : '').trim();
-      phone = (form.phone ? form.phone.value : '').trim();
-      address = (form.address ? form.address.value : '').trim();
-      city = (form.city ? form.city.value : '').trim();
-    }
-
-    var items = _lineItems.length ? _lineItems : (VARIANT_ID ? [{variant_id: VARIANT_ID, quantity: 1}] : []);
-    if(!items.length) return; // Nothing to abandon
-
-    var url = BACKEND_URL.replace(/\/$/,'') + '/cod/abandon-checkout';
-    if(WORKSPACE) url += '?shop=' + encodeURIComponent(WORKSPACE);
-
-    var payload = JSON.stringify({
-      line_items: items,
-      name: name || '',
-      phone: phone || '',
-      address: address || 'N/A',
-      city: city || 'N/A'
-    });
-
-    // Use fetch with keepalive for reliability on page unload
-    try {
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-COD-API-Key': API_KEY },
-        body: payload,
-        keepalive: true
-      }).catch(function(){});
-    } catch(e) {}
+    if(_abandonSent||_orderCompleted||!_modalOpened)return;_abandonSent=true;
+    var form=$('cod-order-form'),n='',p='',a='',c='';
+    if(form){n=(form.name?form.name.value:'').trim();p=(form.phone?form.phone.value:'').trim();a=(form.address?form.address.value:'').trim();c=(form.city?form.city.value:'').trim();}
+    var items=_lineItems.length?_lineItems.map(function(l){return{variant_id:l.variant_id,quantity:l.quantity};}):
+      (VARIANT_ID?[{variant_id:VARIANT_ID,quantity:1}]:[]);
+    if(!items.length)return;
+    var url=BACKEND_URL.replace(/\/$/,'')+'/cod/abandon-checkout';if(WORKSPACE)url+='?shop='+encodeURIComponent(WORKSPACE);
+    try{fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-COD-API-Key':API_KEY},
+      body:JSON.stringify({line_items:items,name:n||'',phone:p||'',address:a||'N/A',city:c||'N/A'}),keepalive:true
+    }).catch(function(){});}catch(e){}
   }
 
-  // Fire abandon on page unload (tab close, navigate away)
-  window.addEventListener('beforeunload', function(){
-    if(!_orderCompleted && !_abandonSent && _modalOpened) _fireAbandon();
-  });
-
-  // Fire abandon on visibility change (mobile: switching apps, closing tab)
-  document.addEventListener('visibilitychange', function(){
-    if(document.visibilityState === 'hidden' && !_orderCompleted && !_abandonSent && _modalOpened) {
-      _fireAbandon();
-    }
-  });
-
+  window.addEventListener('beforeunload',function(){if(!_orderCompleted&&!_abandonSent&&_modalOpened)_fireAbandon();});
+  document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden'&&!_orderCompleted&&!_abandonSent&&_modalOpened)_fireAbandon();});
 })();
 </script>
 

@@ -668,9 +668,12 @@
   };
 
   function _fireAbandon(){
-    if(_abandonSent||_orderCompleted||!_modalOpened)return;_abandonSent=true;
+    if(_abandonSent||_orderCompleted||!_modalOpened)return;
     var form=$('cod-order-form'),n='',p='',a='',c='';
     if(form){n=(form.name?form.name.value:'').trim();p=(form.phone?form.phone.value:'').trim();a=(form.address?form.address.value:'').trim();c=(form.city?form.city.value:'').trim();}
+    /* Only create abandon checkout if the customer entered a phone number */
+    if(!p)return;
+    _abandonSent=true;
     var items=_lineItems.length?_lineItems.map(function(l){return{variant_id:l.variant_id,quantity:l.quantity};}):
       (VARIANT_ID?[{variant_id:VARIANT_ID,quantity:1}]:[]);
     if(!items.length)return;

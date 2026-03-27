@@ -2714,9 +2714,11 @@ async def cod_abandon_checkout(
     if not incoming_key or incoming_key != _COD_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
 
-    # ── 2. Validate inputs (name/phone optional for abandon) ──
+    # ── 2. Validate inputs (phone is required for abandon checkout) ──
     name = str(data.get("name") or "").strip() or "Unknown"
     phone = str(data.get("phone") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=422, detail="Phone number is required for abandoned checkout tracking")
     address = str(data.get("address") or "").strip()
     city = str(data.get("city") or "").strip()
 

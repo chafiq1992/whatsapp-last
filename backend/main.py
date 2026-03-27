@@ -11191,6 +11191,7 @@ class MessageProcessor:
           trigger.event == <event>, e.g. "order_status_changed"
         """
         ws_token = None
+        _log = logging.getLogger(__name__)
         try:
             if workspace:
                 try:
@@ -11201,9 +11202,14 @@ class MessageProcessor:
             ws = get_current_workspace()
             rules = await self._load_automation_rules(ws)
             if not rules:
+                _log.info("delivery_automation ws=%s no rules found event=%s", ws, event)
                 return
 
             event_norm = str(event or "").strip() or "order_status_changed"
+            event_norm_lc = event_norm.lower()
+            event_aliases = {event_norm_lc}
+            if event_norm_lc in ("order_status_changed", "status_change"):
+                event_aliases.update({"order_status_changed", "status_change"})
             data = payload if isinstance(payload, dict) else {}
 
             # Accept either flat payload or { order: {...} }
@@ -11236,13 +11242,149 @@ class MessageProcessor:
                 order_obj.get("new_status"),
             )
             status_norm = str(status_val or "").strip()
+            prev_status_norm = str(
+                data.get("prev_status")
+                or data.get("previous_status")
+                or order_obj.get("prev_status")
+                or order_obj.get("previous_status")
+                or ""
+            ).strip()
+
+            def _status_key(s: str) -> str:
+                try:
+                    import unicodedata as _ud
+
+                    base = _ud.normalize("NFKD", str(s or "").strip().lower())
+                    base = "".join(ch for ch in base if not _ud.combining(ch))
+                except Exception:
+                    base = str(s or "").strip().lower()
+                base = re.sub(r"[^a-z0-9]+", "_", base).strip("_")
+                return base
+
+            status_key = _status_key(status_norm)
+            status_event_aliases: set[str] = set()
+            if status_key:
+                status_event_aliases.add(status_key)
+
+            # Map delivery statuses from delvery-app-v3 into trigger events used by Flow Builder.
+            # This keeps legacy event='order_status_changed' working while enabling richer triggers.
+            _status_to_event_map = {
+                "out_for_delivery": {"mise_en_distribution", "dispatched", "en_cours"},
+                "delivered": {"livre", "delivered"},
+                "cod_collected": {"paid", "paye", "rembourse"},
+                "failed_delivery": {"pas_de_reponse_1", "pas_de_reponse_2", "pas_de_reponse_3"},
+                "returned": {"returned", "retourne", "deleted"},
+                "pickup_ready": {"ajoute", "expedie", "ramasse"},
+                "driver_assigned": {"ramasse_par_livreur", "driver_assigned"},
+                "cancelled": {"annule"},
+                "refused": {"refuse"},
+                "rescheduled": {"reporte", "rescheduled"},
+                "no_answer": {"pas_de_reponse_1", "pas_de_reponse_2", "pas_de_reponse_3"},
+                "paid": {"paid", "paye", "rembourse"},
+            }
+            for _ev, _keys in _status_to_event_map.items():
+                if status_key in _keys:
+                    status_event_aliases.add(_ev)
+            event_aliases.update(status_event_aliases)
+
+            def _lookup_field(raw_key: str):
+                key = str(raw_key or "").strip()
+                if not key:
+                    return ""
+                alias = {
+                    "customer_phone": _first(data.get("customer_phone"), data.get("phone"), order_obj.get("customer_phone"), order_obj.get("phone")),
+                    "previous_status": prev_status_norm,
+                    "prev_status": prev_status_norm,
+                    "address": _first(data.get("order_address"), data.get("address"), order_obj.get("address")),
+                    "estimated_delivery": _first(data.get("estimated_delivery"), data.get("expected_delivery_time"), order_obj.get("expected_delivery_time")),
+                }
+                if key in alias:
+                    return alias.get(key) or ""
+
+                cur = {
+                    **(data if isinstance(data, dict) else {}),
+                    "order": order_obj,
+                    "status": status_norm,
+                    "prev_status": prev_status_norm,
+                    "previous_status": prev_status_norm,
+                }
+                if "." in key:
+                    node = cur
+                    for part in key.split("."):
+                        if isinstance(node, dict) and part in node:
+                            node = node.get(part)
+                        else:
+                            node = ""
+                            break
+                    return "" if node is None else node
+                if isinstance(cur, dict) and key in cur:
+                    v = cur.get(key)
+                    return "" if v is None else v
+                if isinstance(order_obj, dict) and key in order_obj:
+                    v = order_obj.get(key)
+                    return "" if v is None else v
+                return ""
+
+            def _eval_condition(field: str, op: str, expected: str) -> bool:
+                actual_raw = _lookup_field(field)
+                actual = str(actual_raw if actual_raw is not None else "").strip()
+                expected_s = str(expected or "").strip()
+                op_s = str(op or "==").strip().lower()
+
+                if op_s in ("==", "equals", "eq"):
+                    return actual.lower() == expected_s.lower()
+                if op_s in ("!=", "not_equals", "ne"):
+                    return actual.lower() != expected_s.lower()
+                if op_s == "contains":
+                    return expected_s.lower() in actual.lower()
+                if op_s == "not_contains":
+                    return expected_s.lower() not in actual.lower()
+                if op_s == "starts_with":
+                    return actual.lower().startswith(expected_s.lower())
+                if op_s == "ends_with":
+                    return actual.lower().endswith(expected_s.lower())
+                if op_s == "is_empty":
+                    return actual == ""
+                if op_s == "is_not_empty":
+                    return actual != ""
+                if op_s == "matches":
+                    try:
+                        return bool(re.search(expected_s, actual, flags=re.IGNORECASE))
+                    except Exception:
+                        return False
+                if op_s in ("in", "not_in"):
+                    vals = [x.strip().lower() for x in re.split(r"[,\n\r]+", expected_s) if x and x.strip()]
+                    in_set = actual.lower() in set(vals) if vals else False
+                    return in_set if op_s == "in" else (not in_set)
+                if op_s in (">", "<", ">=", "<="):
+                    try:
+                        a_num = float(actual)
+                        e_num = float(expected_s)
+                        if op_s == ">":
+                            return a_num > e_num
+                        if op_s == "<":
+                            return a_num < e_num
+                        if op_s == ">=":
+                            return a_num >= e_num
+                        return a_num <= e_num
+                    except Exception:
+                        return False
+                return False
 
             ctx = {
                 "event": event_norm,
                 "phone": phone_digits,
                 "user_id": phone_digits,
                 "status": status_norm,
+                "customer_phone": _first(data.get("customer_phone"), data.get("phone"), order_obj.get("customer_phone"), order_obj.get("phone")),
                 "prev_status": (
+                    data.get("prev_status")
+                    or data.get("previous_status")
+                    or order_obj.get("prev_status")
+                    or order_obj.get("previous_status")
+                    or ""
+                ),
+                "previous_status": (
                     data.get("prev_status")
                     or data.get("previous_status")
                     or order_obj.get("prev_status")
@@ -11284,10 +11426,22 @@ class MessageProcessor:
                     or order_obj.get("description")
                     or ""
                 ),
+                "address": (
+                    data.get("order_address")
+                    or data.get("address")
+                    or order_obj.get("address")
+                    or ""
+                ),
                 "order_address": (
                     data.get("order_address")
                     or data.get("address")
                     or order_obj.get("address")
+                    or ""
+                ),
+                "estimated_delivery": (
+                    data.get("estimated_delivery")
+                    or data.get("expected_delivery_time")
+                    or order_obj.get("expected_delivery_time")
                     or ""
                 ),
                 "phone_local": (
@@ -11315,6 +11469,16 @@ class MessageProcessor:
             except Exception:
                 hay = ""
 
+            _log.info(
+                "delivery_automation ws=%s event=%s aliases=%s phone=%s status=%s rules=%s",
+                ws,
+                event_norm,
+                ",".join(sorted(event_aliases)),
+                phone_digits,
+                status_norm,
+                len(rules),
+            )
+
             for rule in rules:
                 try:
                     if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
@@ -11324,7 +11488,16 @@ class MessageProcessor:
                         trigger = {}
                     if str(trigger.get("source") or "").lower() != "delivery":
                         continue
-                    if str(trigger.get("event") or "").strip() != event_norm:
+                    rule_event = str(trigger.get("event") or "").strip()
+                    rule_event_lc = rule_event.lower()
+                    if rule_event_lc and (rule_event_lc not in event_aliases):
+                        _log.info(
+                            "delivery_automation ws=%s rule=%s skipped event mismatch: rule_event=%s incoming=%s",
+                            ws,
+                            str(rule.get("id") or ""),
+                            rule_event,
+                            event_norm,
+                        )
                         continue
 
                     # Optional testing guard: only fire for specific phone numbers.
@@ -11366,6 +11539,38 @@ class MessageProcessor:
                     elif mode in ("status_equals", "delivery_status_equals"):
                         needle = str(cond.get("value") or "").strip().lower()
                         matched = bool(needle) and bool(status_norm) and (status_norm.lower() == needle)
+                    elif mode == "all":
+                        c_list = cond.get("conditions") or []
+                        if isinstance(c_list, list) and c_list:
+                            matched = True
+                            for c_rule in c_list:
+                                if not isinstance(c_rule, dict):
+                                    continue
+                                if not _eval_condition(
+                                    field=str(c_rule.get("field") or "").strip(),
+                                    op=str(c_rule.get("operator") or "==").strip(),
+                                    expected=str(c_rule.get("value") or "").strip(),
+                                ):
+                                    matched = False
+                                    break
+                        else:
+                            matched = True
+                    elif mode == "expression":
+                        f = str(cond.get("field") or "").strip()
+                        op = str(cond.get("operator") or "==").strip()
+                        v = str(cond.get("value") or "").strip()
+                        if not f:
+                            expr = str(cond.get("expression") or "").strip()
+                            m = re.search(
+                                r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}\s*(==|!=|>=|<=|>|<|contains|not_contains|starts_with|ends_with|matches|in|not_in|is_empty|is_not_empty)\s*(.*)$",
+                                expr,
+                                flags=re.IGNORECASE,
+                            )
+                            if m:
+                                f = str(m.group(1) or "").strip()
+                                op = str(m.group(2) or "==").strip()
+                                v = str(m.group(3) or "").strip().strip("'").strip('"')
+                        matched = _eval_condition(f, op, v) if f else True
                     else:
                         # Fallback: contains keywords in payload json
                         keywords = cond.get("keywords")
@@ -11376,6 +11581,13 @@ class MessageProcessor:
                             matched = True
 
                     if not matched:
+                        _log.info(
+                            "delivery_automation ws=%s rule=%s skipped condition mode=%s status=%s",
+                            ws,
+                            str(rule.get("id") or ""),
+                            mode,
+                            status_norm,
+                        )
                         continue
 
                     try:
@@ -11393,6 +11605,16 @@ class MessageProcessor:
                         actions = [actions]
                     if not isinstance(actions, list):
                         actions = []
+
+                    _log.info(
+                        "delivery_automation ws=%s rule=%s matched event=%s actions=%s phone=%s status=%s",
+                        ws,
+                        str(rule.get("id") or ""),
+                        event_norm,
+                        len(actions),
+                        phone_digits,
+                        status_norm,
+                    )
 
                     for act in actions:
                         if not isinstance(act, dict):
@@ -13077,7 +13299,7 @@ You ONLY output valid JSON — no markdown, no explanation, no code fences.
 ## AVAILABLE TRIGGER SOURCES
 - shopify (events: orders/paid, orders/create, orders/updated, orders/cancelled, orders/fulfilled, fulfillments/create, fulfillments/update, customers/create, customers/update, checkouts/update, draft_orders/create, products/create, products/update, inventory_levels/update)
 - whatsapp (events: message, no_reply, interactive, first_message, keyword_match, media_received)
-- delivery (events: status_change, out_for_delivery, delivered, failed_delivery, returned, pickup_ready, driver_assigned, cod_collected)
+- delivery (events: status_change, out_for_delivery, delivered, failed_delivery, returned, pickup_ready, driver_assigned, cod_collected, paid, cancelled, refused, rescheduled, no_answer)
 
 ## AVAILABLE ACTION TYPES
 - send_whatsapp_text: Send a plain text. Data: {text, to:"{{ phone }}"}
@@ -18643,15 +18865,21 @@ async def app_config(request: Request):
         # Override via DB/env as needed per deployment.
         if not delivery_statuses:
             delivery_statuses = [
+                "Ajouté",
+                "Expédié",
+                "Ramassé",
+                "Ramassé par livreur",
+                "Mise en distribution",
+                "En cours",
                 "Dispatched",
                 "Livré",
                 "Paid",
-                "En cours",
                 "Pas de réponse 1",
                 "Pas de réponse 2",
                 "Pas de réponse 3",
                 "Annulé",
                 "Refusé",
+                "Reporté",
                 "Rescheduled",
                 "Returned",
                 "Deleted",
@@ -20271,3 +20499,4 @@ async def delete_conversation_note(note_id: int):
         raise HTTPException(status_code=503, detail="Notes temporarily busy, please retry")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to delete note: {exc}")
+

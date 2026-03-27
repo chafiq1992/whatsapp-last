@@ -188,6 +188,11 @@ const DELIVERY_EVENTS = [
   { id: 'pickup_ready', label: 'Ready for Pickup', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
   { id: 'driver_assigned', label: 'Driver Assigned', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
   { id: 'cod_collected', label: 'COD Collected', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'paid', label: 'Paid / COD Collected', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'cancelled', label: 'Cancelled', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'refused', label: 'Refused', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'rescheduled', label: 'Rescheduled', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
+  { id: 'no_answer', label: 'No Answer', cat: 'Status', variables: 'SAME_AS_DEL:status_change' },
 ];
 
 DELIVERY_EVENTS.forEach(ev => {

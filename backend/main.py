@@ -3093,9 +3093,39 @@ class DatabaseManager:
             # Ensure newer columns exist for deployments created before they were added
             # Workspace isolation
             await self._add_column_if_missing(db, "messages", "workspace", f"TEXT DEFAULT '{DEFAULT_WORKSPACE}'")
+            # Legacy compatibility for newer workspace-scoped tables that may predate
+            # the workspace column in older Postgres schemas.
+            await self._add_column_if_missing(
+                db, "automation_rule_once_sent", "workspace", f"TEXT DEFAULT '{DEFAULT_WORKSPACE}'"
+            )
+            await self._add_column_if_missing(
+                db, "integration_events", "workspace", f"TEXT DEFAULT '{DEFAULT_WORKSPACE}'"
+            )
             try:
                 # Backfill any existing rows missing workspace to DEFAULT_WORKSPACE
                 q = self._convert("UPDATE messages SET workspace = ? WHERE workspace IS NULL OR workspace = ''")
+                if self.use_postgres:
+                    await db.execute(q, DEFAULT_WORKSPACE)
+                else:
+                    await db.execute(q, (DEFAULT_WORKSPACE,))
+                    await db.commit()
+            except Exception:
+                pass
+            try:
+                q = self._convert(
+                    "UPDATE automation_rule_once_sent SET workspace = ? WHERE workspace IS NULL OR workspace = ''"
+                )
+                if self.use_postgres:
+                    await db.execute(q, DEFAULT_WORKSPACE)
+                else:
+                    await db.execute(q, (DEFAULT_WORKSPACE,))
+                    await db.commit()
+            except Exception:
+                pass
+            try:
+                q = self._convert(
+                    "UPDATE integration_events SET workspace = ? WHERE workspace IS NULL OR workspace = ''"
+                )
                 if self.use_postgres:
                     await db.execute(q, DEFAULT_WORKSPACE)
                 else:
@@ -12549,6 +12579,12 @@ async def workspace_context_middleware(request: StarletteRequest, call_next):
 async def no_cache_html(request: StarletteRequest, call_next):
     response: StarletteResponse = await call_next(request)
     path = request.url.path or "/"
+    # Build artifacts usually include content hashes (e.g. main.7e240b70.js).
+    # These files are safe to cache aggressively and avoid re-downloading on every page load.
+    is_hashed_static_code = (
+        path.startswith("/static/")
+        and bool(re.search(r"\.[0-9a-f]{8,}\.(js|css|map)$", path, flags=re.IGNORECASE))
+    )
     # Service worker script must never be long-cached, otherwise clients get stuck on old SW
     if path == "/sw.js" or path.endswith("/sw.js"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -12557,8 +12593,10 @@ async def no_cache_html(request: StarletteRequest, call_next):
     if path == "/" or path.endswith(".html"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
-    # Always serve freshest app code to avoid hard refresh requirements
-    if path.endswith((".js", ".css", ".map")):
+    # Cache-busted static bundles can be immutable; non-hashed code should stay no-cache.
+    if is_hashed_static_code:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.endswith((".js", ".css", ".map")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
     # Allow long-lived cache for static media assets only (not JS/CSS)

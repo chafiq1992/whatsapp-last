@@ -36,6 +36,12 @@ gcloud run deploy "$SERVICE" \
   --allow-unauthenticated \
   --vpc-connector "$VPC_CONNECTOR" \
   --vpc-egress private-ranges-only \
+  --concurrency 5 \
+  --cpu 1 \
+  --timeout 40 \
+  --min-instances 1 \
+  --max-instances 6 \
+  --cpu-boost \
   --memory 1Gi \
   --set-env-vars "REDIS_URL=redis://$REDIS_HOST:6379" \
   --set-env-vars "ENABLE_WS_PUBSUB=1" \

@@ -50,6 +50,12 @@ jobs:
             --allow-unauthenticated \
             --vpc-connector "${{ secrets.VPC_CONNECTOR }}" \
             --vpc-egress private-ranges-only \
+            --concurrency 5 \
+            --cpu 1 \
+            --timeout 40 \
+            --min-instances 1 \
+            --max-instances 6 \
+            --cpu-boost \
             --memory 1Gi \
             --update-env-vars "REDIS_URL=redis://${{ secrets.REDIS_HOST }}:6379,ENABLE_WS_PUBSUB=1,GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }},PORT=8080"
 

@@ -3,6 +3,7 @@ import api from './api';
 import MessageBubble from './MessageBubble';
 import ForwardDialog from './ForwardDialog';
 import useAudioRecorder from './useAudioRecorder';
+import { useAudio } from './AudioManager';
 import { Virtuoso } from 'react-virtuoso';
 import { saveMessages, loadMessages } from './chatStorage';
 import Composer from './Composer';
@@ -106,7 +107,18 @@ function groupConsecutiveImages(messages) {
   return grouped;
 }
 
-function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversationTags, workspace, catalogProducts }) {
+function ChatWindow({
+  activeUser,
+  ws,
+  currentAgent,
+  adminWs,
+  onUpdateConversationTags,
+  workspace,
+  catalogProducts,
+  isMobileLayout = false,
+  onOpenMobileInbox,
+  onOpenMobileDetails,
+}) {
   const [messages, setMessages] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHitIndexes, setSearchHitIndexes] = useState([]);
@@ -215,6 +227,11 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     setAllowSmoothScroll(false);
     hasInitialisedScrollRef.current = false;
     justOpenedRef.current = true;
+    setAtBottom(true);
+    atBottomRef.current = true;
+    setIsNearBottom(true);
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
     // First, hydrate from cache for instant UX
     loadMessages(uid).then((msgs) => {
       if (conversationIdRef.current !== uid) return; // ignore stale
@@ -245,6 +262,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
   const listRef = useRef(null);
   const [listHeight, setListHeight] = useState(0);
   const canvasRef = useRef();
+  const { currentUrl: activeAudioUrl } = useAudio();
   const [atBottom, setAtBottom] = useState(true);
   const atBottomRef = useRef(true);
   const [isNearBottom, setIsNearBottom] = useState(true);
@@ -274,6 +292,7 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
   const layoutLastHeightRef = useRef(0);
   const layoutLastUpdateTsRef = useRef(0);
   const lastPreviewRef = useRef({ user_id: null, time: null, message: null, type: null });
+  const listBottomSpacerPx = activeAudioUrl ? 116 : 32;
 
   // Insert date separators like WhatsApp Business
   // Normalize timestamps and group by day in a single, consistent timezone to avoid flicker
@@ -930,7 +949,13 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
 
   const scrollToBottom = () => {
     runWithSmoothScroll(() => {
-      try { listRef.current?.scrollToIndex(groupedMessages.length - 1); } catch {}
+      try {
+        listRef.current?.scrollToIndex({
+          index: Math.max(0, groupedMessages.length - 1),
+          align: 'end',
+          behavior: 'smooth',
+        });
+      } catch {}
     });
   };
 
@@ -1022,7 +1047,13 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
     if (!isInitialLoading && groupedMessages.length > 0 && !hasInitialisedScrollRef.current) {
       hasInitialisedScrollRef.current = true;
       requestAnimationFrame(() => {
-        try { listRef.current?.scrollToIndex(groupedMessages.length - 1); } catch {}
+        try {
+          listRef.current?.scrollToIndex({
+            index: Math.max(0, groupedMessages.length - 1),
+            align: 'end',
+            behavior: 'auto',
+          });
+        } catch {}
       });
     }
   }, [isInitialLoading, groupedMessages.length]);
@@ -1318,88 +1349,109 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
       onDragOver={e => e.preventDefault()}
       onPaste={handlePaste}
     >
-      <div className="p-2 bg-gray-800 border-b border-gray-700 flex items-center justify-between gap-2">
-        <strong className="px-2 truncate">
-          <span className="font-mono">{activeUser?.user_id || ''}</span>
-        </strong>
-        {/* Search box */}
-        <div className="flex items-center gap-1 flex-1 max-w-[420px]">
-          <input
-            className="flex-1 px-2 py-1 bg-gray-700 text-white rounded"
-            placeholder="Search in conversation"
-            value={searchQuery}
-            onChange={(e)=>setSearchQuery(e.target.value)}
-          />
-          <span className="text-xs text-gray-300 min-w-[70px] text-center">
-            {searchHitIndexes.length ? `${activeHitIdx+1}/${searchHitIndexes.length}` : ''}
-          </span>
-          <button
-            className="px-2 py-1 bg-gray-700 text-white rounded disabled:opacity-50"
-            disabled={searchHitIndexes.length===0}
-            onClick={()=>{ const next = (activeHitIdx - 1 + searchHitIndexes.length) % searchHitIndexes.length; setActiveHitIdx(next); scrollToHit(next); }}
-            title="Previous"
-          >↑</button>
-          <button
-            className="px-2 py-1 bg-gray-700 text-white rounded disabled:opacity-50"
-            disabled={searchHitIndexes.length===0}
-            onClick={()=>{ const next = (activeHitIdx + 1) % searchHitIndexes.length; setActiveHitIdx(next); scrollToHit(next); }}
-            title="Next"
-          >↓</button>
-        </div>
-        <div className="flex items-center space-x-2">
-          {/* Notes button */}
-          {activeUser?.user_id && (
-            <button
-              className="relative px-2 py-1 bg-blue-700 text-white rounded"
-              onClick={() => {
-                try {
-                  const uid = activeUser?.user_id;
-                  if (!uid) return;
-                  window.dispatchEvent(new CustomEvent('open-notes', { detail: { user_id: uid } }));
-                } catch {}
-              }}
-              title="Conversation notes"
-            >
-              Notes
-              {notesCount > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] leading-[18px] text-center">
-                  {notesCount}
-                </span>
-              )}
-            </button>
-          )}
-          {(() => {
-            const isDone = (activeUser?.tags || []).some(t => String(t || '').toLowerCase() === 'done');
-            const userId = activeUser?.user_id;
-            const toggleDone = async () => {
-              if (!userId) return;
-              try {
-                const current = Array.isArray(activeUser?.tags) ? activeUser.tags : [];
-                const newTags = isDone
-                  ? current.filter(t => String(t || '').toLowerCase() !== 'done')
-                  : [...current, 'done'];
-                await api.post(`/conversations/${userId}/tags`, { tags: newTags });
-                if (typeof onUpdateConversationTags === 'function') {
-                  onUpdateConversationTags(userId, newTags);
-                }
-              } catch (e) {}
-            };
-            return (
+      <div className="p-2 bg-gray-800 border-b border-gray-700">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            {isMobileLayout && (
               <button
-                className={`px-2 py-1 rounded ${isDone ? 'bg-yellow-600 text-black' : 'bg-green-600 text-white'}`}
-                onClick={toggleDone}
-                title={isDone ? 'Clear Done (move back to Inbox)' : 'Mark as Done (Archive)'}
+                type="button"
+                className="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-white"
+                onClick={() => { try { onOpenMobileInbox?.(); } catch {} }}
               >
-                {isDone ? '↩︎ Clear Done' : '✓ Done'}
+                Inbox
               </button>
-            );
-          })()}
-          <div className={`w-3 h-3 rounded-full ${
-            ws && ws.readyState === WebSocket.OPEN ? 'bg-green-500' : 'bg-red-500'
-          }`} title={`WebSocket ${ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected'}`}></div>
-          <span className="text-xs text-gray-400">
-            {ws && ws.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'}
-          </span>
+            )}
+            <strong className="min-w-0 truncate px-2">
+              <span className="font-mono">{activeUser?.user_id || ''}</span>
+            </strong>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            {isMobileLayout && (
+              <button
+                type="button"
+                className="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-white"
+                onClick={() => { try { onOpenMobileDetails?.(); } catch {} }}
+              >
+                Info
+              </button>
+            )}
+            {/* Notes button */}
+            {activeUser?.user_id && (
+              <button
+                className="relative px-2 py-1 bg-blue-700 text-white rounded"
+                onClick={() => {
+                  try {
+                    const uid = activeUser?.user_id;
+                    if (!uid) return;
+                    window.dispatchEvent(new CustomEvent('open-notes', { detail: { user_id: uid } }));
+                  } catch {}
+                }}
+                title="Conversation notes"
+              >
+                Notes
+                {notesCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] leading-[18px] text-center">
+                    {notesCount}
+                  </span>
+                )}
+              </button>
+            )}
+            {(() => {
+              const isDone = (activeUser?.tags || []).some(t => String(t || '').toLowerCase() === 'done');
+              const userId = activeUser?.user_id;
+              const toggleDone = async () => {
+                if (!userId) return;
+                try {
+                  const current = Array.isArray(activeUser?.tags) ? activeUser.tags : [];
+                  const newTags = isDone
+                    ? current.filter(t => String(t || '').toLowerCase() !== 'done')
+                    : [...current, 'done'];
+                  await api.post(`/conversations/${userId}/tags`, { tags: newTags });
+                  if (typeof onUpdateConversationTags === 'function') {
+                    onUpdateConversationTags(userId, newTags);
+                  }
+                } catch (e) {}
+              };
+              return (
+                <button
+                  className={`px-2 py-1 rounded ${isDone ? 'bg-yellow-600 text-black' : 'bg-green-600 text-white'}`}
+                  onClick={toggleDone}
+                  title={isDone ? 'Clear Done (move back to Inbox)' : 'Mark as Done (Archive)'}
+                >
+                  {isDone ? 'Clear Done' : 'Done'}
+                </button>
+              );
+            })()}
+            <div className={`w-3 h-3 rounded-full ${
+              ws && ws.readyState === WebSocket.OPEN ? 'bg-green-500' : 'bg-red-500'
+            }`} title={`WebSocket ${ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected'}`}></div>
+            <span className="hidden sm:inline text-xs text-gray-400">
+              {ws && ws.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+          <div className="order-3 flex w-full items-center gap-1 md:order-none md:flex-1 md:max-w-[420px]">
+            <input
+              className="flex-1 px-2 py-1 bg-gray-700 text-white rounded"
+              placeholder="Search in conversation"
+              value={searchQuery}
+              onChange={(e)=>setSearchQuery(e.target.value)}
+            />
+            <span className="text-xs text-gray-300 min-w-[56px] text-center">
+              {searchHitIndexes.length ? `${activeHitIdx+1}/${searchHitIndexes.length}` : ''}
+            </span>
+            <button
+              className="px-2 py-1 bg-gray-700 text-white rounded disabled:opacity-50"
+              disabled={searchHitIndexes.length===0}
+              onClick={()=>{ const next = (activeHitIdx - 1 + searchHitIndexes.length) % searchHitIndexes.length; setActiveHitIdx(next); scrollToHit(next); }}
+              title="Previous"
+            >Prev</button>
+            <button
+              className="px-2 py-1 bg-gray-700 text-white rounded disabled:opacity-50"
+              disabled={searchHitIndexes.length===0}
+              onClick={()=>{ const next = (activeHitIdx + 1) % searchHitIndexes.length; setActiveHitIdx(next); scrollToHit(next); }}
+              title="Next"
+            >Next</button>
+          </div>
         </div>
       </div>
       
@@ -1488,11 +1540,14 @@ function ChatWindow({ activeUser, ws, currentAgent, adminWs, onUpdateConversatio
             ref={listRef}
             style={{ height: listHeight, width: '100%' }}
             data={groupedMessages}
-            initialTopMostItemIndex={Math.max(0, groupedMessages.length - 1)}
+            initialTopMostItemIndex={{ index: Math.max(0, groupedMessages.length - 1), align: 'end' }}
             firstItemIndex={firstItemIndex}
             increaseViewportBy={{ top: 400, bottom: 600 }}
             className={`${allowSmoothScroll ? 'scroll-smooth' : ''}`}
             followOutput={atBottom ? 'smooth' : false}
+            components={{
+              Footer: () => <div style={{ height: listBottomSpacerPx }} aria-hidden="true" />,
+            }}
             atBottomStateChange={(isBottom) => {
               atBottomRef.current = isBottom;
               setAtBottom(isBottom);
@@ -1765,9 +1820,11 @@ const areEqual = (prevProps, nextProps) => {
     prevProps.adminWs === nextProps.adminWs &&
     prevProps.currentAgent === nextProps.currentAgent &&
     prevProps.onUpdateConversationTags === nextProps.onUpdateConversationTags &&
+    prevProps.isMobileLayout === nextProps.isMobileLayout &&
     prevProps.workspace === nextProps.workspace &&
     prevProps.catalogProducts === nextProps.catalogProducts
   );
 };
 
 export default React.memo(ChatWindow, areEqual);
+

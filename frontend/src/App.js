@@ -61,9 +61,18 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [loadingConversations, setLoadingConversations] = useState(false);
   const [authReady, setAuthReady] = useState(false);
+  const [isMobileLayout, setIsMobileLayout] = useState(() => {
+    try {
+      return typeof window !== 'undefined' ? window.innerWidth < 1024 : false;
+    } catch {
+      return false;
+    }
+  });
+  const [mobileDrawer, setMobileDrawer] = useState(null);
   const activeUserRef = useRef(activeUser);
   const convFetchInFlightRef = useRef(null);
   const convMoreInFlightRef = useRef(null);
+  const shellTouchRef = useRef({ startX: 0, startY: 0, endX: 0, endY: 0, mode: null });
 
   const isLoginPath = typeof window !== 'undefined' && window.location && window.location.pathname === '/login';
 
@@ -80,6 +89,24 @@ export default function App() {
   useEffect(() => {
     activeUserRef.current = activeUser;
   }, [activeUser]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(max-width: 1023px)');
+    const apply = (matches) => {
+      setIsMobileLayout(matches);
+      if (!matches) setMobileDrawer(null);
+    };
+    apply(media.matches);
+    const onChange = (event) => apply(!!event.matches);
+    try {
+      media.addEventListener('change', onChange);
+      return () => media.removeEventListener('change', onChange);
+    } catch {
+      media.addListener(onChange);
+      return () => media.removeListener(onChange);
+    }
+  }, []);
 
   // No version banner; backend serves fresh JS/CSS with no-cache headers
 
@@ -730,6 +757,130 @@ export default function App() {
     }
   };
 
+  const handleSelectActiveUser = (user) => {
+    setActiveUser(user);
+    if (isMobileLayout) setMobileDrawer(null);
+  };
+
+  const handleOpenMobileInbox = () => setMobileDrawer('inbox');
+  const handleOpenMobileDetails = () => setMobileDrawer('details');
+  const handleCloseMobileDrawer = () => setMobileDrawer(null);
+
+  const handleShellTouchStart = (event) => {
+    if (!isMobileLayout) return;
+    const touch = event.touches?.[0];
+    if (!touch) return;
+    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0;
+    const edgeThreshold = 28;
+    let mode = null;
+    if (mobileDrawer === 'inbox') {
+      mode = 'close-inbox';
+    } else if (mobileDrawer === 'details') {
+      mode = 'close-details';
+    } else if (touch.clientX <= edgeThreshold) {
+      mode = 'open-inbox';
+    } else if (viewportWidth && (viewportWidth - touch.clientX) <= edgeThreshold) {
+      mode = 'open-details';
+    }
+    shellTouchRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      endX: touch.clientX,
+      endY: touch.clientY,
+      mode,
+    };
+  };
+
+  const handleShellTouchMove = (event) => {
+    if (!isMobileLayout) return;
+    const touch = event.touches?.[0];
+    if (!touch) return;
+    shellTouchRef.current.endX = touch.clientX;
+    shellTouchRef.current.endY = touch.clientY;
+  };
+
+  const handleShellTouchEnd = () => {
+    if (!isMobileLayout) return;
+    const { startX, startY, endX, endY, mode } = shellTouchRef.current;
+    shellTouchRef.current = { startX: 0, startY: 0, endX: 0, endY: 0, mode: null };
+    if (!mode) return;
+    const dx = endX - startX;
+    const dy = endY - startY;
+    if (Math.abs(dx) < 64 || Math.abs(dx) <= Math.abs(dy)) return;
+    if (mode === 'open-inbox' && dx > 0) setMobileDrawer('inbox');
+    if (mode === 'open-details' && dx < 0) setMobileDrawer('details');
+    if (mode === 'close-inbox' && dx < 0) setMobileDrawer(null);
+    if (mode === 'close-details' && dx > 0) setMobileDrawer(null);
+  };
+
+  const inboxSidebarContent = (
+    <>
+      <MiniSidebar
+        showArchive={showArchive}
+        onSetShowArchive={setShowArchive}
+        onToggleInternal={() => setShowInternalPanel((v) => !v)}
+        onSelectInternalAgent={(username)=> { handleSelectActiveUser({ user_id: `dm:${username}`, name: `@${username}` }); setShowInternalPanel(false); }}
+        onOpenSettings={() => { try { window.location.href = '/#/settings'; } catch {} }}
+        currentAgent={currentAgent}
+        isAdmin={isAdmin}
+        workspace={workspace}
+        onSwitchWorkspace={(next) => {
+          try {
+            const w = String(next || 'irranova').trim().toLowerCase() || 'irranova';
+            try { localStorage.setItem('workspace', w); } catch {}
+            workspaceRef.current = w;
+            try { if (adminWsRef.current) adminWsRef.current.close(); } catch {}
+            try { if (wsRef.current) wsRef.current.close(); } catch {}
+            try { if (adminPingRef.current) clearInterval(adminPingRef.current); } catch {}
+            adminPingRef.current = null;
+            setAdminWsConnected(false);
+            setActiveUser(null);
+            activeUserRef.current = null;
+            setConversations([]);
+            setWorkspace(w);
+            setMobileDrawer(null);
+          } catch {}
+        }}
+        onStartNewChat={(digits, display) => {
+          try {
+            const id = String(digits);
+            const name = display || id;
+            handleSelectActiveUser({ user_id: id, name });
+            setShowArchive(false);
+          } catch {}
+        }}
+      />
+      <div className={`flex-1 flex flex-col bg-gray-900 overflow-y-auto ${isMobileLayout ? '' : 'border-r border-gray-700'}`}>
+        <AgentHeaderBar />
+        {authReady || isLoginPath ? (
+          <ChatList
+            conversations={conversations}
+            setActiveUser={handleSelectActiveUser}
+            activeUser={activeUser}
+            wsConnected={adminWsConnected}
+            defaultAssignedFilter={'all'}
+            showArchive={showArchive}
+            currentAgent={currentAgent}
+            loading={loadingConversations}
+            onUpdateConversationTags={handleUpdateConversationTags}
+            onUpdateConversationAssignee={handleUpdateConversationAssignee}
+            onLoadMore={loadMoreConversations}
+            hasMore={convHasMore}
+            loadingMore={convLoadingMore}
+          />
+        ) : (
+          <div className="p-3 text-sm text-gray-300">Checking session…</div>
+        )}
+      </div>
+    </>
+  );
+
+  const detailsPanelContent = (
+    <Suspense fallback={<div className="p-3 text-sm text-gray-300">Loading Shopify panel…</div>}>
+      <ShopifyIntegrationsPanel activeUser={activeUser} currentAgent={currentAgent} />
+    </Suspense>
+  );
+
   if (isLoginPath) {
     return (
       <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center bg-gray-900 text-white">Loading…</div>}>
@@ -743,97 +894,78 @@ export default function App() {
 
   return (
     <AudioProvider>
-    <div className="flex h-screen bg-gray-900 text-white overflow-hidden" style={{ fontSize: 'var(--app-font-size, 16px)' }}>
-      {/* LEFT: Mini sidebar + Agent header + Chat list */}
-      <div className="w-[30rem] min-w-[30rem] flex-shrink-0 overflow-hidden flex relative z-0 bg-gray-900">
-        <MiniSidebar
-          showArchive={showArchive}
-          onSetShowArchive={setShowArchive}
-          onToggleInternal={() => setShowInternalPanel((v) => !v)}
-          onSelectInternalAgent={(username)=> { setActiveUser({ user_id: `dm:${username}`, name: `@${username}` }); setShowInternalPanel(false); }}
-          onOpenSettings={() => { try { window.location.href = '/#/settings'; } catch {} }}
-          currentAgent={currentAgent}
-          isAdmin={isAdmin}
-          workspace={workspace}
-          onSwitchWorkspace={(next) => {
-            try {
-              const w = String(next || 'irranova').trim().toLowerCase() || 'irranova';
-              try { localStorage.setItem('workspace', w); } catch {}
-            // Immediately update ref + tear down sockets BEFORE state switch to prevent cross-workspace races.
-            workspaceRef.current = w;
-            try { if (adminWsRef.current) adminWsRef.current.close(); } catch {}
-            try { if (wsRef.current) wsRef.current.close(); } catch {}
-            try { if (adminPingRef.current) clearInterval(adminPingRef.current); } catch {}
-            adminPingRef.current = null;
-            setAdminWsConnected(false);
-              // Reset view state so we don't show mixed data while switching
-              setActiveUser(null);
-              activeUserRef.current = null;
-              setConversations([]);
-              setWorkspace(w);
-            } catch {}
-          }}
-        onStartNewChat={(digits, display) => {
-          try {
-            const id = String(digits);
-            const name = display || id;
-            setActiveUser({ user_id: id, name });
-            // Ensure Inbox tab
-            setShowArchive(false);
-          } catch {}
-        }}
-        />
-        <div className="flex-1 flex flex-col border-r border-gray-700 bg-gray-900 overflow-y-auto">
-          <AgentHeaderBar />
-          {/* InternalChannelsBar inline list removed in favor of dropdown on the sidebar icon */}
+      <div
+        className="relative flex h-screen bg-gray-900 text-white overflow-hidden"
+        style={{ fontSize: 'var(--app-font-size, 16px)' }}
+        onTouchStart={handleShellTouchStart}
+        onTouchMove={handleShellTouchMove}
+        onTouchEnd={handleShellTouchEnd}
+      >
+        {/* LEFT: Mini sidebar + Agent header + Chat list */}
+        <div className="hidden lg:flex w-[30rem] min-w-[30rem] flex-shrink-0 overflow-hidden relative z-0 bg-gray-900">
+          {inboxSidebarContent}
+        </div>
+        {/* MIDDLE: Chat window */}
+        <div className="flex-1 overflow-hidden relative z-0 min-w-0">
+          {/* Pass wsRef.current as prop so ChatWindow can send/receive via WebSocket */}
           {authReady || isLoginPath ? (
-            <ChatList
-              conversations={conversations}
-              setActiveUser={setActiveUser}
+            <ChatWindow
               activeUser={activeUser}
-              wsConnected={adminWsConnected}
-              defaultAssignedFilter={'all'}
-              showArchive={showArchive}
+              catalogProducts={catalogProducts}
+              ws={wsRef.current}
               currentAgent={currentAgent}
-              loading={loadingConversations}
+              adminWs={adminWsRef.current}
               onUpdateConversationTags={handleUpdateConversationTags}
               onUpdateConversationAssignee={handleUpdateConversationAssignee}
-            onLoadMore={loadMoreConversations}
-            hasMore={convHasMore}
-            loadingMore={convLoadingMore}
+              workspace={workspace}
+              isMobileLayout={isMobileLayout}
+              onOpenMobileInbox={handleOpenMobileInbox}
+              onOpenMobileDetails={handleOpenMobileDetails}
             />
-          ) : (
-            <div className="p-3 text-sm text-gray-300">Checking session…</div>
-          )}
+          ) : null}
+          {/* Persistent audio bar above composer area */}
+          <div className="pointer-events-none absolute left-1/2 bottom-[104px] z-10 w-full max-w-md -translate-x-1/2 px-4">
+            <GlobalAudioBar />
+          </div>
         </div>
-      </div>
-      {/* MIDDLE: Chat window */}
-      <div className="flex-1 overflow-hidden relative z-0 min-w-0">
-        {/* Pass wsRef.current as prop so ChatWindow can send/receive via WebSocket */}
-        {authReady || isLoginPath ? (
-          <ChatWindow
-            activeUser={activeUser}
-            catalogProducts={catalogProducts}
-            ws={wsRef.current}
-            currentAgent={currentAgent}
-            adminWs={adminWsRef.current}
-            onUpdateConversationTags={handleUpdateConversationTags}
-            onUpdateConversationAssignee={handleUpdateConversationAssignee}
-            workspace={workspace}
+        {/* RIGHT: Shopify "contact info" panel, responsive (hidden on small/medium) */}
+        <div className="hidden lg:block lg:w-80 lg:min-w-[18rem] lg:flex-shrink-0 border-l border-gray-700 bg-gray-900 overflow-y-auto">
+          {detailsPanelContent}
+        </div>
+        {isMobileLayout && mobileDrawer ? (
+          <button
+            type="button"
+            aria-label="Close mobile panel"
+            className="lg:hidden absolute inset-0 z-20 bg-black/55 backdrop-blur-[1px]"
+            onClick={handleCloseMobileDrawer}
           />
         ) : null}
-        {/* Persistent audio bar above composer area */}
-        <div className="absolute left-0 right-0 bottom-[88px] px-4">
-          <GlobalAudioBar />
+        <div className={`lg:hidden absolute inset-y-0 left-0 z-30 flex w-[min(92vw,26rem)] max-w-full transform transition-transform duration-300 ease-out ${mobileDrawer === 'inbox' ? 'translate-x-0' : '-translate-x-full'}`}>
+          <div className="flex h-full w-full overflow-hidden border-r border-gray-700 bg-gray-900 shadow-2xl">
+            {inboxSidebarContent}
+          </div>
+        </div>
+        <div className={`lg:hidden absolute inset-y-0 right-0 z-30 w-[min(92vw,26rem)] max-w-full transform transition-transform duration-300 ease-out ${mobileDrawer === 'details' ? 'translate-x-0' : 'translate-x-full'}`}>
+          <div className="flex h-full flex-col border-l border-gray-700 bg-gray-900 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-700 px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold text-white">Contact & Orders</div>
+                <div className="text-xs text-gray-400">Swipe right or tap outside to close</div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseMobileDrawer}
+                className="rounded-full border border-gray-600 px-3 py-1 text-xs text-gray-200 hover:bg-gray-800"
+              >
+                Close
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {detailsPanelContent}
+            </div>
+          </div>
         </div>
       </div>
-      {/* RIGHT: Shopify "contact info" panel, responsive (hidden on small/medium) */}
-      <div className="hidden lg:block lg:w-80 lg:min-w-[18rem] lg:flex-shrink-0 border-l border-gray-700 bg-gray-900 overflow-y-auto">
-        <Suspense fallback={<div className="p-3 text-sm text-gray-300">Loading Shopify panel…</div>}>
-          <ShopifyIntegrationsPanel activeUser={activeUser} currentAgent={currentAgent} />
-        </Suspense>
-      </div>
-    </div>
     </AudioProvider>
   );
 }

@@ -30,13 +30,13 @@ export default function CatalogPanel({
   const [selectedSet, setSelectedSet] = useState(null);
 
   // Products and pagination
-  const INITIAL_FETCH_LIMIT = 600; // keep initial render/network bounded; load more on scroll
-  const PREFETCH_LIMIT = 120; // lightweight background prefetch for folder previews
+  const INITIAL_FETCH_LIMIT = 300; // keep first payload fast; pagination loads more on demand
+  const PREFETCH_LIMIT = 60; // lightweight background prefetch for folder previews
   const PAGE_STEP = 200; // only used when falling back to infinite scroll for very large sets
   const CONCURRENT_THUMB_PREFETCH = 6;
   // IMPORTANT: keep this low. This runs in addition to <img loading="lazy"> requests,
   // and can easily overwhelm /proxy-image on large catalogs / repeated modal opens.
-  const MAX_THUMBNAIL_PRECACHE = 80;
+  const MAX_THUMBNAIL_PRECACHE = 40;
   const [products, setProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -95,7 +95,7 @@ export default function CatalogPanel({
       if (list.length > 0 && list[0]?.id) setSelectedSet((prev) => prev ?? list[0].id);
       // Prefetch top sets into IndexedDB to speed up modal open
       try {
-        const top = list.slice(0, 4);
+        const top = list.slice(0, 2);
         const concurrency = 2;
         let i = 0;
         const runNext = async () => {
@@ -738,7 +738,7 @@ export default function CatalogPanel({
 
     // Prefetch first few sets in the background for instant entry
     try {
-      const top = fsets.slice(0, 4);
+      const top = fsets.slice(0, 2);
       const concurrency = 2;
       let i = 0;
       const runNext = async () => {

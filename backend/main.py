@@ -243,6 +243,10 @@ WHATSAPP_API_VERSION = "v19.0"
 MAX_CATALOG_ITEMS = 30
 RATE_LIMIT_DELAY = 0
 CATALOG_CACHE_TTL_SEC = 15 * 60
+# Short-lived in-memory cache for /catalog-set-products responses.
+# Reduces repeated large payload work when agents open/close the same folders.
+CATALOG_SET_RESPONSE_CACHE_TTL_SEC = int(os.getenv("CATALOG_SET_RESPONSE_CACHE_TTL_SEC", "120") or "120")
+_CATALOG_SET_RESPONSE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 
 def _safe_cache_token(value: str) -> str:
     """Safe, short token for filenames/keys (avoid path traversal / weird chars)."""
@@ -1399,6 +1403,10 @@ class ConnectionManager:
         self.redis_manager = None
         # Per-agent token buckets for backpressure
         self._ws_buckets: Dict[str, Dict[str, float]] = {}
+        # Cache DB-backed admin users list to avoid hitting DB on every outbound broadcast.
+        self._admin_users_cache: dict = {"ts": 0.0, "users": []}
+        self._admin_users_cache_ttl_sec: float = float(os.getenv("ADMIN_USERS_CACHE_TTL_SECONDS", "30") or "30")
+        self._admin_users_refresh_task: Optional[asyncio.Task] = None
     
     def _key(self, user_id: str, workspace: str | None = None) -> str:
         ws = _coerce_workspace(workspace) if workspace else get_current_workspace()
@@ -1530,7 +1538,10 @@ class ConnectionManager:
         await self._send_local(user_id, message, workspace=workspace)
         try:
             if ENABLE_WS_PUBSUB and getattr(self, "redis_manager", None):
-                await self.redis_manager.publish_ws_event(user_id, message, workspace=workspace)
+                # Do not block request latency on cross-instance pub/sub.
+                asyncio.create_task(
+                    self.redis_manager.publish_ws_event(user_id, message, workspace=workspace)
+                )
         except Exception as exc:
             _vlog(f"WS publish error: {exc}")
     
@@ -1551,10 +1562,30 @@ class ConnectionManager:
             pass
 
         # Optional legacy path: also broadcast to any DB-flagged admin users.
+        # Use cached list and refresh it in background to avoid per-message DB latency.
+        now = time.time()
         try:
-            admin_users = await self.get_admin_users()
+            cached = self._admin_users_cache or {"ts": 0.0, "users": []}
+            admin_users = list(cached.get("users") or [])
+            last_ts = float(cached.get("ts") or 0.0)
         except Exception:
             admin_users = []
+            last_ts = 0.0
+
+        if (now - last_ts) > float(self._admin_users_cache_ttl_sec):
+            task = self._admin_users_refresh_task
+            if not task or task.done():
+                async def _refresh():
+                    try:
+                        users = await self.get_admin_users()
+                        self._admin_users_cache = {"ts": time.time(), "users": list(users or [])}
+                    except Exception:
+                        pass
+                try:
+                    self._admin_users_refresh_task = asyncio.create_task(_refresh())
+                except Exception:
+                    pass
+
         for admin_id in admin_users or []:
             if admin_id in (exclude_user, "admin"):
                 continue
@@ -6043,8 +6074,13 @@ class MessageProcessor:
     # Fix the method that was duplicated at the bottom of the file
     async def process_outgoing_message(self, message_data: dict) -> dict:
         """Process outgoing message with instant UI update"""
+        t0 = time.perf_counter()
         user_id = message_data["user_id"]
-        await self.db_manager.upsert_user(user_id)
+        # Best-effort user upsert; do not block message send p95 on this write.
+        try:
+            asyncio.create_task(self.db_manager.upsert_user(user_id))
+        except Exception:
+            pass
         message_text = str(message_data.get("message", ""))
         message_type = message_data.get("type", "text")
         
@@ -6127,19 +6163,36 @@ class MessageProcessor:
         })
 
         # Also notify inbox listeners so conversation previews update across agents/tabs.
-        # The admin UI listens for "message_received" events on /ws/admin and uses them as live previews.
+        # Keep this async so API responses are not gated by broadcast fanout / DB lookups.
         try:
-            await self.connection_manager.broadcast_to_admins(
-                {"type": "message_received", "data": optimistic_message}
+            asyncio.create_task(
+                self.connection_manager.broadcast_to_admins(
+                    {"type": "message_received", "data": optimistic_message}
+                )
             )
         except Exception:
             pass
         
-        # 2. Cache for quick retrieval
-        await self.redis_manager.cache_message(user_id, optimistic_message)
+        # 2. Cache for quick retrieval (best-effort, non-blocking)
+        try:
+            asyncio.create_task(self.redis_manager.cache_message(user_id, optimistic_message))
+        except Exception:
+            pass
         
         # 3. BACKGROUND: Send to WhatsApp API
         asyncio.create_task(self._send_to_whatsapp_bg(optimistic_message))
+        try:
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            _sampled_info(
+                "send_message_sync_path",
+                5,
+                "send_message sync-path user_id=%s type=%s elapsed_ms=%s",
+                user_id,
+                message_type,
+                elapsed_ms,
+            )
+        except Exception:
+            pass
         
         return optimistic_message
 
@@ -19358,14 +19411,55 @@ async def get_catalog_set_products(set_id: str, limit: int = 999):
     try:
         ws = get_current_workspace()
         cid = await _get_effective_catalog_id(ws)
+        lim = max(1, int(limit or 1))
+        resp_key = f"{ws}:{cid}:{str(set_id or '').strip()}:{lim}"
+        now = time.time()
+        cached_entry = _CATALOG_SET_RESPONSE_CACHE.get(resp_key)
+        if cached_entry:
+            ts, payload = cached_entry
+            if (now - float(ts or 0.0)) < float(CATALOG_SET_RESPONSE_CACHE_TTL_SEC):
+                return payload
+            try:
+                _CATALOG_SET_RESPONSE_CACHE.pop(resp_key, None)
+            except Exception:
+                pass
         cache_file = _catalog_cache_file_for(ws, cid)
-        products = await CatalogManager.get_products_for_set(
-            set_id,
-            limit=limit,
-            catalog_id=cid,
-            cache_file=cache_file,
-            workspace=ws,
-        )
+        try:
+            products = await asyncio.wait_for(
+                CatalogManager.get_products_for_set(
+                    set_id,
+                    limit=lim,
+                    catalog_id=cid,
+                    cache_file=cache_file,
+                    workspace=ws,
+                ),
+                timeout=float(os.getenv("CATALOG_SET_ENDPOINT_TIMEOUT_SECONDS", "8") or "8"),
+            )
+        except asyncio.TimeoutError:
+            # Fail fast for UI and serve stale data if available; refresh asynchronously.
+            timeout_cache_key = f"{cid}:{str(set_id or '').strip()}"
+            try:
+                CatalogManager._schedule_set_refresh(
+                    cache_key=timeout_cache_key,
+                    set_id=set_id,
+                    target_limit=max(lim, 300),
+                    catalog_id=cid,
+                    workspace=ws,
+                )
+            except Exception:
+                pass
+            products = CatalogManager._load_persisted_set(set_id, catalog_id=cid) or []
+        try:
+            _CATALOG_SET_RESPONSE_CACHE[resp_key] = (now, products)
+            # Keep cache bounded to avoid unbounded growth across many set/limit combinations.
+            if len(_CATALOG_SET_RESPONSE_CACHE) > 256:
+                oldest_key = min(
+                    _CATALOG_SET_RESPONSE_CACHE.items(),
+                    key=lambda kv: float(kv[1][0] or 0.0),
+                )[0]
+                _CATALOG_SET_RESPONSE_CACHE.pop(oldest_key, None)
+        except Exception:
+            pass
         print(f"Catalog: returning {len(products)} products for set_id={set_id}")
         return products
     except Exception as exc:

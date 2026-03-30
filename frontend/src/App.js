@@ -356,10 +356,14 @@ export default function App() {
     };
     const startPoll = () => {
       if (convPollRef.current) return;
-      // Keep this light; backend also caches aggressively and we use cache-buster headers.
+      // Keep this very light while disconnected; real-time updates come from WS.
       convPollRef.current = setInterval(() => {
-        try { fetchConversations({ showSpinner: false }); } catch {}
-      }, 15000);
+        try {
+          if (document.visibilityState === 'visible') {
+            fetchConversations({ showSpinner: false });
+          }
+        } catch {}
+      }, 30000);
     };
 
     if (adminWsConnected) {

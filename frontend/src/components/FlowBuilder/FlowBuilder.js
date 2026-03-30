@@ -1,10 +1,12 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
-  applyNodeChanges, applyEdgeChanges, MarkerType,
+  applyNodeChanges, applyEdgeChanges, MarkerType, addEdge,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { flowNodeTypes } from './FlowNodes';
+import PlusEdge from './PlusEdge';
+import FlowSummaryPanel from './FlowSummaryPanel';
 import api from '../../api';
 import {
   Save, Power, PowerOff, Plus, Trash2, ArrowLeft,
@@ -379,16 +381,19 @@ const uid = () => 'fn_' + Date.now().toString(36) + '_' + (_seq++);
 function rfNode(id, type, x, y, data) {
   return { id, type, position: { x, y }, data, draggable: true };
 }
+const flowEdgeTypes = { plusEdge: PlusEdge };
+
 function rfEdge(source, target, sourceHandle, label) {
   return {
     id: `e_${source}_${target}_${sourceHandle || 'default'}`,
     source, target,
     ...(sourceHandle ? { sourceHandle } : {}),
-    type: 'smoothstep',
+    type: 'plusEdge',
     animated: true,
     style: { stroke: '#94a3b8', strokeWidth: 2 },
     markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' },
     ...(label ? { label } : {}),
+    data: {},
   };
 }
 
@@ -507,8 +512,9 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   const [flowId, setFlowId] = useState(initialFlow?.meta?.ruleId || '');
   const [saving, setSaving] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
-  const [sidePanel, setSidePanel] = useState(null); // 'trigger_picker' | 'step_picker' | 'node_editor'
+  const [sidePanel, setSidePanel] = useState('flow_summary');
   const [addAfterNodeId, setAddAfterNodeId] = useState(null);
+  const [validationErrors, setValidationErrors] = useState(new Map());
 
   // Current flow-level stats (triggers, messages_sent)
   const flowStat = flowStats || {};
@@ -518,6 +524,37 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
 
   const onNodesChange = useCallback((changes) => setNodes(nds => applyNodeChanges(changes, nds)), []);
   const onEdgesChange = useCallback((changes) => setEdges(eds => applyEdgeChanges(changes, eds)), []);
+
+  /* ── Flow validation ── */
+  const validateFlow = useCallback((currentNodes, currentEdges) => {
+    const errs = new Map();
+    const addErr = (id, msg) => { if (!errs.has(id)) errs.set(id, []); errs.get(id).push(msg); };
+    const trig = currentNodes.find(n => n.type === 'startTrigger');
+    if (trig && !trig.data?.configured) addErr(trig.id, 'Trigger is not configured');
+    for (const n of currentNodes) {
+      if (n.type === 'addStep') continue;
+      if (n.type !== 'startTrigger' && !currentEdges.some(e => e.target === n.id)) addErr(n.id, 'Node is disconnected');
+      if (n.type === 'actionFlow') {
+        const d = n.data || {}, at = d.actionType || '';
+        if (at === 'send_whatsapp_text' && !String(d.text || '').trim()) addErr(n.id, 'Message text is empty');
+        if (at === 'send_whatsapp_template' && !String(d.templateName || '').trim()) addErr(n.id, 'No template selected');
+        if (at === 'send_image' && !String(d.imageUrl || '').trim()) addErr(n.id, 'Image URL is empty');
+        if (at === 'send_video' && !String(d.videoUrl || '').trim()) addErr(n.id, 'Video URL is empty');
+        if (at === 'send_audio' && !String(d.audioUrl || '').trim()) addErr(n.id, 'Audio URL is empty');
+      }
+      if (n.type === 'conditionFlow') {
+        const d = n.data || {};
+        if (!String(d.field || '').trim() && !(Array.isArray(d.conditions) && d.conditions.some(c => String(c.field || '').trim()))) addErr(n.id, 'No condition rules set');
+      }
+      if (n.type === 'delayFlow' && !(Number(n.data?.minutes) > 0)) addErr(n.id, 'Delay duration not set');
+    }
+    for (const e of currentEdges) {
+      const t = currentNodes.find(n => n.id === e.target);
+      if (t && errs.has(t.id)) addErr(e.id, 'Target: ' + errs.get(t.id)[0]);
+    }
+    return errs;
+  }, []);
+  useEffect(() => { setValidationErrors(validateFlow(nodes, edges)); }, [nodes, edges, validateFlow]);
 
   /* â”€â”€ Node callbacks (injected into node data) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const onTriggerSelect = useCallback(() => setSidePanel('trigger_picker'), []);
@@ -539,25 +576,55 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     });
   }, []);
 
-  /* Inject callbacks into nodes */
+  /* ── onEdgeInsert — called from PlusEdge "+" button ── */
+  const onEdgeInsert = useCallback((event, edge) => {
+    const sourceNode = nodes.find(n => n.id === edge.source);
+    const targetNode = nodes.find(n => n.id === edge.target);
+    if (!sourceNode || !targetNode) return;
+    if (targetNode.type === 'addStep') { setAddAfterNodeId(targetNode.id); setSidePanel('step_picker'); return; }
+    const addId = uid();
+    const midX = (sourceNode.position.x + targetNode.position.x) / 2;
+    const midY = (sourceNode.position.y + targetNode.position.y) / 2;
+    setNodes(prev => [...prev, rfNode(addId, 'addStep', midX, midY, {})]);
+    setEdges(prev => [...prev.filter(e => e.id !== edge.id), rfEdge(edge.source, addId, edge.sourceHandle), rfEdge(addId, edge.target)]);
+    setTimeout(() => { setAddAfterNodeId(addId); setSidePanel('step_picker'); }, 50);
+  }, [nodes]);
+
+  /* ── Drag-and-drop connection ── */
+  const onConnect = useCallback((connection) => {
+    setEdges(prev => addEdge(rfEdge(connection.source, connection.target, connection.sourceHandle), prev));
+  }, []);
+
+  /* ── Connection validation ── */
+  const isValidConnection = useCallback((connection) => {
+    if (connection.source === connection.target) return false;
+    if (edges.some(e => e.source === connection.source && e.target === connection.target && (e.sourceHandle || '') === (connection.sourceHandle || ''))) return false;
+    const visited = new Set(); const queue = [connection.target];
+    while (queue.length) { const c = queue.shift(); if (c === connection.source) return false; if (visited.has(c)) continue; visited.add(c); edges.filter(e => e.source === c).forEach(e => queue.push(e.target)); }
+    return true;
+  }, [edges]);
+
+  /* Inject callbacks + validation into nodes */
   const nodesWithCallbacks = useMemo(() => {
     return nodes.map(n => ({
       ...n,
       data: {
         ...n.data,
+        errors: validationErrors.get(n.id) || null,
         onSelect: () => {
-          if (n.type === 'startTrigger' && !n.data.configured) {
-            onTriggerSelect();
-          } else if (n.type === 'addStep' || n.type === 'addStepFlow') {
-            onAddStepClick(n.id);
-          } else {
-            onNodeSelect(n.id);
-          }
+          if (n.type === 'startTrigger' && !n.data.configured) { onTriggerSelect(); }
+          else if (n.type === 'addStep' || n.type === 'addStepFlow') { onAddStepClick(n.id); }
+          else { onNodeSelect(n.id); }
         },
         onAdd: () => onAddStepClick(n.id),
       },
     }));
-  }, [nodes, onTriggerSelect, onAddStepClick, onNodeSelect]);
+  }, [nodes, validationErrors, onTriggerSelect, onAddStepClick, onNodeSelect]);
+
+  /* Inject onEdgeInsert + error data into edges */
+  const edgesWithData = useMemo(() => {
+    return edges.map(e => ({ ...e, type: e.type || 'plusEdge', data: { ...(e.data || {}), onEdgeInsert, error: (validationErrors.get(e.id) || [])[0] || null } }));
+  }, [edges, onEdgeInsert, validationErrors]);
 
   /* â”€â”€ Adding steps to the flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const addStepToFlow = useCallback((stepType, config = {}) => {
@@ -1168,38 +1235,11 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
     }
   }, [flowToRule, flowId, onSaveToBackend]);
 
-  /* â”€â”€ Insert a step between two nodes by clicking an edge â”€â”€ */
+  /* Edge click delegates to onEdgeInsert */
   const onEdgeClick = useCallback((event, edge) => {
     event.stopPropagation();
-    const sourceNode = nodes.find(n => n.id === edge.source);
-    const targetNode = nodes.find(n => n.id === edge.target);
-    if (!sourceNode || !targetNode) return;
-    // If target is already an addStep, just use it
-    if (targetNode.type === 'addStep') {
-      setAddAfterNodeId(targetNode.id);
-      setSidePanel('step_picker');
-      return;
-    }
-    // Insert a new addStep between source and target
-    const addId = uid();
-    const midX = (sourceNode.position.x + targetNode.position.x) / 2;
-    const midY = (sourceNode.position.y + targetNode.position.y) / 2;
-    const addNode = rfNode(addId, 'addStep', midX, midY, {});
-    setNodes(prev => [...prev, addNode]);
-    setEdges(prev => {
-      const withoutEdge = prev.filter(e => e.id !== edge.id);
-      return [
-        ...withoutEdge,
-        rfEdge(edge.source, addId, edge.sourceHandle),
-        rfEdge(addId, edge.target),
-      ];
-    });
-    // Immediately open the step picker for the new addStep
-    setTimeout(() => {
-      setAddAfterNodeId(addId);
-      setSidePanel('step_picker');
-    }, 50);
-  }, [nodes]);
+    onEdgeInsert(event, edge);
+  }, [onEdgeInsert]);
 
   /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      RENDER
@@ -1266,15 +1306,21 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
         <div className="flex-1 h-full">
           <ReactFlow
             nodes={nodesWithCallbacks}
-            edges={edges}
+            edges={edgesWithData}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             nodeTypes={flowNodeTypes}
+            edgeTypes={flowEdgeTypes}
+            defaultEdgeOptions={{ type: 'plusEdge', animated: true }}
+            onConnect={onConnect}
+            isValidConnection={isValidConnection}
+            connectionLineStyle={{ stroke: '#3b82f6', strokeWidth: 2, strokeDasharray: '5 5' }}
+            connectionLineType="smoothstep"
             fitView
             fitViewOptions={{ padding: 0.4 }}
             minZoom={0.3}
             maxZoom={1.5}
-            onPaneClick={() => { setSidePanel(null); setSelectedNodeId(null); }}
+            onPaneClick={() => { setSidePanel('flow_summary'); setSelectedNodeId(null); }}
             onEdgeClick={onEdgeClick}
           >
             <Background color="#e2e8f0" gap={20} size={1} />
@@ -1293,36 +1339,45 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
           </ReactFlow>
         </div>
 
-        {/* Side Panel */}
-        {sidePanel && (
-          <div className="w-80 h-full border-l bg-white overflow-y-auto shadow-xl animate-slide-in-right flex flex-col">
-            {sidePanel === 'trigger_picker' && (
-              <TriggerPickerPanel
-                onClose={() => setSidePanel(null)}
-                onSelectTrigger={configureTrigger}
-              />
-            )}
-            {sidePanel === 'step_picker' && (
-              <StepPickerPanel
-                onClose={() => { setSidePanel(null); setAddAfterNodeId(null); }}
-                onAddStep={addStepToFlow}
-              />
-            )}
-            {sidePanel === 'node_editor' && selectedNode && (
-              <NodeEditorPanel
-                node={selectedNode}
-                templates={templates}
-                onClose={() => { setSidePanel(null); setSelectedNodeId(null); }}
-                onUpdate={(patch) => updateNodeData(selectedNode.id, patch)}
-                onDelete={() => deleteNode(selectedNode.id)}
-                onSelectTrigger={configureTrigger}
-                triggerSource={currentTriggerNode?.data.source}
-                triggerEvent={currentTriggerNode?.data.event}
-                onSpawnButtons={(btns) => spawnButtonChildNodes(selectedNode.id, btns)}
-              />
-            )}
-          </div>
-        )}
+        {/* Side Panel — always visible */}
+        <div className="w-80 h-full border-l bg-white overflow-y-auto shadow-xl flex flex-col">
+          {sidePanel === 'trigger_picker' && (
+            <TriggerPickerPanel
+              onClose={() => setSidePanel('flow_summary')}
+              onSelectTrigger={configureTrigger}
+            />
+          )}
+          {sidePanel === 'step_picker' && (
+            <StepPickerPanel
+              onClose={() => { setSidePanel('flow_summary'); setAddAfterNodeId(null); }}
+              onAddStep={addStepToFlow}
+            />
+          )}
+          {sidePanel === 'node_editor' && selectedNode && (
+            <NodeEditorPanel
+              node={selectedNode}
+              templates={templates}
+              onClose={() => { setSidePanel('flow_summary'); setSelectedNodeId(null); }}
+              onUpdate={(patch) => updateNodeData(selectedNode.id, patch)}
+              onDelete={() => deleteNode(selectedNode.id)}
+              onSelectTrigger={configureTrigger}
+              triggerSource={currentTriggerNode?.data.source}
+              triggerEvent={currentTriggerNode?.data.event}
+              onSpawnButtons={(btns) => spawnButtonChildNodes(selectedNode.id, btns)}
+            />
+          )}
+          {(sidePanel === 'flow_summary' || !sidePanel) && (
+            <FlowSummaryPanel
+              nodes={nodes}
+              edges={edges}
+              flowName={flowName}
+              flowEnabled={flowEnabled}
+              triggerNode={currentTriggerNode}
+              validationErrors={validationErrors}
+              flowStat={flowStat}
+            />
+          )}
+        </div>
       </div>
 
       {/* Flow Drafter AI chat window */}

@@ -14950,6 +14950,75 @@ async def list_ai_agent_turns_endpoint(limit: int = 30, _: dict = Depends(requir
     return {"workspace": ws, "items": await ai_agent_service.list_recent_turns(ws, limit=limit)}
 
 
+@app.get("/admin/ai-agent/evals/runs")
+async def list_ai_agent_eval_runs_endpoint(
+    limit: int = 20,
+    run_type: str | None = None,
+    status: str | None = None,
+    _: dict = Depends(require_admin),
+):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    return {
+        "workspace": ws,
+        "items": await ai_agent_service.list_eval_runs(ws, limit=limit, run_type=run_type, status=status),
+    }
+
+
+@app.get("/admin/ai-agent/evals/runs/{run_id}")
+async def get_ai_agent_eval_run_endpoint(run_id: int, _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    item = await ai_agent_service.get_eval_run(int(run_id), ws)
+    if not item:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    return {"workspace": ws, "item": item}
+
+
+@app.get("/admin/ai-agent/evals/gate-status")
+async def get_ai_agent_eval_gate_status_endpoint(_: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    cfg = await ai_agent_service.get_config(ws)
+    return {"workspace": ws, "item": await ai_agent_service.get_autonomous_eval_gate_status(ws, cfg)}
+
+
+@app.get("/admin/ai-agent/evals/compare")
+async def compare_ai_agent_eval_runs_endpoint(left_run_id: int, right_run_id: int, _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    item = await ai_agent_service.compare_eval_runs(int(left_run_id), int(right_run_id), ws)
+    if not item:
+        raise HTTPException(status_code=404, detail="One or both eval runs were not found")
+    return {"workspace": ws, "item": item}
+
+
+@app.post("/admin/ai-agent/evals/fixture-run")
+async def run_ai_agent_fixture_eval_endpoint(payload: dict = Body(default={}), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    item = await ai_agent_service.run_fixture_eval(ws, label=str((payload or {}).get("label") or "").strip() or None)
+    return {"ok": True, "workspace": ws, "item": item}
+
+
+@app.post("/admin/ai-agent/evals/replay-run")
+async def run_ai_agent_replay_eval_endpoint(payload: dict = Body(default={}), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    item = await ai_agent_service.run_conversation_replay_eval(
+        ws,
+        limit=max(1, min(int((payload or {}).get("limit") or 10), 50)),
+        label=str((payload or {}).get("label") or "").strip() or None,
+        user_ids=[
+            str(user_id or "").strip()
+            for user_id in ((payload or {}).get("user_ids") or [])
+            if str(user_id or "").strip()
+        ] or None,
+        transcript_messages=max(4, min(int((payload or {}).get("transcript_messages") or 12), 40)),
+    )
+    return {"ok": True, "workspace": ws, "item": item}
+
+
 # ---- Meta OAuth (WhatsApp connect) ----
 def _meta_oauth_state_key(state: str) -> str:
     s = str(state or "").strip()

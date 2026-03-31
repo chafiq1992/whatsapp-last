@@ -6,11 +6,13 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import httpx
 
 from .tools import AIAgentToolDependencies, AIAgentToolbox
+from .evals import load_eval_cases, score_results
 
 DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -27,6 +29,10 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "handoff_on_human_request": True,
     "low_confidence_threshold": 0.58,
     "anger_handoff_threshold": "frustrated",
+    "autonomous_eval_gate_enabled": True,
+    "autonomous_min_fixture_pass_rate": 0.75,
+    "autonomous_require_recent_fixture_eval_hours": 72,
+    "test_numbers": [],
     "instructions": (
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
         "Reply briefly, clearly, and in the customer's language. Never invent stock, policies, "
@@ -176,10 +182,42 @@ class AIAgentService:
                     resolved_at TEXT
                 )
                 """,
+                """
+                CREATE TABLE IF NOT EXISTS ai_eval_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace TEXT NOT NULL,
+                    run_type TEXT NOT NULL,
+                    label TEXT,
+                    model TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    sample_size INTEGER DEFAULT 0,
+                    config_json TEXT,
+                    summary_json TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TEXT
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS ai_eval_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    workspace TEXT NOT NULL,
+                    case_key TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    user_id TEXT,
+                    transcript_json TEXT,
+                    expected_json TEXT,
+                    output_json TEXT,
+                    score_json TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
                 "CREATE UNIQUE INDEX IF NOT EXISTS uniq_ai_state_ws_user ON ai_conversation_state (workspace, user_id)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_turns_ws_user_created ON ai_turns (workspace, user_id, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_policy_ws_topic ON ai_policy_docs (workspace, topic, locale, status)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_handoff_ws_user_status ON ai_handoff_tickets (workspace, user_id, status, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_ai_eval_runs_ws_created ON ai_eval_runs (workspace, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_ai_eval_results_run ON ai_eval_results (run_id, created_at ASC)",
             ]
             for statement in statements:
                 stmt = statement.strip()
@@ -198,6 +236,7 @@ class AIAgentService:
         if not isinstance(payload, dict):
             payload = {}
         config = {**DEFAULT_AGENT_CONFIG, **payload}
+        config["test_numbers"] = self._normalize_test_numbers(config.get("test_numbers"))
         enc = str(payload.get("openai_api_key_enc") or "").strip()
         api_key = ""
         if enc:
@@ -231,12 +270,19 @@ class AIAgentService:
             "handoff_on_human_request",
             "low_confidence_threshold",
             "anger_handoff_threshold",
+            "autonomous_eval_gate_enabled",
+            "autonomous_min_fixture_pass_rate",
+            "autonomous_require_recent_fixture_eval_hours",
+            "test_numbers",
             "instructions",
             "business_context",
             "supported_languages",
         ):
             if key in payload:
-                merged[key] = payload.get(key)
+                if key == "test_numbers":
+                    merged[key] = self._normalize_test_numbers(payload.get(key))
+                else:
+                    merged[key] = payload.get(key)
         if "openai_api_key_enc" in current:
             merged["openai_api_key_enc"] = current["openai_api_key_enc"]
         await self.db_manager.set_setting(self.make_settings_key("ai_agent_config", ws), merged)
@@ -360,6 +406,214 @@ class AIAgentService:
             items.append(item)
         return items
 
+    async def list_eval_runs(
+        self,
+        workspace: str | None = None,
+        limit: int = 20,
+        *,
+        run_type: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        lim = max(1, min(int(limit or 20), 100))
+        async with self.db_manager._conn() as db:
+            clauses = ["workspace = ?"]
+            params: list[Any] = [ws]
+            clean_run_type = str(run_type or "").strip().lower()
+            clean_status = str(status or "").strip().lower()
+            if clean_run_type:
+                clauses.append("run_type = ?")
+                params.append(clean_run_type)
+            if clean_status:
+                clauses.append("status = ?")
+                params.append(clean_status)
+            params.append(lim)
+            query = self.db_manager._convert(
+                f"SELECT * FROM ai_eval_runs WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
+            )
+            if self.db_manager.use_postgres:
+                rows = await db.fetch(query, *params)
+            else:
+                cur = await db.execute(query, tuple(params))
+                rows = await cur.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for key in ("config_json", "summary_json"):
+                try:
+                    item[key] = json.loads(item.get(key) or "{}")
+                except Exception:
+                    item[key] = {}
+            items.append(item)
+        return items
+
+    async def get_eval_run(self, run_id: int, workspace: str | None = None) -> dict[str, Any] | None:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert("SELECT * FROM ai_eval_runs WHERE workspace = ? AND id = ? LIMIT 1")
+            if self.db_manager.use_postgres:
+                row = await db.fetchrow(query, ws, int(run_id))
+            else:
+                cur = await db.execute(query, (ws, int(run_id)))
+                row = await cur.fetchone()
+            if not row:
+                return None
+            result_query = self.db_manager._convert(
+                "SELECT * FROM ai_eval_results WHERE workspace = ? AND run_id = ? ORDER BY created_at ASC, id ASC"
+            )
+            if self.db_manager.use_postgres:
+                result_rows = await db.fetch(result_query, ws, int(run_id))
+            else:
+                cur2 = await db.execute(result_query, (ws, int(run_id)))
+                result_rows = await cur2.fetchall()
+        item = dict(row)
+        for key in ("config_json", "summary_json"):
+            try:
+                item[key] = json.loads(item.get(key) or "{}")
+            except Exception:
+                item[key] = {}
+        results: list[dict[str, Any]] = []
+        for row0 in result_rows:
+            out = dict(row0)
+            for key in ("transcript_json", "expected_json", "output_json", "score_json"):
+                try:
+                    out[key] = json.loads(out.get(key) or "{}")
+                except Exception:
+                    out[key] = [] if key == "transcript_json" else {}
+            results.append(out)
+        item["results"] = results
+        return item
+
+    async def compare_eval_runs(
+        self,
+        left_run_id: int,
+        right_run_id: int,
+        workspace: str | None = None,
+    ) -> dict[str, Any] | None:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        left = await self.get_eval_run(int(left_run_id), ws)
+        right = await self.get_eval_run(int(right_run_id), ws)
+        if not left or not right:
+            return None
+        left_summary = dict((left.get("summary_json") or {}).get("summary") or {})
+        right_summary = dict((right.get("summary_json") or {}).get("summary") or {})
+        numeric_keys = ("pass_rate", "passed_cases", "total_cases", "sampled_conversations", "handoff_count")
+        summary_delta: dict[str, Any] = {}
+        for key in numeric_keys:
+            left_value = self._safe_float(left_summary.get(key), default=0.0)
+            right_value = self._safe_float(right_summary.get(key), default=0.0)
+            if key in {"passed_cases", "total_cases", "sampled_conversations", "handoff_count"}:
+                left_value = int(left_summary.get(key) or 0)
+                right_value = int(right_summary.get(key) or 0)
+            summary_delta[key] = {
+                "left": left_value,
+                "right": right_value,
+                "delta": round(right_value - left_value, 4) if isinstance(left_value, float) else int(right_value - left_value),
+            }
+        left_cases = self._build_eval_case_index(left.get("results") or [])
+        right_cases = self._build_eval_case_index(right.get("results") or [])
+        case_diffs: list[dict[str, Any]] = []
+        for case_key in sorted(set(left_cases) | set(right_cases)):
+            left_case = left_cases.get(case_key) or {}
+            right_case = right_cases.get(case_key) or {}
+            left_passed = bool((left_case.get("score_json") or {}).get("passed"))
+            right_passed = bool((right_case.get("score_json") or {}).get("passed"))
+            changed = (
+                left_passed != right_passed
+                or str((left_case.get("output_json") or {}).get("intent") or "") != str((right_case.get("output_json") or {}).get("intent") or "")
+                or bool((left_case.get("output_json") or {}).get("should_handoff")) != bool((right_case.get("output_json") or {}).get("should_handoff"))
+            )
+            if not changed:
+                continue
+            case_diffs.append(
+                {
+                    "case_key": case_key,
+                    "left_passed": left_passed,
+                    "right_passed": right_passed,
+                    "left_intent": str((left_case.get("output_json") or {}).get("intent") or ""),
+                    "right_intent": str((right_case.get("output_json") or {}).get("intent") or ""),
+                    "left_should_handoff": bool((left_case.get("output_json") or {}).get("should_handoff")),
+                    "right_should_handoff": bool((right_case.get("output_json") or {}).get("should_handoff")),
+                }
+            )
+        return {
+            "workspace": ws,
+            "left_run": {
+                "id": left.get("id"),
+                "run_type": left.get("run_type"),
+                "label": left.get("label"),
+                "created_at": left.get("created_at"),
+                "summary": left_summary,
+            },
+            "right_run": {
+                "id": right.get("id"),
+                "run_type": right.get("run_type"),
+                "label": right.get("label"),
+                "created_at": right.get("created_at"),
+                "summary": right_summary,
+            },
+            "summary_delta": summary_delta,
+            "case_diffs": case_diffs[:50],
+        }
+
+    async def get_autonomous_eval_gate_status(
+        self,
+        workspace: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        cfg = config or await self.get_config(ws)
+        enabled = bool(cfg.get("autonomous_eval_gate_enabled"))
+        threshold = self._safe_float(cfg.get("autonomous_min_fixture_pass_rate"), default=0.75)
+        freshness_limit_hours = max(1, int(cfg.get("autonomous_require_recent_fixture_eval_hours") or 72))
+        latest_runs = await self.list_eval_runs(ws, limit=1, run_type="fixture", status="completed")
+        latest_run = latest_runs[0] if latest_runs else None
+        pass_rate = self._safe_float(((latest_run or {}).get("summary_json") or {}).get("summary", {}).get("pass_rate"), default=0.0)
+        completed_at = str((latest_run or {}).get("completed_at") or (latest_run or {}).get("created_at") or "").strip()
+        age_hours: float | None = None
+        recent_enough = False
+        if completed_at:
+            try:
+                completed_dt = datetime.fromisoformat(completed_at)
+                age_hours = max(0.0, round((datetime.utcnow() - completed_dt).total_seconds() / 3600.0, 2))
+                recent_enough = age_hours <= freshness_limit_hours
+            except Exception:
+                age_hours = None
+                recent_enough = False
+        threshold_met = pass_rate >= threshold if latest_run else False
+        blocking = bool(enabled and (not latest_run or not recent_enough or not threshold_met))
+        if not enabled:
+            reason_code = "disabled"
+            message = "Eval gate is disabled. Autonomous mode will not be blocked by fixture eval freshness or pass rate."
+        elif not latest_run:
+            reason_code = "missing_fixture_eval"
+            message = "Autonomous mode is blocked until a fixture eval has been run for this workspace."
+        elif not recent_enough:
+            reason_code = "stale_fixture_eval"
+            message = f"Autonomous mode is blocked because the latest fixture eval is older than {freshness_limit_hours} hours."
+        elif not threshold_met:
+            reason_code = "pass_rate_too_low"
+            message = f"Autonomous mode is blocked because the latest fixture eval pass rate is below {threshold:.2f}."
+        else:
+            reason_code = "ready"
+            message = "Autonomous mode is allowed by the current fixture eval gate."
+        return {
+            "workspace": ws,
+            "enabled": enabled,
+            "blocking": blocking,
+            "reason_code": reason_code,
+            "message": message,
+            "latest_run_id": latest_run.get("id") if latest_run else None,
+            "latest_run_label": latest_run.get("label") if latest_run else None,
+            "latest_completed_at": completed_at or None,
+            "latest_pass_rate": pass_rate if latest_run else None,
+            "threshold": threshold,
+            "age_hours": age_hours,
+            "freshness_limit_hours": freshness_limit_hours,
+            "recent_enough": recent_enough,
+            "threshold_met": threshold_met,
+        }
+
     async def get_open_handoff_ticket(self, user_id: str, workspace: str | None = None) -> dict[str, Any] | None:
         ws = self.normalize_workspace(workspace or self.get_workspace())
         uid = str(user_id or "").strip()
@@ -387,6 +641,156 @@ class AIAgentService:
         except Exception:
             item["context_json"] = {}
         return item
+
+    async def run_fixture_eval(self, workspace: str | None = None, label: str | None = None) -> dict[str, Any]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        await self.ensure_schema()
+        config = await self.get_config(ws)
+        run_id = await self._create_eval_run(
+            workspace=ws,
+            run_type="fixture",
+            label=label or "Fixture eval",
+            model=str(config.get("model") or DEFAULT_AGENT_CONFIG["model"]),
+            sample_size=0,
+            config_json=self._safe_eval_config_snapshot(config),
+        )
+        try:
+            cases = load_eval_cases(Path(__file__).with_name("eval_cases.json"))
+            outputs: list[dict[str, Any]] = []
+            for case in cases:
+                result = await self._run_eval_case(
+                    config=config,
+                    workspace=ws,
+                    transcript=case.transcript,
+                    user_id=f"eval:{case.case_id}",
+                )
+                tool_names = [str(entry.get("tool_name") or "") for entry in (result.get("executed_tools") or []) if str(entry.get("tool_name") or "").strip()]
+                outputs.append(
+                    {
+                        "case_id": case.case_id,
+                        "intent": result.get("output", {}).get("intent"),
+                        "should_handoff": bool(result.get("output", {}).get("should_handoff")),
+                        "tool_names": tool_names,
+                    }
+                )
+                score_blob = {
+                    "intent_ok": str(result.get("output", {}).get("intent") or "") == case.expected.intent,
+                    "handoff_ok": bool(result.get("output", {}).get("should_handoff")) == case.expected.should_handoff,
+                    "tools_present": [tool for tool in case.expected.tool_names if tool in tool_names],
+                }
+                await self._insert_eval_result(
+                    run_id=run_id,
+                    workspace=ws,
+                    case_key=case.case_id,
+                    source_type="fixture",
+                    user_id=None,
+                    transcript=case.transcript,
+                    expected={
+                        "intent": case.expected.intent,
+                        "should_handoff": case.expected.should_handoff,
+                        "tool_names": case.expected.tool_names,
+                    },
+                    output=result.get("output") or {},
+                    score=score_blob,
+                )
+            report = score_results(cases, outputs)
+            await self._complete_eval_run(run_id=run_id, workspace=ws, summary_json=report)
+        except Exception as exc:
+            await self._complete_eval_run(
+                run_id=run_id,
+                workspace=ws,
+                summary_json={"error": str(exc)},
+                status="failed",
+            )
+            raise
+        run = await self.get_eval_run(run_id, ws)
+        return run or {"id": run_id, "workspace": ws}
+
+    async def run_conversation_replay_eval(
+        self,
+        workspace: str | None = None,
+        *,
+        limit: int = 10,
+        label: str | None = None,
+        user_ids: list[str] | None = None,
+        transcript_messages: int = 12,
+    ) -> dict[str, Any]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        await self.ensure_schema()
+        config = await self.get_config(ws)
+        run_id = await self._create_eval_run(
+            workspace=ws,
+            run_type="replay",
+            label=label or "Replay eval",
+            model=str(config.get("model") or DEFAULT_AGENT_CONFIG["model"]),
+            sample_size=max(0, len(user_ids or [])) or int(limit or 10),
+            config_json=self._safe_eval_config_snapshot(config),
+        )
+        try:
+            candidates = user_ids or await self._select_eval_conversations(limit=max(1, min(int(limit or 10), 50)))
+            summary_rows: list[dict[str, Any]] = []
+            for user_id in candidates:
+                transcript = await self._load_eval_transcript(user_id, limit=transcript_messages)
+                if not transcript:
+                    continue
+                result = await self._run_eval_case(
+                    config=config,
+                    workspace=ws,
+                    transcript=transcript,
+                    user_id=user_id,
+                )
+                output = result.get("output") or {}
+                executed_tools = result.get("executed_tools") or []
+                tool_names = [str(entry.get("tool_name") or "") for entry in executed_tools if str(entry.get("tool_name") or "").strip()]
+                score_blob = {
+                    "tool_count": len(tool_names),
+                    "handoff": bool(output.get("should_handoff")),
+                    "intent": output.get("intent"),
+                    "confidence": output.get("confidence"),
+                }
+                await self._insert_eval_result(
+                    run_id=run_id,
+                    workspace=ws,
+                    case_key=str(user_id),
+                    source_type="conversation",
+                    user_id=str(user_id),
+                    transcript=transcript,
+                    expected={},
+                    output={
+                        **output,
+                        "tool_names": tool_names,
+                    },
+                    score=score_blob,
+                )
+                summary_rows.append(
+                    {
+                        "user_id": user_id,
+                        "intent": output.get("intent"),
+                        "should_handoff": bool(output.get("should_handoff")),
+                        "tool_names": tool_names,
+                    }
+                )
+            await self._complete_eval_run(
+                run_id=run_id,
+                workspace=ws,
+                summary_json={
+                    "summary": {
+                        "sampled_conversations": len(summary_rows),
+                        "handoff_count": sum(1 for row in summary_rows if row.get("should_handoff")),
+                    },
+                    "rows": summary_rows,
+                },
+            )
+        except Exception as exc:
+            await self._complete_eval_run(
+                run_id=run_id,
+                workspace=ws,
+                summary_json={"error": str(exc)},
+                status="failed",
+            )
+            raise
+        run = await self.get_eval_run(run_id, ws)
+        return run or {"id": run_id, "workspace": ws}
 
     async def get_conversation_overview(self, user_id: str, workspace: str | None = None, limit: int = 8) -> dict[str, Any]:
         ws = self.normalize_workspace(workspace or self.get_workspace())
@@ -494,6 +898,9 @@ class AIAgentService:
         incoming_text = str(message_obj.get("message") or "").strip()
         if not user_id or not incoming_text:
             return {"handled": False, "skip_legacy": False, "reason": "missing_input"}
+        allowed_test_numbers = self._normalize_test_numbers(config.get("test_numbers"))
+        if allowed_test_numbers and not self._is_test_number_allowed(user_id, allowed_test_numbers):
+            return {"handled": False, "skip_legacy": False, "reason": "not_test_number"}
 
         await self.ensure_schema()
         meta = await self.db_manager.get_conversation_meta(user_id)
@@ -505,6 +912,16 @@ class AIAgentService:
         if str(state.get("status") or "") == "human_managed":
             return {"handled": False, "skip_legacy": False, "reason": "human_managed"}
 
+        requested_run_mode = str(config.get("run_mode") or "shadow").strip().lower()
+        eval_gate_status = await self.get_autonomous_eval_gate_status(ws, config) if requested_run_mode == "autonomous" else {
+            "enabled": bool(config.get("autonomous_eval_gate_enabled")),
+            "blocking": False,
+            "reason_code": "not_autonomous",
+            "message": "Eval gate only applies when autonomous mode is requested.",
+        }
+        effective_run_mode = "suggest" if requested_run_mode == "autonomous" and bool(eval_gate_status.get("blocking")) else requested_run_mode
+        runtime_config = {**config, "run_mode": effective_run_mode}
+
         recent_messages = await self.db_manager.get_messages(user_id, offset=0, limit=int(config.get("max_context_messages") or 12))
         turn_payload = {
             "workspace": ws,
@@ -513,6 +930,9 @@ class AIAgentService:
             "conversation_state": state,
             "recent_messages": recent_messages,
             "incoming_message": incoming_text,
+            "requested_run_mode": requested_run_mode,
+            "effective_run_mode": effective_run_mode,
+            "eval_gate": eval_gate_status,
         }
 
         started = time.perf_counter()
@@ -522,14 +942,14 @@ class AIAgentService:
         tool_entries: list[dict[str, Any]] = []
         try:
             output_data, response_id, openai_conversation_id, usage, executed_tools = await self._run_openai_turn(
-                config=config,
+                config=runtime_config,
                 turn_payload=turn_payload,
                 previous_conversation_id=openai_conversation_id or None,
             )
             reply_text = str(output_data.get("reply_text") or "").strip()
             should_handoff = bool(output_data.get("should_handoff"))
             confidence = self._safe_float(output_data.get("confidence"), default=0.0)
-            effective_mode = str(config.get("run_mode") or "shadow").strip().lower()
+            effective_mode = effective_run_mode
             action_tool_names = {
                 str(entry.get("tool_name") or "")
                 for entry in (executed_tools or [])
@@ -623,7 +1043,7 @@ class AIAgentService:
                 workspace=ws,
                 user_id=user_id,
                 inbound_wa_message_id=inbound_wamid,
-                turn_mode=str(config.get("run_mode") or "shadow"),
+                turn_mode=effective_run_mode,
                 turn_status="completed",
                 detected_language=str(output_data.get("language") or ""),
                 detected_intent=str(output_data.get("intent") or ""),
@@ -683,6 +1103,19 @@ class AIAgentService:
                 workspace=ws,
                 user_id=user_id,
                 turn_id=turn_id,
+                tool_name="autonomous_eval_gate",
+                ok=not bool(eval_gate_status.get("blocking")),
+                request_json={
+                    "requested_run_mode": requested_run_mode,
+                    "effective_run_mode": effective_run_mode,
+                },
+                response_json=eval_gate_status,
+                error_code=str(eval_gate_status.get("reason_code") or "") if bool(eval_gate_status.get("blocking")) else None,
+            )
+            await self._log_tool(
+                workspace=ws,
+                user_id=user_id,
+                turn_id=turn_id,
                 tool_name="get_business_policies",
                 ok=True,
                 request_json={"topics": output_data.get("policy_topics") or []},
@@ -696,7 +1129,7 @@ class AIAgentService:
                 workspace=ws,
                 user_id=user_id,
                 inbound_wa_message_id=inbound_wamid,
-                turn_mode=str(config.get("run_mode") or "shadow"),
+                turn_mode=effective_run_mode,
                 turn_status="failed",
                 detected_language="",
                 detected_intent="",
@@ -1117,6 +1550,241 @@ class AIAgentService:
             pass
         return tags
 
+    async def _create_eval_run(
+        self,
+        *,
+        workspace: str,
+        run_type: str,
+        label: str,
+        model: str,
+        sample_size: int,
+        config_json: dict[str, Any],
+    ) -> int:
+        params = (
+            workspace,
+            run_type,
+            label,
+            model,
+            "running",
+            int(sample_size or 0),
+            json.dumps(config_json or {}, ensure_ascii=False),
+            json.dumps({}, ensure_ascii=False),
+            datetime.utcnow().isoformat(),
+            None,
+        )
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                """
+                INSERT INTO ai_eval_runs
+                (workspace, run_type, label, model, status, sample_size, config_json, summary_json, created_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            )
+            if self.db_manager.use_postgres:
+                await db.execute(query, *params)
+                row = await db.fetchrow(
+                    self.db_manager._convert(
+                        "SELECT id FROM ai_eval_runs WHERE workspace = ? ORDER BY id DESC LIMIT 1"
+                    ),
+                    workspace,
+                )
+                return int(row["id"]) if row else 0
+            cur = await db.execute(query, params)
+            await db.commit()
+            return int(cur.lastrowid or 0)
+
+    async def _complete_eval_run(
+        self,
+        *,
+        run_id: int,
+        workspace: str,
+        summary_json: dict[str, Any],
+        status: str = "completed",
+    ) -> None:
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                """
+                UPDATE ai_eval_runs
+                SET status = ?, summary_json = ?, completed_at = ?
+                WHERE workspace = ? AND id = ?
+                """
+            )
+            params = (status, json.dumps(summary_json or {}, ensure_ascii=False), datetime.utcnow().isoformat(), workspace, int(run_id))
+            if self.db_manager.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+
+    async def _insert_eval_result(
+        self,
+        *,
+        run_id: int,
+        workspace: str,
+        case_key: str,
+        source_type: str,
+        user_id: str | None,
+        transcript: list[str],
+        expected: dict[str, Any],
+        output: dict[str, Any],
+        score: dict[str, Any],
+    ) -> None:
+        params = (
+            int(run_id),
+            workspace,
+            case_key,
+            source_type,
+            user_id,
+            json.dumps(transcript or [], ensure_ascii=False),
+            json.dumps(expected or {}, ensure_ascii=False),
+            json.dumps(output or {}, ensure_ascii=False),
+            json.dumps(score or {}, ensure_ascii=False),
+            datetime.utcnow().isoformat(),
+        )
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                """
+                INSERT INTO ai_eval_results
+                (run_id, workspace, case_key, source_type, user_id, transcript_json, expected_json, output_json, score_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            )
+            if self.db_manager.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+
+    async def _select_eval_conversations(self, *, limit: int) -> list[str]:
+        conversations = await self.db_manager.get_conversations_with_stats(limit=max(1, min(int(limit or 10), 100)))
+        user_ids: list[str] = []
+        for conv in conversations or []:
+            uid = str(conv.get("user_id") or "").strip()
+            if not uid or uid.startswith(("team:", "agent:", "dm:", "eval:")):
+                continue
+            user_ids.append(uid)
+        return user_ids[: max(1, min(int(limit or 10), 100))]
+
+    async def _load_eval_transcript(self, user_id: str, *, limit: int = 12) -> list[str]:
+        messages = await self.db_manager.get_messages(user_id, offset=0, limit=max(1, min(int(limit or 12), 50)))
+        transcript: list[str] = []
+        for message in messages or []:
+            body = str(message.get("message") or "").strip()
+            if not body:
+                continue
+            who = "Agent" if bool(message.get("from_me")) else "Customer"
+            transcript.append(f"{who}: {body}")
+        return transcript
+
+    async def _run_eval_case(
+        self,
+        *,
+        config: dict[str, Any],
+        workspace: str,
+        transcript: list[str],
+        user_id: str,
+    ) -> dict[str, Any]:
+        safe_config = {**config, "run_mode": "shadow"}
+        latest_customer_message = ""
+        for line in reversed(transcript or []):
+            if str(line or "").startswith("Customer:"):
+                latest_customer_message = str(line.split(":", 1)[1] if ":" in line else line).strip()
+                break
+        if not latest_customer_message:
+            latest_customer_message = str((transcript or [""])[-1] or "").strip()
+        recent_messages = []
+        for line in transcript or []:
+            who, _, body = str(line or "").partition(":")
+            recent_messages.append(
+                {
+                    "from_me": who.strip().lower() == "agent",
+                    "message": body.strip(),
+                }
+            )
+        turn_payload = {
+            "workspace": workspace,
+            "user_id": user_id,
+            "inbound_wa_message_id": f"eval-{user_id}",
+            "conversation_state": {
+                "status": "bot_managed",
+                "owner_type": "bot",
+                "slots_json": {},
+                "risk_json": {},
+                "counters_json": {"turns": 0},
+            },
+            "recent_messages": recent_messages,
+            "incoming_message": latest_customer_message,
+        }
+        output, response_id, conversation_id, usage, executed_tools = await self._run_openai_turn(
+            config=safe_config,
+            turn_payload=turn_payload,
+            previous_conversation_id=None,
+        )
+        return {
+            "output": output,
+            "response_id": response_id,
+            "conversation_id": conversation_id,
+            "usage": usage,
+            "executed_tools": executed_tools,
+        }
+
+    def _safe_eval_config_snapshot(self, config: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "model": str(config.get("model") or DEFAULT_AGENT_CONFIG["model"]),
+            "run_mode": "shadow",
+            "max_output_tokens": int(config.get("max_output_tokens") or 0),
+            "max_context_messages": int(config.get("max_context_messages") or 0),
+            "low_confidence_threshold": self._safe_float(config.get("low_confidence_threshold"), default=0.0),
+        }
+
+    def _build_eval_case_index(self, results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {
+            str(item.get("case_key") or "").strip(): item
+            for item in (results or [])
+            if str(item.get("case_key") or "").strip()
+        }
+
+    def _normalize_test_numbers(self, raw_value: Any) -> list[str]:
+        if isinstance(raw_value, str):
+            candidates = re.split(r"[\s,;\n\r]+", raw_value)
+        elif isinstance(raw_value, (list, tuple, set)):
+            candidates = [str(item or "") for item in raw_value]
+        else:
+            candidates = []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            phone = self._normalize_phone_like(candidate)
+            if not phone or phone in seen:
+                continue
+            seen.add(phone)
+            normalized.append(phone)
+        return normalized
+
+    def _normalize_phone_like(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        plus = raw.startswith("+")
+        digits = re.sub(r"\D+", "", raw)
+        if not digits:
+            return ""
+        return f"+{digits}" if plus else digits
+
+    def _is_test_number_allowed(self, user_id: str, allowed_numbers: list[str]) -> bool:
+        incoming = self._normalize_phone_like(user_id)
+        incoming_digits = incoming.lstrip("+")
+        for item in allowed_numbers:
+            candidate = self._normalize_phone_like(item)
+            if not candidate:
+                continue
+            candidate_digits = candidate.lstrip("+")
+            if incoming == candidate or incoming_digits == candidate_digits:
+                return True
+            if incoming_digits.endswith(candidate_digits) or candidate_digits.endswith(incoming_digits):
+                return True
+        return False
+
     async def _load_policy_docs_for_prompt(self, incoming_text: str, *, workspace: str) -> list[dict[str, Any]]:
         policies = await self.list_policies(workspace)
         if not policies:
@@ -1154,6 +1822,7 @@ class AIAgentService:
             f"{config.get('instructions')}\n\n"
             f"Business context:\n{config.get('business_context')}\n\n"
             "You have access to tools for customer lookup, orders, delivery, policies, stock, catalog messages, human assignment, and conversation status.\n"
+            "Before answering delivery, COD, exchange, return, refund, or complaint-policy questions, call get_business_policies and rely only on approved policies.\n"
             "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n"
             "Return a JSON object only with this exact shape:\n"
             "{"

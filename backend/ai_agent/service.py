@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,16 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "autonomous_eval_gate_enabled": True,
     "autonomous_min_fixture_pass_rate": 0.75,
     "autonomous_require_recent_fixture_eval_hours": 72,
+    "autonomous_blocked_intents": ["refund_request", "complaint"],
+    "replay_schedule_enabled": False,
+    "replay_schedule_hour_local": 2,
+    "replay_schedule_timezone": "Africa/Casablanca",
+    "replay_schedule_sample_size": 10,
+    "replay_schedule_transcript_messages": 12,
+    "replay_schedule_labeled_only": False,
+    "replay_alerts_enabled": True,
+    "replay_alert_min_pass_rate": 0.75,
+    "replay_alert_max_handoff_rate": 0.45,
     "test_numbers": [],
     "instructions": (
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
@@ -64,6 +75,8 @@ class AIAgentDependencies:
     get_agent_last_seen: Callable[[str, str], Awaitable[float | None]]
     get_agent_assignment_count: Callable[[str, str], Awaitable[int]]
     set_conversation_assignment: Callable[[str, str | None], Awaitable[None]]
+    push_workspace: Callable[[str], Any]
+    pop_workspace: Callable[[Any], None]
     logger: logging.Logger
 
 
@@ -76,6 +89,8 @@ class AIAgentService:
         self.make_settings_key = deps.make_settings_key
         self.decrypt_secret = deps.decrypt_secret
         self.catalog_provider = deps.catalog_provider
+        self.push_workspace = deps.push_workspace
+        self.pop_workspace = deps.pop_workspace
         self.log = deps.logger
         self.tools = AIAgentToolbox(
             AIAgentToolDependencies(
@@ -212,12 +227,42 @@ class AIAgentService:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
+                """
+                CREATE TABLE IF NOT EXISTS ai_eval_expectations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    label TEXT,
+                    expected_intent TEXT,
+                    expected_should_handoff INTEGER NOT NULL DEFAULT 0,
+                    expected_tool_names_json TEXT,
+                    notes TEXT,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS ai_eval_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace TEXT NOT NULL,
+                    run_id INTEGER,
+                    alert_type TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'warning',
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    payload_json TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
                 "CREATE UNIQUE INDEX IF NOT EXISTS uniq_ai_state_ws_user ON ai_conversation_state (workspace, user_id)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_turns_ws_user_created ON ai_turns (workspace, user_id, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_policy_ws_topic ON ai_policy_docs (workspace, topic, locale, status)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_handoff_ws_user_status ON ai_handoff_tickets (workspace, user_id, status, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_eval_runs_ws_created ON ai_eval_runs (workspace, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_eval_results_run ON ai_eval_results (run_id, created_at ASC)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uniq_ai_eval_expectations_ws_user ON ai_eval_expectations (workspace, user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_ai_eval_alerts_ws_created ON ai_eval_alerts (workspace, created_at DESC)",
             ]
             for statement in statements:
                 stmt = statement.strip()
@@ -237,6 +282,7 @@ class AIAgentService:
             payload = {}
         config = {**DEFAULT_AGENT_CONFIG, **payload}
         config["test_numbers"] = self._normalize_test_numbers(config.get("test_numbers"))
+        config["autonomous_blocked_intents"] = self._normalize_string_list(config.get("autonomous_blocked_intents"))
         enc = str(payload.get("openai_api_key_enc") or "").strip()
         api_key = ""
         if enc:
@@ -273,6 +319,16 @@ class AIAgentService:
             "autonomous_eval_gate_enabled",
             "autonomous_min_fixture_pass_rate",
             "autonomous_require_recent_fixture_eval_hours",
+            "autonomous_blocked_intents",
+            "replay_schedule_enabled",
+            "replay_schedule_hour_local",
+            "replay_schedule_timezone",
+            "replay_schedule_sample_size",
+            "replay_schedule_transcript_messages",
+            "replay_schedule_labeled_only",
+            "replay_alerts_enabled",
+            "replay_alert_min_pass_rate",
+            "replay_alert_max_handoff_rate",
             "test_numbers",
             "instructions",
             "business_context",
@@ -281,6 +337,8 @@ class AIAgentService:
             if key in payload:
                 if key == "test_numbers":
                     merged[key] = self._normalize_test_numbers(payload.get(key))
+                elif key in {"autonomous_blocked_intents"}:
+                    merged[key] = self._normalize_string_list(payload.get(key))
                 else:
                     merged[key] = payload.get(key)
         if "openai_api_key_enc" in current:
@@ -446,6 +504,230 @@ class AIAgentService:
                     item[key] = {}
             items.append(item)
         return items
+
+    async def list_eval_expectations(self, workspace: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        lim = max(1, min(int(limit or 50), 200))
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                "SELECT * FROM ai_eval_expectations WHERE workspace = ? ORDER BY updated_at DESC, id DESC LIMIT ?"
+            )
+            if self.db_manager.use_postgres:
+                rows = await db.fetch(query, ws, lim)
+            else:
+                cur = await db.execute(query, (ws, lim))
+                rows = await cur.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["expected_tool_names_json"] = json.loads(item.get("expected_tool_names_json") or "[]")
+            except Exception:
+                item["expected_tool_names_json"] = []
+            item["expected_should_handoff"] = bool(item.get("expected_should_handoff"))
+            item["active"] = bool(item.get("active"))
+            items.append(item)
+        return items
+
+    async def upsert_eval_expectation(self, payload: dict[str, Any], workspace: str | None = None) -> dict[str, Any]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        user_id = str(payload.get("user_id") or "").strip()
+        if not user_id:
+            raise ValueError("user_id is required")
+        label = str(payload.get("label") or "").strip()
+        expected_intent = str(payload.get("expected_intent") or "").strip()
+        expected_should_handoff = bool(payload.get("expected_should_handoff"))
+        expected_tool_names = self._normalize_string_list(payload.get("expected_tool_names"))
+        notes = str(payload.get("notes") or "").strip()
+        active = bool(payload.get("active", True))
+        now_iso = datetime.utcnow().isoformat()
+        existing = await self.get_eval_expectation_by_user_id(user_id, ws)
+        async with self.db_manager._conn() as db:
+            if existing:
+                query = self.db_manager._convert(
+                    """
+                    UPDATE ai_eval_expectations
+                    SET label = ?, expected_intent = ?, expected_should_handoff = ?, expected_tool_names_json = ?, notes = ?, active = ?, updated_at = ?
+                    WHERE workspace = ? AND user_id = ?
+                    """
+                )
+                params = (
+                    label,
+                    expected_intent,
+                    1 if expected_should_handoff else 0,
+                    json.dumps(expected_tool_names, ensure_ascii=False),
+                    notes,
+                    1 if active else 0,
+                    now_iso,
+                    ws,
+                    user_id,
+                )
+                if self.db_manager.use_postgres:
+                    await db.execute(query, *params)
+                else:
+                    await db.execute(query, params)
+                    await db.commit()
+            else:
+                query = self.db_manager._convert(
+                    """
+                    INSERT INTO ai_eval_expectations
+                    (workspace, user_id, label, expected_intent, expected_should_handoff, expected_tool_names_json, notes, active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+                )
+                params = (
+                    ws,
+                    user_id,
+                    label,
+                    expected_intent,
+                    1 if expected_should_handoff else 0,
+                    json.dumps(expected_tool_names, ensure_ascii=False),
+                    notes,
+                    1 if active else 0,
+                    now_iso,
+                    now_iso,
+                )
+                if self.db_manager.use_postgres:
+                    await db.execute(query, *params)
+                else:
+                    await db.execute(query, params)
+                    await db.commit()
+        item = await self.get_eval_expectation_by_user_id(user_id, ws)
+        return item or {}
+
+    async def get_eval_expectation_by_user_id(self, user_id: str, workspace: str | None = None) -> dict[str, Any] | None:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        uid = str(user_id or "").strip()
+        if not uid:
+            return None
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                "SELECT * FROM ai_eval_expectations WHERE workspace = ? AND user_id = ? LIMIT 1"
+            )
+            if self.db_manager.use_postgres:
+                row = await db.fetchrow(query, ws, uid)
+            else:
+                cur = await db.execute(query, (ws, uid))
+                row = await cur.fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            item["expected_tool_names_json"] = json.loads(item.get("expected_tool_names_json") or "[]")
+        except Exception:
+            item["expected_tool_names_json"] = []
+        item["expected_should_handoff"] = bool(item.get("expected_should_handoff"))
+        item["active"] = bool(item.get("active"))
+        return item
+
+    async def delete_eval_expectation(self, user_id: str, workspace: str | None = None) -> None:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        uid = str(user_id or "").strip()
+        if not uid:
+            return
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert("DELETE FROM ai_eval_expectations WHERE workspace = ? AND user_id = ?")
+            if self.db_manager.use_postgres:
+                await db.execute(query, ws, uid)
+            else:
+                await db.execute(query, (ws, uid))
+                await db.commit()
+
+    async def list_eval_alerts(self, workspace: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        lim = max(1, min(int(limit or 20), 100))
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                "SELECT * FROM ai_eval_alerts WHERE workspace = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+            )
+            if self.db_manager.use_postgres:
+                rows = await db.fetch(query, ws, lim)
+            else:
+                cur = await db.execute(query, (ws, lim))
+                rows = await cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload_json"] = json.loads(item.get("payload_json") or "{}")
+            except Exception:
+                item["payload_json"] = {}
+            out.append(item)
+        return out
+
+    async def create_eval_alert(
+        self,
+        *,
+        workspace: str,
+        run_id: int | None,
+        alert_type: str,
+        severity: str,
+        title: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        ws = self.normalize_workspace(workspace)
+        now_iso = datetime.utcnow().isoformat()
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                """
+                INSERT INTO ai_eval_alerts
+                (workspace, run_id, alert_type, severity, title, message, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            )
+            params = (
+                ws,
+                int(run_id) if run_id else None,
+                str(alert_type or "").strip(),
+                str(severity or "warning").strip(),
+                str(title or "").strip(),
+                str(message or "").strip(),
+                json.dumps(payload or {}, ensure_ascii=False),
+                now_iso,
+            )
+            if self.db_manager.use_postgres:
+                await db.execute(query, *params)
+            else:
+                await db.execute(query, params)
+                await db.commit()
+        items = await self.list_eval_alerts(ws, limit=1)
+        return items[0] if items else {}
+
+    async def run_scheduled_replay_if_due(self, workspace: str | None = None, *, force: bool = False) -> dict[str, Any]:
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        config = await self.get_config(ws)
+        if (not force) and (not bool(config.get("replay_schedule_enabled"))):
+            return {"workspace": ws, "ran": False, "reason": "schedule_disabled"}
+        timezone_name = str(config.get("replay_schedule_timezone") or "Africa/Casablanca").strip() or "Africa/Casablanca"
+        local_now = self._local_now(timezone_name)
+        scheduled_hour = max(0, min(int(config.get("replay_schedule_hour_local") or 2), 23))
+        if (not force) and local_now.hour < scheduled_hour:
+            return {"workspace": ws, "ran": False, "reason": "before_scheduled_hour", "local_hour": local_now.hour}
+        marker_key = self.make_settings_key("ai_agent_replay_schedule_marker", ws)
+        marker_value = await self.db_manager.get_setting(marker_key)
+        marker_day = str(marker_value or "").strip()
+        today_key = local_now.date().isoformat()
+        if (not force) and marker_day == today_key:
+            return {"workspace": ws, "ran": False, "reason": "already_ran_today", "local_day": today_key}
+        run = await self.run_conversation_replay_eval(
+            ws,
+            limit=max(1, min(int(config.get("replay_schedule_sample_size") or 10), 100)),
+            label=f"Nightly replay {local_now.isoformat()}",
+            transcript_messages=max(4, min(int(config.get("replay_schedule_transcript_messages") or 12), 40)),
+            labeled_only=bool(config.get("replay_schedule_labeled_only")),
+        )
+        if not force:
+            await self.db_manager.set_setting(marker_key, today_key)
+        alerts = await self._create_replay_alerts_for_run(ws, run, config)
+        return {
+            "workspace": ws,
+            "ran": True,
+            "run": run,
+            "alerts": alerts,
+            "local_day": today_key,
+            "local_hour": local_now.hour,
+        }
 
     async def get_eval_run(self, run_id: int, workspace: str | None = None) -> dict[str, Any] | None:
         ws = self.normalize_workspace(workspace or self.get_workspace())
@@ -714,6 +996,7 @@ class AIAgentService:
         label: str | None = None,
         user_ids: list[str] | None = None,
         transcript_messages: int = 12,
+        labeled_only: bool = False,
     ) -> dict[str, Any]:
         ws = self.normalize_workspace(workspace or self.get_workspace())
         await self.ensure_schema()
@@ -727,12 +1010,22 @@ class AIAgentService:
             config_json=self._safe_eval_config_snapshot(config),
         )
         try:
-            candidates = user_ids or await self._select_eval_conversations(limit=max(1, min(int(limit or 10), 50)))
+            expectations = await self.list_eval_expectations(ws, limit=max(10, int(limit or 10) * 5))
+            expectations_by_user = {
+                str(item.get("user_id") or "").strip(): item
+                for item in expectations
+                if bool(item.get("active")) and str(item.get("user_id") or "").strip()
+            }
+            if labeled_only:
+                candidates = list(expectations_by_user.keys())[: max(1, min(int(limit or 10), 100))]
+            else:
+                candidates = user_ids or await self._select_eval_conversations(workspace=ws, limit=max(1, min(int(limit or 10), 50)))
             summary_rows: list[dict[str, Any]] = []
             for user_id in candidates:
-                transcript = await self._load_eval_transcript(user_id, limit=transcript_messages)
+                transcript = await self._load_eval_transcript(user_id, workspace=ws, limit=transcript_messages)
                 if not transcript:
                     continue
+                expectation = expectations_by_user.get(str(user_id))
                 result = await self._run_eval_case(
                     config=config,
                     workspace=ws,
@@ -742,12 +1035,14 @@ class AIAgentService:
                 output = result.get("output") or {}
                 executed_tools = result.get("executed_tools") or []
                 tool_names = [str(entry.get("tool_name") or "") for entry in executed_tools if str(entry.get("tool_name") or "").strip()]
-                score_blob = {
-                    "tool_count": len(tool_names),
-                    "handoff": bool(output.get("should_handoff")),
-                    "intent": output.get("intent"),
-                    "confidence": output.get("confidence"),
-                }
+                expected_tools = self._normalize_string_list((expectation or {}).get("expected_tool_names_json"))
+                expected_intent = str((expectation or {}).get("expected_intent") or "").strip()
+                has_expectation = bool(expectation and (expected_intent or expected_tools or "expected_should_handoff" in expectation))
+                score_blob = self._score_replay_output(
+                    expectation=expectation,
+                    output=output,
+                    tool_names=tool_names,
+                )
                 await self._insert_eval_result(
                     run_id=run_id,
                     workspace=ws,
@@ -755,7 +1050,13 @@ class AIAgentService:
                     source_type="conversation",
                     user_id=str(user_id),
                     transcript=transcript,
-                    expected={},
+                    expected={
+                        "label": (expectation or {}).get("label"),
+                        "intent": expected_intent,
+                        "should_handoff": bool((expectation or {}).get("expected_should_handoff")) if expectation else None,
+                        "tool_names": expected_tools,
+                        "notes": (expectation or {}).get("notes"),
+                    } if expectation else {},
                     output={
                         **output,
                         "tool_names": tool_names,
@@ -768,8 +1069,12 @@ class AIAgentService:
                         "intent": output.get("intent"),
                         "should_handoff": bool(output.get("should_handoff")),
                         "tool_names": tool_names,
+                        "scored": has_expectation,
+                        "passed": score_blob.get("passed"),
                     }
                 )
+            scored_rows = [row for row in summary_rows if row.get("scored")]
+            passed_rows = [row for row in scored_rows if row.get("passed")]
             await self._complete_eval_run(
                 run_id=run_id,
                 workspace=ws,
@@ -777,6 +1082,10 @@ class AIAgentService:
                     "summary": {
                         "sampled_conversations": len(summary_rows),
                         "handoff_count": sum(1 for row in summary_rows if row.get("should_handoff")),
+                        "scored_cases": len(scored_rows),
+                        "passed_cases": len(passed_rows),
+                        "pass_rate": round((len(passed_rows) / len(scored_rows)), 4) if scored_rows else None,
+                        "labeled_only": bool(labeled_only),
                     },
                     "rows": summary_rows,
                 },
@@ -975,6 +1284,10 @@ class AIAgentService:
                     output_data["handoff_reason"] = "low_confidence"
             if not bool(config.get("handoff_enabled")):
                 should_handoff = False
+            blocked_intents = set(self._normalize_string_list(config.get("autonomous_blocked_intents")))
+            if effective_mode == "autonomous" and str(output_data.get("intent") or "").strip() in blocked_intents:
+                should_handoff = True
+                output_data["handoff_reason"] = str(output_data.get("handoff_reason") or "intent_policy_gate")
             action = "shadow" if effective_mode == "shadow" else ("suggest" if effective_mode == "suggest" else "no_reply")
             handled = False
             skip_legacy = False
@@ -1111,6 +1424,24 @@ class AIAgentService:
                 },
                 response_json=eval_gate_status,
                 error_code=str(eval_gate_status.get("reason_code") or "") if bool(eval_gate_status.get("blocking")) else None,
+            )
+            await self._log_tool(
+                workspace=ws,
+                user_id=user_id,
+                turn_id=turn_id,
+                tool_name="autonomous_intent_gate",
+                ok=not (
+                    effective_mode == "autonomous"
+                    and str(output_data.get("intent") or "").strip() in blocked_intents
+                ),
+                request_json={"blocked_intents": sorted(blocked_intents)},
+                response_json={
+                    "intent": str(output_data.get("intent") or "").strip(),
+                    "handoff_reason": str(output_data.get("handoff_reason") or ""),
+                },
+                error_code="intent_blocked"
+                if (effective_mode == "autonomous" and str(output_data.get("intent") or "").strip() in blocked_intents)
+                else None,
             )
             await self._log_tool(
                 workspace=ws,
@@ -1655,8 +1986,20 @@ class AIAgentService:
                 await db.execute(query, params)
                 await db.commit()
 
-    async def _select_eval_conversations(self, *, limit: int) -> list[str]:
-        conversations = await self.db_manager.get_conversations_with_stats(limit=max(1, min(int(limit or 10), 100)))
+    @asynccontextmanager
+    async def _workspace_scope(self, workspace: str):
+        token = self.push_workspace(workspace)
+        try:
+            yield
+        finally:
+            try:
+                self.pop_workspace(token)
+            except Exception:
+                pass
+
+    async def _select_eval_conversations(self, *, workspace: str, limit: int) -> list[str]:
+        async with self._workspace_scope(workspace):
+            conversations = await self.db_manager.get_conversations_with_stats(limit=max(1, min(int(limit or 10), 100)))
         user_ids: list[str] = []
         for conv in conversations or []:
             uid = str(conv.get("user_id") or "").strip()
@@ -1665,8 +2008,9 @@ class AIAgentService:
             user_ids.append(uid)
         return user_ids[: max(1, min(int(limit or 10), 100))]
 
-    async def _load_eval_transcript(self, user_id: str, *, limit: int = 12) -> list[str]:
-        messages = await self.db_manager.get_messages(user_id, offset=0, limit=max(1, min(int(limit or 12), 50)))
+    async def _load_eval_transcript(self, user_id: str, *, workspace: str, limit: int = 12) -> list[str]:
+        async with self._workspace_scope(workspace):
+            messages = await self.db_manager.get_messages(user_id, offset=0, limit=max(1, min(int(limit or 12), 50)))
         transcript: list[str] = []
         for message in messages or []:
             body = str(message.get("message") or "").strip()
@@ -1744,6 +2088,46 @@ class AIAgentService:
             if str(item.get("case_key") or "").strip()
         }
 
+    def _score_replay_output(
+        self,
+        *,
+        expectation: dict[str, Any] | None,
+        output: dict[str, Any],
+        tool_names: list[str],
+    ) -> dict[str, Any]:
+        expected_intent = str((expectation or {}).get("expected_intent") or "").strip()
+        expected_handoff = bool((expectation or {}).get("expected_should_handoff")) if expectation else False
+        expected_tools = set(self._normalize_string_list((expectation or {}).get("expected_tool_names_json")))
+        actual_intent = str(output.get("intent") or "").strip()
+        actual_handoff = bool(output.get("should_handoff"))
+        actual_tools = {str(name or "").strip() for name in (tool_names or []) if str(name or "").strip()}
+        has_expectation = bool(expectation and (expected_intent or expected_tools or "expected_should_handoff" in expectation))
+        if not has_expectation:
+            return {
+                "tool_count": len(actual_tools),
+                "handoff": actual_handoff,
+                "intent": actual_intent,
+                "confidence": output.get("confidence"),
+                "scored": False,
+                "passed": None,
+            }
+        intent_ok = (not expected_intent) or actual_intent == expected_intent
+        handoff_ok = actual_handoff == expected_handoff
+        tools_ok = expected_tools.issubset(actual_tools)
+        return {
+            "tool_count": len(actual_tools),
+            "handoff": actual_handoff,
+            "intent": actual_intent,
+            "confidence": output.get("confidence"),
+            "scored": True,
+            "intent_ok": intent_ok,
+            "handoff_ok": handoff_ok,
+            "tools_ok": tools_ok,
+            "expected_tools": sorted(expected_tools),
+            "actual_tools": sorted(actual_tools),
+            "passed": bool(intent_ok and handoff_ok and tools_ok),
+        }
+
     def _normalize_test_numbers(self, raw_value: Any) -> list[str]:
         if isinstance(raw_value, str):
             candidates = re.split(r"[\s,;\n\r]+", raw_value)
@@ -1760,6 +2144,70 @@ class AIAgentService:
             seen.add(phone)
             normalized.append(phone)
         return normalized
+
+    def _normalize_string_list(self, raw_value: Any) -> list[str]:
+        if isinstance(raw_value, str):
+            candidates = re.split(r"[\s,;\n\r]+", raw_value)
+        elif isinstance(raw_value, (list, tuple, set)):
+            candidates = [str(item or "") for item in raw_value]
+        else:
+            candidates = []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            clean = str(candidate or "").strip()
+            if not clean:
+                continue
+            if clean in seen:
+                continue
+            seen.add(clean)
+            normalized.append(clean)
+        return normalized
+
+    async def _create_replay_alerts_for_run(self, workspace: str, run: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
+        if not bool(config.get("replay_alerts_enabled")):
+            return []
+        summary = dict((run.get("summary_json") or {}).get("summary") or {})
+        alerts: list[dict[str, Any]] = []
+        scored_cases = int(summary.get("scored_cases") or 0)
+        pass_rate = summary.get("pass_rate")
+        handoff_count = int(summary.get("handoff_count") or 0)
+        sampled = int(summary.get("sampled_conversations") or 0)
+        handoff_rate = round((handoff_count / sampled), 4) if sampled else 0.0
+        min_pass_rate = self._safe_float(config.get("replay_alert_min_pass_rate"), default=0.75)
+        max_handoff_rate = self._safe_float(config.get("replay_alert_max_handoff_rate"), default=0.45)
+        if scored_cases > 0 and pass_rate is not None and self._safe_float(pass_rate, default=0.0) < min_pass_rate:
+            alerts.append(
+                await self.create_eval_alert(
+                    workspace=workspace,
+                    run_id=int(run.get("id") or 0),
+                    alert_type="pass_rate_regression",
+                    severity="high",
+                    title="Nightly replay pass rate dropped",
+                    message=f"Replay run #{run.get('id')} fell below the minimum pass rate of {min_pass_rate:.2f}.",
+                    payload={"pass_rate": pass_rate, "threshold": min_pass_rate, "summary": summary},
+                )
+            )
+        if sampled > 0 and handoff_rate > max_handoff_rate:
+            alerts.append(
+                await self.create_eval_alert(
+                    workspace=workspace,
+                    run_id=int(run.get("id") or 0),
+                    alert_type="handoff_rate_spike",
+                    severity="warning",
+                    title="Nightly replay handoff rate is high",
+                    message=f"Replay run #{run.get('id')} exceeded the maximum handoff rate of {max_handoff_rate:.2f}.",
+                    payload={"handoff_rate": handoff_rate, "threshold": max_handoff_rate, "summary": summary},
+                )
+            )
+        return alerts
+
+    def _local_now(self, timezone_name: str) -> datetime:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(timezone_name))
+        except Exception:
+            return datetime.utcnow()
 
     def _normalize_phone_like(self, value: Any) -> str:
         raw = str(value or "").strip()

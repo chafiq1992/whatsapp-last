@@ -17,6 +17,16 @@ const DEFAULT_FORM = {
   autonomous_eval_gate_enabled: true,
   autonomous_min_fixture_pass_rate: 0.75,
   autonomous_require_recent_fixture_eval_hours: 72,
+  autonomous_blocked_intents: 'refund_request, complaint',
+  replay_schedule_enabled: false,
+  replay_schedule_hour_local: 2,
+  replay_schedule_timezone: 'Africa/Casablanca',
+  replay_schedule_sample_size: 10,
+  replay_schedule_transcript_messages: 12,
+  replay_schedule_labeled_only: false,
+  replay_alerts_enabled: true,
+  replay_alert_min_pass_rate: 0.75,
+  replay_alert_max_handoff_rate: 0.45,
   test_numbers: '',
   supported_languages: 'darija, ar, fr, en',
   instructions: '',
@@ -37,6 +47,16 @@ const DEFAULT_POLICY = {
   version: '1',
 };
 
+const DEFAULT_EXPECTATION = {
+  user_id: '',
+  label: '',
+  expected_intent: 'product_discovery',
+  expected_should_handoff: false,
+  expected_tool_names: '',
+  notes: '',
+  active: true,
+};
+
 export default function AIAgentSettingsPanel({ workspace }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -48,6 +68,8 @@ export default function AIAgentSettingsPanel({ workspace }) {
   const [policySaving, setPolicySaving] = useState(false);
   const [turns, setTurns] = useState([]);
   const [evalRuns, setEvalRuns] = useState([]);
+  const [evalExpectations, setEvalExpectations] = useState([]);
+  const [evalAlerts, setEvalAlerts] = useState([]);
   const [evalRunning, setEvalRunning] = useState(false);
   const [selectedEvalRun, setSelectedEvalRun] = useState(null);
   const [gateStatus, setGateStatus] = useState(null);
@@ -55,6 +77,8 @@ export default function AIAgentSettingsPanel({ workspace }) {
   const [runStatusFilter, setRunStatusFilter] = useState('all');
   const [compareRunId, setCompareRunId] = useState('');
   const [compareSummary, setCompareSummary] = useState(null);
+  const [expectationDraft, setExpectationDraft] = useState(DEFAULT_EXPECTATION);
+  const [expectationSaving, setExpectationSaving] = useState(false);
 
   const wsHeader = useMemo(() => ({ 'X-Workspace': workspace }), [workspace]);
 
@@ -63,17 +87,20 @@ export default function AIAgentSettingsPanel({ workspace }) {
     setError('');
     setSuccess('');
     try {
-      const [cfgRes, policyRes, turnsRes, evalRunsRes, gateRes] = await Promise.all([
+      const [cfgRes, policyRes, turnsRes, evalRunsRes, gateRes, expectationsRes, alertsRes] = await Promise.all([
         api.get('/admin/ai-agent/config', { headers: wsHeader }),
         api.get('/admin/ai-agent/policies', { headers: wsHeader }),
         api.get('/admin/ai-agent/turns?limit=20', { headers: wsHeader }),
         api.get('/admin/ai-agent/evals/runs?limit=25', { headers: wsHeader }),
         api.get('/admin/ai-agent/evals/gate-status', { headers: wsHeader }),
+        api.get('/admin/ai-agent/evals/expectations?limit=50', { headers: wsHeader }),
+        api.get('/admin/ai-agent/evals/alerts?limit=20', { headers: wsHeader }),
       ]);
       const cfg = cfgRes?.data?.config || {};
       setForm({
         ...DEFAULT_FORM,
         ...cfg,
+        autonomous_blocked_intents: Array.isArray(cfg?.autonomous_blocked_intents) ? cfg.autonomous_blocked_intents.join(', ') : DEFAULT_FORM.autonomous_blocked_intents,
         test_numbers: Array.isArray(cfg?.test_numbers) ? cfg.test_numbers.join('\n') : '',
         supported_languages: Array.isArray(cfg?.supported_languages) ? cfg.supported_languages.join(', ') : DEFAULT_FORM.supported_languages,
         openai_api_key: '',
@@ -85,6 +112,8 @@ export default function AIAgentSettingsPanel({ workspace }) {
       setTurns(Array.isArray(turnsRes?.data?.items) ? turnsRes.data.items : []);
       setEvalRuns(Array.isArray(evalRunsRes?.data?.items) ? evalRunsRes.data.items : []);
       setGateStatus(gateRes?.data?.item || null);
+      setEvalExpectations(Array.isArray(expectationsRes?.data?.items) ? expectationsRes.data.items : []);
+      setEvalAlerts(Array.isArray(alertsRes?.data?.items) ? alertsRes.data.items : []);
     } catch (e) {
       setError(e?.response?.data?.detail || e?.message || 'Failed to load AI agent settings.');
     } finally {
@@ -120,6 +149,19 @@ export default function AIAgentSettingsPanel({ workspace }) {
         autonomous_eval_gate_enabled: !!form.autonomous_eval_gate_enabled,
         autonomous_min_fixture_pass_rate: Number(form.autonomous_min_fixture_pass_rate || 0.75),
         autonomous_require_recent_fixture_eval_hours: Number(form.autonomous_require_recent_fixture_eval_hours || 72),
+        autonomous_blocked_intents: String(form.autonomous_blocked_intents || '')
+          .split(/\r?\n|,|;/)
+          .map((x) => String(x || '').trim())
+          .filter(Boolean),
+        replay_schedule_enabled: !!form.replay_schedule_enabled,
+        replay_schedule_hour_local: Number(form.replay_schedule_hour_local || 2),
+        replay_schedule_timezone: String(form.replay_schedule_timezone || '').trim() || 'Africa/Casablanca',
+        replay_schedule_sample_size: Number(form.replay_schedule_sample_size || 10),
+        replay_schedule_transcript_messages: Number(form.replay_schedule_transcript_messages || 12),
+        replay_schedule_labeled_only: !!form.replay_schedule_labeled_only,
+        replay_alerts_enabled: !!form.replay_alerts_enabled,
+        replay_alert_min_pass_rate: Number(form.replay_alert_min_pass_rate || 0.75),
+        replay_alert_max_handoff_rate: Number(form.replay_alert_max_handoff_rate || 0.45),
         test_numbers: String(form.test_numbers || '')
           .split(/\r?\n|,|;/)
           .map((x) => String(x || '').trim())
@@ -194,18 +236,86 @@ export default function AIAgentSettingsPanel({ workspace }) {
     setError('');
     setSuccess('');
     try {
-      const endpoint = kind === 'fixture' ? '/admin/ai-agent/evals/fixture-run' : '/admin/ai-agent/evals/replay-run';
+      const endpoint = kind === 'fixture'
+        ? '/admin/ai-agent/evals/fixture-run'
+        : kind === 'nightly'
+          ? '/admin/ai-agent/evals/run-nightly-now'
+          : '/admin/ai-agent/evals/replay-run';
       const payload = kind === 'fixture'
         ? { label: `Fixture eval ${new Date().toISOString()}` }
-        : { label: `Replay eval ${new Date().toISOString()}`, limit: 10, transcript_messages: 12 };
+        : kind === 'nightly'
+          ? {}
+          : {
+              label: `Replay eval ${new Date().toISOString()}`,
+              limit: Number(form.replay_schedule_sample_size || 10),
+              transcript_messages: Number(form.replay_schedule_transcript_messages || 12),
+              labeled_only: !!form.replay_schedule_labeled_only,
+            };
       const res = await api.post(endpoint, payload, { headers: wsHeader });
-      setSelectedEvalRun(res?.data?.item || null);
-      setSuccess(kind === 'fixture' ? 'Fixture eval completed.' : 'Replay eval completed.');
+      const item = res?.data?.item || null;
+      setSelectedEvalRun(item?.run || item || null);
+      setSuccess(
+        kind === 'fixture'
+          ? 'Fixture eval completed.'
+          : kind === 'nightly'
+            ? (item?.ran ? 'Nightly replay executed.' : `Nightly replay skipped: ${item?.reason || 'not due'}.`)
+            : 'Replay eval completed.',
+      );
       await loadAll();
     } catch (e) {
       setError(e?.response?.data?.detail || e?.message || 'Failed to run eval.');
     } finally {
       setEvalRunning(false);
+    }
+  };
+
+  const saveExpectation = async () => {
+    setExpectationSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const payload = {
+        user_id: String(expectationDraft.user_id || '').trim(),
+        label: expectationDraft.label,
+        expected_intent: expectationDraft.expected_intent,
+        expected_should_handoff: !!expectationDraft.expected_should_handoff,
+        expected_tool_names: String(expectationDraft.expected_tool_names || '')
+          .split(/\r?\n|,|;/)
+          .map((x) => String(x || '').trim())
+          .filter(Boolean),
+        notes: expectationDraft.notes,
+        active: !!expectationDraft.active,
+      };
+      await api.post('/admin/ai-agent/evals/expectations', payload, { headers: wsHeader });
+      setExpectationDraft(DEFAULT_EXPECTATION);
+      setSuccess('Replay expectation saved.');
+      await loadAll();
+    } catch (e) {
+      setError(e?.response?.data?.detail || e?.message || 'Failed to save replay expectation.');
+    } finally {
+      setExpectationSaving(false);
+    }
+  };
+
+  const editExpectation = (item) => {
+    setExpectationDraft({
+      user_id: item?.user_id || '',
+      label: item?.label || '',
+      expected_intent: item?.expected_intent || 'product_discovery',
+      expected_should_handoff: !!item?.expected_should_handoff,
+      expected_tool_names: Array.isArray(item?.expected_tool_names_json) ? item.expected_tool_names_json.join(', ') : '',
+      notes: item?.notes || '',
+      active: item?.active !== false,
+    });
+  };
+
+  const deleteExpectation = async (userId) => {
+    try {
+      await api.delete(`/admin/ai-agent/evals/expectations/${encodeURIComponent(userId)}`, { headers: wsHeader });
+      setSuccess('Replay expectation deleted.');
+      await loadAll();
+    } catch (e) {
+      setError(e?.response?.data?.detail || e?.message || 'Failed to delete replay expectation.');
     }
   };
 
@@ -411,6 +521,67 @@ export default function AIAgentSettingsPanel({ workspace }) {
               </div>
             </div>
           ) : null}
+
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Autonomous blocked intents</div>
+              <textarea
+                className="min-h-[90px] w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm"
+                value={form.autonomous_blocked_intents}
+                onChange={(e) => updateForm({ autonomous_blocked_intents: e.target.value })}
+                placeholder={'refund_request, complaint'}
+              />
+              <div className="mt-2 text-xs text-slate-500">
+                Any intents listed here will be forced to human handoff in autonomous mode, even if the eval gate is passing.
+              </div>
+            </label>
+
+            <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
+              <div className="font-medium text-slate-800">Nightly replay controls</div>
+              <div className="mt-1 text-xs text-slate-500">Configure automatic replay runs and regression alerts directly from this dashboard.</div>
+              <div className="mt-3 space-y-3">
+                <label className="flex items-center gap-3 text-sm text-slate-700">
+                  <input type="checkbox" checked={!!form.replay_schedule_enabled} onChange={(e) => updateForm({ replay_schedule_enabled: e.target.checked })} />
+                  Enable nightly replay scheduler
+                </label>
+                <label className="flex items-center gap-3 text-sm text-slate-700">
+                  <input type="checkbox" checked={!!form.replay_schedule_labeled_only} onChange={(e) => updateForm({ replay_schedule_labeled_only: e.target.checked })} />
+                  Run nightly replay on labeled conversations only
+                </label>
+                <label className="flex items-center gap-3 text-sm text-slate-700">
+                  <input type="checkbox" checked={!!form.replay_alerts_enabled} onChange={(e) => updateForm({ replay_alerts_enabled: e.target.checked })} />
+                  Create regression alerts from nightly replay runs
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Nightly replay hour</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" type="number" min="0" max="23" value={form.replay_schedule_hour_local} onChange={(e) => updateForm({ replay_schedule_hour_local: e.target.value })} />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Scheduler timezone</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" value={form.replay_schedule_timezone} onChange={(e) => updateForm({ replay_schedule_timezone: e.target.value })} />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Nightly sample size</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" type="number" min="1" max="100" value={form.replay_schedule_sample_size} onChange={(e) => updateForm({ replay_schedule_sample_size: e.target.value })} />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Transcript messages per replay</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" type="number" min="4" max="40" value={form.replay_schedule_transcript_messages} onChange={(e) => updateForm({ replay_schedule_transcript_messages: e.target.value })} />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Alert when pass rate falls below</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" type="number" step="0.01" min="0" max="1" value={form.replay_alert_min_pass_rate} onChange={(e) => updateForm({ replay_alert_min_pass_rate: e.target.value })} />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Alert when handoff rate rises above</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" type="number" step="0.01" min="0" max="1" value={form.replay_alert_max_handoff_rate} onChange={(e) => updateForm({ replay_alert_max_handoff_rate: e.target.value })} />
+            </label>
+          </div>
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-4">
@@ -511,6 +682,105 @@ export default function AIAgentSettingsPanel({ workspace }) {
                 </div>
                 {turn.reply_text ? <div className="mt-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">{turn.reply_text}</div> : null}
                 {turn.error_text ? <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{turn.error_text}</div> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+        <div className="rounded-2xl border border-slate-200 bg-white/80 p-5 shadow-sm">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-lg font-semibold text-slate-900">Labeled replay expectations</div>
+              <div className="mt-1 text-sm text-slate-600">Use real conversation numbers with expected outcomes so replay runs become scored instead of only observed.</div>
+            </div>
+            <button type="button" onClick={saveExpectation} disabled={expectationSaving} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60">
+              {expectationSaving ? 'Saving...' : 'Save Expectation'}
+            </button>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Conversation number</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" value={expectationDraft.user_id} onChange={(e) => setExpectationDraft((prev) => ({ ...prev, user_id: e.target.value }))} placeholder="+212600000000" />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Label</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" value={expectationDraft.label} onChange={(e) => setExpectationDraft((prev) => ({ ...prev, label: e.target.value }))} placeholder="Refund escalation baseline" />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Expected intent</div>
+              <select className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" value={expectationDraft.expected_intent} onChange={(e) => setExpectationDraft((prev) => ({ ...prev, expected_intent: e.target.value }))}>
+                <option value="product_discovery">product_discovery</option>
+                <option value="size_help">size_help</option>
+                <option value="product_availability">product_availability</option>
+                <option value="delivery_question">delivery_question</option>
+                <option value="cod_question">cod_question</option>
+                <option value="exchange_return">exchange_return</option>
+                <option value="complaint">complaint</option>
+                <option value="refund_request">refund_request</option>
+                <option value="order_follow_up">order_follow_up</option>
+                <option value="human_agent_request">human_agent_request</option>
+                <option value="other">other</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              <input type="checkbox" checked={!!expectationDraft.expected_should_handoff} onChange={(e) => setExpectationDraft((prev) => ({ ...prev, expected_should_handoff: e.target.checked }))} />
+              Expected outcome requires human handoff
+            </label>
+            <label className="text-sm md:col-span-2">
+              <div className="mb-1 font-medium text-slate-800">Expected tools</div>
+              <input className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" value={expectationDraft.expected_tool_names} onChange={(e) => setExpectationDraft((prev) => ({ ...prev, expected_tool_names: e.target.value }))} placeholder="get_business_policies, create_handoff_ticket" />
+            </label>
+            <label className="text-sm md:col-span-2">
+              <div className="mb-1 font-medium text-slate-800">Notes</div>
+              <textarea className="min-h-[90px] w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm" value={expectationDraft.notes} onChange={(e) => setExpectationDraft((prev) => ({ ...prev, notes: e.target.value }))} />
+            </label>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            {evalExpectations.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 px-4 py-6 text-sm text-slate-500">No labeled expectations saved yet.</div> : null}
+            {evalExpectations.map((item) => (
+              <div key={item.user_id} className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">{item.label || item.user_id}</div>
+                    <div className="mt-1 text-xs text-slate-500">{item.user_id} - {item.expected_intent || 'n/a'} - handoff {String(!!item.expected_should_handoff)}</div>
+                    {Array.isArray(item.expected_tool_names_json) && item.expected_tool_names_json.length > 0 ? <div className="mt-2 text-xs text-slate-600">Tools: {item.expected_tool_names_json.join(', ')}</div> : null}
+                    {item.notes ? <div className="mt-2 text-sm text-slate-700">{item.notes}</div> : null}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button type="button" onClick={() => editExpectation(item)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-white">Edit</button>
+                    <button type="button" onClick={() => deleteExpectation(item.user_id)} className="rounded-lg border border-rose-300 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-50">Delete</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white/80 p-5 shadow-sm">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-lg font-semibold text-slate-900">Regression alerts</div>
+              <div className="mt-1 text-sm text-slate-600">Nightly replay alerts land here so the team can spot drift without reading raw runs.</div>
+            </div>
+            <button type="button" onClick={() => runEval('nightly')} disabled={evalRunning} className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+              {evalRunning ? 'Running...' : 'Run Nightly Replay Now'}
+            </button>
+          </div>
+
+          <div className="mt-4 space-y-3">
+            {evalAlerts.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 px-4 py-6 text-sm text-slate-500">No replay alerts yet.</div> : null}
+            {evalAlerts.map((item) => (
+              <div key={item.id} className={`rounded-xl border px-4 py-3 ${item.severity === 'high' ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-900">{item.title}</div>
+                  <div className="text-xs uppercase tracking-wide text-slate-500">{item.severity}</div>
+                </div>
+                <div className="mt-2 text-sm text-slate-700">{item.message}</div>
+                <div className="mt-2 text-xs text-slate-500">{item.created_at}{item.run_id ? ` - run #${item.run_id}` : ''}</div>
               </div>
             ))}
           </div>

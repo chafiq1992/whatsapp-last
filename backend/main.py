@@ -564,6 +564,7 @@ TRACK_CLICKS_PER_MIN = int(os.getenv("TRACK_CLICKS_PER_MIN", "240"))
 # conversations and send the "help us improve / 15% discount" survey invite.
 # Default is OFF to avoid accidental bulk sends when Redis is newly enabled.
 ENABLE_SURVEY_SCHEDULER = (os.getenv("ENABLE_SURVEY_SCHEDULER", "0") or "0").strip() == "1"
+ENABLE_AI_AGENT_SCHEDULER = (os.getenv("ENABLE_AI_AGENT_SCHEDULER", "1") or "1").strip() == "1"
 # NOTE: TRACK_IP_SALT is finalized after AGENT_AUTH_SECRET is loaded (defined later).
 TRACK_IP_SALT = (os.getenv("TRACK_IP_SALT", "") or "").strip()
 TRACK_ALLOWED_ORIGINS_ENV = (os.getenv("TRACK_ALLOWED_ORIGINS", "") or "").strip()
@@ -12506,6 +12507,8 @@ ai_agent_service = AIAgentService(
         get_agent_last_seen=redis_manager.get_agent_last_seen,
         get_agent_assignment_count=_ai_get_agent_assignment_count,
         set_conversation_assignment=db_manager.set_conversation_assignment,
+        push_workspace=lambda ws: _CURRENT_WORKSPACE.set(_coerce_workspace(ws)),
+        pop_workspace=_CURRENT_WORKSPACE.reset,
         logger=logging.getLogger("backend.ai_agent"),
     )
 )
@@ -13187,6 +13190,11 @@ async def startup():
             asyncio.create_task(run_survey_scheduler())
     except Exception as exc:
         print(f"Failed to start survey scheduler: {exc}")
+    try:
+        if ENABLE_AI_AGENT_SCHEDULER:
+            asyncio.create_task(run_ai_agent_scheduler())
+    except Exception as exc:
+        print(f"Failed to start AI agent scheduler: {exc}")
 
 def _parse_iso_ts(ts: str) -> Optional[datetime]:
     try:
@@ -13282,6 +13290,42 @@ async def run_survey_scheduler() -> None:
         except Exception as exc:
             print(f"survey scheduler loop error: {exc}")
         await asyncio.sleep(300)
+
+
+async def _ai_agent_scheduler_sweep_once() -> None:
+    for ws in sorted(list(_all_workspaces_set())):
+        tok = _CURRENT_WORKSPACE.set(_coerce_workspace(ws))
+        try:
+            await ai_agent_service.ensure_schema()
+            result = await ai_agent_service.run_scheduled_replay_if_due(ws)
+            if bool((result or {}).get("ran")):
+                try:
+                    await connection_manager.broadcast(
+                        {
+                            "type": "ai_agent_scheduler_run",
+                            "workspace": ws,
+                            "data": result,
+                        },
+                        workspace=ws,
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"ai agent scheduler sweep failed for {ws}: {exc}")
+        finally:
+            try:
+                _CURRENT_WORKSPACE.reset(tok)
+            except Exception:
+                pass
+
+
+async def run_ai_agent_scheduler() -> None:
+    while True:
+        try:
+            await _ai_agent_scheduler_sweep_once()
+        except Exception as exc:
+            print(f"ai agent scheduler loop error: {exc}")
+        await asyncio.sleep(600)
 
 # Optional rate limit dependencies that no-op when limiter is not initialized
 async def _optional_rate_limit_text(request: _LimiterRequest, response: _LimiterResponse):
@@ -14983,6 +15027,39 @@ async def get_ai_agent_eval_gate_status_endpoint(_: dict = Depends(require_admin
     return {"workspace": ws, "item": await ai_agent_service.get_autonomous_eval_gate_status(ws, cfg)}
 
 
+@app.get("/admin/ai-agent/evals/expectations")
+async def list_ai_agent_eval_expectations_endpoint(limit: int = 50, _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    return {"workspace": ws, "items": await ai_agent_service.list_eval_expectations(ws, limit=limit)}
+
+
+@app.post("/admin/ai-agent/evals/expectations")
+async def upsert_ai_agent_eval_expectation_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    try:
+        item = await ai_agent_service.upsert_eval_expectation(payload or {}, ws)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "workspace": ws, "item": item}
+
+
+@app.delete("/admin/ai-agent/evals/expectations/{user_id}")
+async def delete_ai_agent_eval_expectation_endpoint(user_id: str, _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    await ai_agent_service.delete_eval_expectation(user_id, ws)
+    return {"ok": True, "workspace": ws}
+
+
+@app.get("/admin/ai-agent/evals/alerts")
+async def list_ai_agent_eval_alerts_endpoint(limit: int = 20, _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    return {"workspace": ws, "items": await ai_agent_service.list_eval_alerts(ws, limit=limit)}
+
+
 @app.get("/admin/ai-agent/evals/compare")
 async def compare_ai_agent_eval_runs_endpoint(left_run_id: int, right_run_id: int, _: dict = Depends(require_admin)):
     ws = get_current_workspace()
@@ -15015,7 +15092,16 @@ async def run_ai_agent_replay_eval_endpoint(payload: dict = Body(default={}), _:
             if str(user_id or "").strip()
         ] or None,
         transcript_messages=max(4, min(int((payload or {}).get("transcript_messages") or 12), 40)),
+        labeled_only=bool((payload or {}).get("labeled_only")),
     )
+    return {"ok": True, "workspace": ws, "item": item}
+
+
+@app.post("/admin/ai-agent/evals/run-nightly-now")
+async def run_ai_agent_scheduled_replay_now_endpoint(_: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    item = await ai_agent_service.run_scheduled_replay_if_due(ws, force=True)
     return {"ok": True, "workspace": ws, "item": item}
 
 

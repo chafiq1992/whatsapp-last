@@ -7,6 +7,7 @@ import CustomersSegmentsPage from './CustomersSegmentsPage';
 import WhatsAppTemplatesPanel from './WhatsAppTemplatesPanel';
 import UsersTagsAdminPanel from './UsersTagsAdminPanel';
 import ShopifyConnectPanel from './ShopifyConnectPanel';
+import AIAgentSettingsPanel from './AIAgentSettingsPanel';
 import { BarChart3, Bot, GitBranch, MessageSquareText, Users, Settings as SettingsIcon, BookOpen, Home, UserCog, Tag } from 'lucide-react';
 
 function normalizeWorkspaceId(v) {
@@ -77,7 +78,7 @@ export default function AutomationSettingsPage() {
   const [allowed, setAllowed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('workspaces'); // analytics | automation | templates | customers | users_tags | stores | workspaces | docs
+  const [activeTab, setActiveTab] = useState('workspaces'); // analytics | automation | templates | customers | users_tags | stores | workspaces | docs | ai_agent
 
   const [workspaces, setWorkspaces] = useState([]);
   const [defaultWorkspace, setDefaultWorkspace] = useState('irranova');
@@ -546,6 +547,7 @@ export default function AutomationSettingsPage() {
       if (key.includes('/settings/flows') || key.includes('/#/settings/flows')) return 'flows';
       if (key.includes('/settings/templates') || key.includes('/#/settings/templates') || key.includes('/whatsapp-templates')) return 'templates';
       if (key.includes('/settings/customers') || key.includes('/#/settings/customers') || key.includes('/customers')) return 'customers';
+      if (key.includes('/settings/ai-agent') || key.includes('/#/settings/ai-agent')) return 'ai_agent';
       if (key.includes('/settings/users') || key.includes('/#/settings/users') || key.includes('/settings/tags') || key.includes('/#/settings/tags') || key.includes('/settings/users-tags') || key.includes('/#/settings/users-tags')) return 'users_tags';
       if (key.includes('/settings/stores') || key.includes('/#/settings/stores') || key.includes('/shopify-connect')) return 'stores';
       if (key.includes('/settings/docs') || key.includes('/#/settings/docs')) return 'docs';
@@ -574,7 +576,8 @@ export default function AutomationSettingsPage() {
     const t = String(tab || 'workspaces');
     setActiveTab(t);
     try {
-      const next = t === 'workspaces' ? '/#/settings' : `/#/settings/${t === 'users_tags' ? 'users-tags' : t}`;
+      const pathTab = t === 'users_tags' ? 'users-tags' : t;
+      const next = t === 'workspaces' ? '/#/settings' : `/#/settings/${pathTab}`;
       window.location.hash = next.replace('/#', '#');
     } catch {}
   };
@@ -635,6 +638,13 @@ export default function AutomationSettingsPage() {
               onClick={() => goTab('customers')}
             >
               <span className="inline-flex items-center gap-2"><Users className="w-4 h-4" />Customers</span>
+            </button>
+            <button
+              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'ai_agent' ? 'bg-cyan-400/20 border border-cyan-300/20' : 'hover:bg-white/10'}`}
+              onClick={() => goTab('ai_agent')}
+              title="AI Agent"
+            >
+              <span className="inline-flex items-center gap-2">AI Agent</span>
             </button>
             <button
               className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === 'users_tags' ? 'bg-amber-400/20 border border-amber-300/20' : 'hover:bg-white/10'}`}
@@ -723,6 +733,10 @@ export default function AutomationSettingsPage() {
           <div className="h-[calc(100vh-5rem)] border rounded-2xl overflow-hidden bg-white/50 backdrop-blur shadow-sm">
             <CustomersSegmentsPage embedded />
           </div>
+        )}
+
+        {!loading && activeTab === 'ai_agent' && (
+          <AIAgentSettingsPanel workspace={workspace} />
         )}
 
         {!loading && activeTab === 'docs' && (

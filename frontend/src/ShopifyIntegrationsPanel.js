@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { FaRegImage, FaShopify } from "react-icons/fa";
+import { FaRegImage, FaRobot, FaShopify } from "react-icons/fa";
 import api from "./api";
 import { saveCart, loadCart } from "./chatStorage";
 import html2canvas from "html2canvas";
@@ -114,8 +114,16 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
   }; 
 
   // Collapsible sections
+  const [showAI, setShowAI] = useState(true);
   const [showInfo, setShowInfo] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [aiState, setAiState] = useState(null);
+  const [aiTurns, setAiTurns] = useState([]);
+  const [aiTicket, setAiTicket] = useState(null);
+  const [aiConfig, setAiConfig] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiSaving, setAiSaving] = useState(false);
+  const [aiError, setAiError] = useState("");
 
   // Order details state
   const [orderData, setOrderData] = useState({
@@ -296,6 +304,86 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
       }
     }).finally(() => setLoading(false));
   }, [activeUser, API_BASE]);
+
+  const fetchAiState = async (userId = activeUser?.user_id, { silent = false } = {}) => {
+    if (!userId) {
+      setAiState(null);
+      setAiTurns([]);
+      setAiTicket(null);
+      setAiConfig(null);
+      setAiError("");
+      return;
+    }
+    if (!silent) setAiLoading(true);
+    setAiError("");
+    try {
+      const res = await api.get(`${API_BASE}/conversations/${encodeURIComponent(String(userId))}/ai-state`, {
+        params: { limit: 6 },
+      });
+      const data = res?.data || {};
+      setAiState(data.state || null);
+      setAiTurns(Array.isArray(data.recent_turns) ? data.recent_turns : []);
+      setAiTicket(data.open_handoff_ticket || null);
+      setAiConfig(data.config || null);
+    } catch (err) {
+      setAiState(null);
+      setAiTurns([]);
+      setAiTicket(null);
+      setAiConfig(null);
+      setAiError(err?.response?.data?.detail || "Failed to load AI state.");
+    } finally {
+      if (!silent) setAiLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAiState(activeUser?.user_id);
+  }, [activeUser?.user_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const onAiStateUpdated = (ev) => {
+      const detail = ev?.detail || {};
+      if (String(detail.user_id || "") !== String(activeUser?.user_id || "")) return;
+      if (detail.state) setAiState(detail.state);
+      if ("open_handoff_ticket" in detail) setAiTicket(detail.open_handoff_ticket || null);
+      fetchAiState(activeUser?.user_id, { silent: true }).catch(() => {});
+    };
+    window.addEventListener("conversation-ai-state-updated", onAiStateUpdated);
+    return () => window.removeEventListener("conversation-ai-state-updated", onAiStateUpdated);
+  }, [activeUser?.user_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleAiModeChange = async (status) => {
+    if (!activeUser?.user_id || aiSaving) return;
+    setAiSaving(true);
+    setAiError("");
+    try {
+      const note = status === "human_managed"
+        ? `Manual takeover by ${currentAgent || "agent"}`
+        : status === "bot_managed"
+          ? `Bot resumed by ${currentAgent || "agent"}`
+          : `Hybrid review mode enabled by ${currentAgent || "agent"}`;
+      const res = await api.post(
+        `${API_BASE}/conversations/${encodeURIComponent(String(activeUser.user_id))}/ai-state`,
+        { status, note }
+      );
+      const data = res?.data || {};
+      setAiState(data.state || null);
+      setAiTurns(Array.isArray(data.recent_turns) ? data.recent_turns : []);
+      setAiTicket(data.open_handoff_ticket || null);
+      try {
+        window.dispatchEvent(new CustomEvent("conversation-preview", {
+          detail: {
+            user_id: activeUser.user_id,
+            workspace: activeUser.workspace,
+          },
+        }));
+      } catch {}
+    } catch (err) {
+      setAiError(err?.response?.data?.detail || "Failed to update AI mode.");
+    } finally {
+      setAiSaving(false);
+    }
+  };
 
   // Product search with debounce
   useEffect(() => {
@@ -918,6 +1006,183 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
 
   return (
     <div className="p-4 h-full flex flex-col">
+      <div className="mb-2">
+        <button
+          className="w-full flex justify-between items-center bg-slate-900 px-4 py-2 rounded-t text-lg font-bold"
+          onClick={() => setShowAI(v => !v)}
+        >
+          <span className="flex items-center"><FaRobot className="mr-2 text-cyan-400" />AI Agent</span>
+          <span>{showAI ? "▲" : "▼"}</span>
+        </button>
+        {showAI && (
+          <div className="bg-slate-800 p-4 space-y-3 rounded-b shadow-inner border border-slate-700 border-t-0">
+            {!activeUser?.user_id && (
+              <p className="text-sm text-slate-300">Select a conversation to inspect AI activity.</p>
+            )}
+            {activeUser?.user_id && aiLoading && (
+              <div className="space-y-2" aria-live="polite">
+                <div className="h-4 bg-slate-700 rounded animate-pulse" />
+                <div className="h-4 bg-slate-700 rounded animate-pulse w-2/3" />
+                <div className="h-24 bg-slate-700 rounded animate-pulse" />
+              </div>
+            )}
+            {activeUser?.user_id && !aiLoading && (
+              <>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className={`px-2 py-1 rounded-full font-semibold ${
+                    !aiConfig?.enabled
+                      ? "bg-gray-700 text-gray-100"
+                      : aiState?.status === "human_managed"
+                        ? "bg-amber-500/20 text-amber-200"
+                        : aiState?.status === "hybrid"
+                          ? "bg-orange-500/20 text-orange-200"
+                          : "bg-emerald-500/20 text-emerald-200"
+                  }`}>
+                    {aiState?.status || "bot_managed"}
+                  </span>
+                  <span className="px-2 py-1 rounded-full bg-slate-700 text-slate-200">
+                    {aiConfig?.enabled ? `AI ${aiConfig?.run_mode || "shadow"}` : "AI disabled"}
+                  </span>
+                  {!!aiTicket?.id && (
+                    <span className="px-2 py-1 rounded-full bg-rose-500/20 text-rose-200">
+                      Handoff #{aiTicket.id}
+                    </span>
+                  )}
+                </div>
+
+                {aiError && (
+                  <div className="text-xs text-rose-300 bg-rose-500/10 border border-rose-500/20 rounded p-2">
+                    {aiError}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 text-xs text-slate-200">
+                  <div className="bg-slate-700/70 rounded p-2">
+                    <div className="text-slate-400 uppercase tracking-wide mb-1">Intent</div>
+                    <div>{aiTurns[0]?.detected_intent || aiState?.last_intent || "Unknown"}</div>
+                  </div>
+                  <div className="bg-slate-700/70 rounded p-2">
+                    <div className="text-slate-400 uppercase tracking-wide mb-1">Language</div>
+                    <div>{aiTurns[0]?.detected_language || aiState?.last_language || "Unknown"}</div>
+                  </div>
+                  <div className="bg-slate-700/70 rounded p-2">
+                    <div className="text-slate-400 uppercase tracking-wide mb-1">Emotion</div>
+                    <div>{aiTurns[0]?.emotion || aiState?.risk_json?.emotion || "neutral"}</div>
+                  </div>
+                  <div className="bg-slate-700/70 rounded p-2">
+                    <div className="text-slate-400 uppercase tracking-wide mb-1">Confidence</div>
+                    <div>
+                      {Number.isFinite(Number(aiTurns[0]?.confidence))
+                        ? `${Math.round(Number(aiTurns[0]?.confidence || 0) * 100)}%`
+                        : "Unknown"}
+                    </div>
+                  </div>
+                </div>
+
+                {aiTicket && (
+                  <div className="text-xs rounded border border-amber-500/20 bg-amber-500/10 p-3 text-amber-100">
+                    <div className="font-semibold mb-1">Open handoff</div>
+                    <div>Reason: {aiTicket.reason_code || "sensitive_case"}</div>
+                    <div>Priority: {aiTicket.priority || "normal"}</div>
+                    {aiTicket.summary && <div className="mt-1 text-amber-50">{aiTicket.summary}</div>}
+                  </div>
+                )}
+
+                {aiState?.summary && (
+                  <div className="text-xs rounded bg-slate-700/60 p-3 text-slate-100">
+                    <div className="text-slate-400 uppercase tracking-wide mb-1">Summary</div>
+                    <div className="whitespace-pre-wrap">{aiState.summary}</div>
+                  </div>
+                )}
+
+                {aiState?.slots_json && Object.keys(aiState.slots_json).filter((key) => aiState.slots_json[key]).length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Extracted context</div>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(aiState.slots_json)
+                        .filter(([, value]) => value !== null && value !== undefined && value !== "")
+                        .slice(0, 8)
+                        .map(([key, value]) => (
+                          <span key={key} className="text-xs px-2 py-1 rounded-full bg-slate-700 text-slate-100">
+                            {key}: {typeof value === "object" ? JSON.stringify(value) : String(value)}
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs disabled:opacity-50"
+                    onClick={() => handleAiModeChange("bot_managed")}
+                    disabled={aiSaving || aiState?.status === "bot_managed"}
+                  >
+                    Resume bot
+                  </button>
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded bg-orange-600 hover:bg-orange-500 text-white text-xs disabled:opacity-50"
+                    onClick={() => handleAiModeChange("hybrid")}
+                    disabled={aiSaving || aiState?.status === "hybrid"}
+                  >
+                    Hybrid review
+                  </button>
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-xs disabled:opacity-50"
+                    onClick={() => handleAiModeChange("human_managed")}
+                    disabled={aiSaving || aiState?.status === "human_managed"}
+                  >
+                    Human takeover
+                  </button>
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-white text-xs disabled:opacity-50"
+                    onClick={() => fetchAiState(activeUser?.user_id)}
+                    disabled={aiSaving}
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Recent AI turns</div>
+                  {aiTurns.length === 0 ? (
+                    <div className="text-xs text-slate-400">No AI turns logged yet for this conversation.</div>
+                  ) : (
+                    <div className="space-y-2 max-h-64 overflow-auto pr-1">
+                      {aiTurns.map((turn) => (
+                        <div key={turn.id || `${turn.created_at}-${turn.action}`} className="rounded border border-slate-700 bg-slate-700/50 p-3 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="font-semibold text-slate-100">
+                              {turn.action || turn.turn_status || "turn"}
+                            </div>
+                            <div className="text-slate-400">
+                              {turn.created_at ? new Date(turn.created_at).toLocaleString() : ""}
+                            </div>
+                          </div>
+                          <div className="mt-1 text-slate-300">
+                            {(turn.detected_language || "unknown")} • {(turn.detected_intent || "unknown")}
+                            {Number.isFinite(Number(turn.confidence)) ? ` • ${Math.round(Number(turn.confidence || 0) * 100)}%` : ""}
+                          </div>
+                          {turn.reply_text && (
+                            <div className="mt-2 text-slate-100 whitespace-pre-wrap">{turn.reply_text}</div>
+                          )}
+                          {turn.error_text && (
+                            <div className="mt-2 text-rose-300">{turn.error_text}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Contact Info COLLAPSIBLE */}
       <div className="mb-2">
         <button

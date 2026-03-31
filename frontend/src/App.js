@@ -673,6 +673,27 @@ export default function App() {
               }
             }
           }
+          if (data.type === "conversation_ai_state_updated") {
+            const d = data.data || {};
+            const userId = d.user_id;
+            if (userId) {
+              setConversations((prev) => prev.map((c) => c.user_id === userId ? {
+                ...c,
+                ai_state: d.state || null,
+                ai_open_handoff_ticket: d.open_handoff_ticket || null,
+              } : c));
+              if (activeUserRef.current?.user_id === userId) {
+                setActiveUser((prev) => prev ? {
+                  ...prev,
+                  ai_state: d.state || null,
+                  ai_open_handoff_ticket: d.open_handoff_ticket || null,
+                } : prev);
+              }
+              try {
+                window.dispatchEvent(new CustomEvent("conversation-ai-state-updated", { detail: d }));
+              } catch {}
+            }
+          }
         } catch (err) {
           console.error("WS message parsing failed", err);
         }

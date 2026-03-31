@@ -1,0 +1,50 @@
+[
+  {
+    "id": "darija_product_search_girls_shoes",
+    "language": "darija",
+    "transcript": [
+      "Customer: salam bghit sbadriyat l bnat size 31 b taman 400dh"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products", "check_stock_availability"]
+    }
+  },
+  {
+    "id": "order_follow_up_french_reference",
+    "language": "fr",
+    "transcript": [
+      "Customer: bonjour, je veux savoir le statut de ma commande #18452"
+    ],
+    "expected": {
+      "intent": "order_follow_up",
+      "should_handoff": false,
+      "tool_names": ["get_order_by_reference"]
+    }
+  },
+  {
+    "id": "delivery_status_arabic_tracking",
+    "language": "ar",
+    "transcript": [
+      "Customer: بغيت نعرف فين وصل الطرد ديالي 18452"
+    ],
+    "expected": {
+      "intent": "delivery_question",
+      "should_handoff": false,
+      "tool_names": ["get_delivery_status"]
+    }
+  },
+  {
+    "id": "refund_escalation_angry",
+    "language": "fr",
+    "transcript": [
+      "Customer: je suis tres fache, je veux un remboursement maintenant sinon je vais porter plainte"
+    ],
+    "expected": {
+      "intent": "refund_request",
+      "should_handoff": true,
+      "tool_names": ["create_handoff_ticket", "assign_human_agent"]
+    }
+  }
+]

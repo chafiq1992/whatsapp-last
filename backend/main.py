@@ -60,6 +60,7 @@ from .core.runtime_types import RetargetingRuntime
 from .services import retargeting_jobs as _retargeting_jobs_service
 from .services.campaign_jobs import create_campaign_job, get_campaign_job
 from .api.routers.campaigns import router as campaigns_router
+from .ai_agent.service import AIAgentDependencies, AIAgentService
 
 from fastapi.staticfiles import StaticFiles
 from base64 import b64encode
@@ -5632,6 +5633,7 @@ class MessageProcessor:
         # key: (workspace, image_link) -> (ts, media_id)
         self._template_header_media_cache: dict[tuple[str, str], tuple[float, str]] = {}
         self._template_header_media_cache_ttl_sec = 6 * 3600
+        self.ai_agent_service = None
 
     async def _tenant_backup_get(self, key: str) -> str | None:
         """Read from tenant DB (default workspace) as backup when auth DB may be ephemeral."""
@@ -8320,34 +8322,61 @@ class MessageProcessor:
             {"type": "message_received", "data": message_obj},
             exclude_user=sender
         )
-        
-        # Auto-responses
+
+        ai_result = {"handled": False, "skip_legacy": False}
         try:
-            if msg_type == "text":
-                await self._maybe_auto_reply_with_catalog(sender, message_obj.get("message", ""))
-            elif msg_type in ("interactive", "button"):
-                pass
+            if msg_type == "text" and getattr(self, "ai_agent_service", None):
+                ai_result = await self.ai_agent_service.maybe_handle_incoming_message(message_obj)
         except Exception as _exc:
-            print(f"Auto-reply failed: {_exc}")
+            print(f"AI agent failed: {_exc}")
+            ai_result = {"handled": False, "skip_legacy": False}
+        if ai_result.get("turn_id") and getattr(self, "ai_agent_service", None):
+            try:
+                ws = get_current_workspace()
+                overview = await self.ai_agent_service.get_conversation_overview(sender, ws, limit=4)
+                await self.connection_manager.broadcast_to_admins(
+                    {
+                        "type": "conversation_ai_state_updated",
+                        "data": {
+                            "user_id": sender,
+                            "state": overview.get("state") or {},
+                            "open_handoff_ticket": overview.get("open_handoff_ticket"),
+                        },
+                    },
+                    workspace=ws,
+                )
+            except Exception:
+                pass
+
+        if not bool(ai_result.get("skip_legacy")):
+            # Auto-responses
+            try:
+                if msg_type == "text":
+                    await self._maybe_auto_reply_with_catalog(sender, message_obj.get("message", ""))
+                elif msg_type in ("interactive", "button"):
+                    pass
+            except Exception as _exc:
+                print(f"Auto-reply failed: {_exc}")
 
         # Workspace-scoped "simple automations" (admin-configured rules).
         # Run async so webhook ingest latency stays low.
-        try:
-            typ = str(message_obj.get("type") or "")
-            txt = str(message_obj.get("message") or "") if typ in ("text",) else ""
-            if not txt and str(message_obj.get("interactive_id") or "").strip():
-                txt = str(message_obj.get("interactive_title") or message_obj.get("message") or "")
-            ws = get_current_workspace()
-            asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
-            if txt and str(message_obj.get("wa_message_id") or "").strip():
-                asyncio.create_task(self._schedule_no_reply_followups(
-                    ws=_coerce_workspace(ws),
-                    user_id=sender,
-                    inbound_wa_message_id=str(message_obj.get("wa_message_id") or "").strip(),
-                    incoming_text=txt,
-                ))
-        except Exception:
-            pass
+        if not bool(ai_result.get("skip_legacy")):
+            try:
+                typ = str(message_obj.get("type") or "")
+                txt = str(message_obj.get("message") or "") if typ in ("text",) else ""
+                if not txt and str(message_obj.get("interactive_id") or "").strip():
+                    txt = str(message_obj.get("interactive_title") or message_obj.get("message") or "")
+                ws = get_current_workspace()
+                asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
+                if txt and str(message_obj.get("wa_message_id") or "").strip():
+                    asyncio.create_task(self._schedule_no_reply_followups(
+                        ws=_coerce_workspace(ws),
+                        user_id=sender,
+                        inbound_wa_message_id=str(message_obj.get("wa_message_id") or "").strip(),
+                        incoming_text=txt,
+                    ))
+            except Exception:
+                pass
 
     async def _load_automation_rules(self, workspace: str) -> list[dict]:
         """Load automation rules (global store, filtered by workspace) with a small in-memory cache."""
@@ -12249,6 +12278,239 @@ connection_manager = ConnectionManager()
 redis_manager = RedisManager()
 message_processor = MessageProcessor(connection_manager, redis_manager, db_manager)
 
+
+async def _ai_catalog_provider(workspace: str) -> list[dict]:
+    ws = _coerce_workspace(workspace)
+    cid = await _get_effective_catalog_id(ws)
+    cache_file = _catalog_cache_file_for(ws, cid)
+    products = catalog_manager.get_cached_products(cache_file=cache_file) or []
+    if products:
+        return products
+    try:
+        return await CatalogManager.get_catalog_products(catalog_id=cid, workspace=ws)
+    except Exception:
+        return []
+
+
+async def _ai_fetch_customer_by_phone(phone_number: str, workspace: str) -> dict | None:
+    from .shopify_integration import fetch_customer_by_phone  # type: ignore
+    data = await fetch_customer_by_phone(phone_number, x_workspace=_coerce_workspace(workspace))
+    if isinstance(data, dict) and data.get("error"):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def _ai_fetch_orders_for_customer(customer_id: str, workspace: str, limit: int = 20) -> list[dict]:
+    from .shopify_integration import admin_api_base, _client_args, _resolve_store_from_workspace  # type: ignore
+    ws = _coerce_workspace(workspace)
+    store = _resolve_store_from_workspace(None, ws)
+    base = admin_api_base(store)
+    params = {
+        "customer_id": str(customer_id or "").strip(),
+        "status": "any",
+        "order": "created_at desc",
+        "limit": max(1, min(int(limit or 20), 250)),
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{base}/orders.json", params=params, timeout=15, **(_client_args(store) or {}))
+        resp.raise_for_status()
+        orders = (resp.json() or {}).get("orders", []) or []
+    domain = base.replace("https://", "").replace("http://", "").split("/admin/api", 1)[0]
+    simplified = []
+    for o in orders:
+        tags_arr = [t.strip() for t in str(o.get("tags") or "").split(",") if t and t.strip()]
+        simplified.append({
+            "id": o.get("id"),
+            "order_number": o.get("name"),
+            "created_at": o.get("created_at"),
+            "financial_status": o.get("financial_status"),
+            "fulfillment_status": o.get("fulfillment_status"),
+            "total_price": o.get("total_price"),
+            "currency": o.get("currency"),
+            "admin_url": f"https://{domain}/admin/orders/{o.get('id')}",
+            "tags": tags_arr,
+            "note": o.get("note") or "",
+            "tracking_number": o.get("tracking_number") or "",
+            "tracking_url": o.get("tracking_url") or "",
+            "tracking_company": o.get("tracking_company") or "",
+        })
+    return simplified
+
+
+async def _ai_fetch_delivery_snapshot(user_id: str, order_reference: str | None, workspace: str) -> dict | None:
+    ws = _coerce_workspace(workspace)
+    user_digits = _digits_only(user_id)
+
+    def _parse_payload(raw_val: Any) -> dict[str, Any]:
+        try:
+            if isinstance(raw_val, dict):
+                return raw_val
+            if isinstance(raw_val, str):
+                return json.loads(raw_val or "{}")
+        except Exception:
+            return {}
+        return {}
+
+    def _payload_digits(payload_obj: dict[str, Any]) -> str:
+        try:
+            order_obj = payload_obj.get("order") if isinstance(payload_obj.get("order"), dict) else {}
+            for v in (
+                payload_obj.get("customer_phone"),
+                payload_obj.get("phone"),
+                payload_obj.get("user_id"),
+                order_obj.get("customer_phone"),
+                order_obj.get("phone"),
+                order_obj.get("user_id"),
+            ):
+                d = _digits_only(str(v or ""))
+                if d:
+                    return d
+        except Exception:
+            pass
+        return ""
+
+    def _same_phone(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        return a.endswith(b[-9:]) or b.endswith(a[-9:])
+
+    def _norm_order_ref(v: Any) -> str:
+        s = str(v or "").strip()
+        if s.startswith("#"):
+            s = s[1:]
+        if re.fullmatch(r"\d+\.\d+", s):
+            s = s.split(".", 1)[0]
+        return s.strip().lower()
+
+    refs = {ref for ref in (_norm_order_ref(order_reference),) if ref}
+    async with db_manager._conn() as db:
+        if db_manager.use_postgres:
+            rows = await db.fetch(
+                """
+                SELECT payload, event, received_at
+                FROM integration_events
+                WHERE workspace=$1 AND source='delivery'
+                ORDER BY id DESC
+                LIMIT 200
+                """,
+                ws,
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT payload, event, received_at
+                FROM integration_events
+                WHERE workspace=? AND source='delivery'
+                ORDER BY id DESC
+                LIMIT 200
+                """,
+                (ws,),
+            )
+            rows = await cur.fetchall()
+    match_payload = None
+    match_event = ""
+    for r in rows or []:
+        payload_obj = _parse_payload(r["payload"] if isinstance(r, dict) else r[0])
+        if not payload_obj:
+            continue
+        order_obj = payload_obj.get("order") if isinstance(payload_obj.get("order"), dict) else {}
+        p_digits = _payload_digits(payload_obj)
+        if user_digits and p_digits and _same_phone(user_digits, p_digits):
+            match_payload = payload_obj
+            match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
+            break
+        if refs:
+            payload_refs = {
+                _norm_order_ref(payload_obj.get("order_name")),
+                _norm_order_ref(payload_obj.get("order_id")),
+                _norm_order_ref(payload_obj.get("partner_code")),
+                _norm_order_ref(payload_obj.get("tracking_number")),
+                _norm_order_ref(order_obj.get("order_name")),
+                _norm_order_ref(order_obj.get("id")),
+                _norm_order_ref(order_obj.get("partner_code")),
+                _norm_order_ref(order_obj.get("tracking_number")),
+            }
+            payload_refs.discard("")
+            if payload_refs.intersection(refs):
+                match_payload = payload_obj
+                match_event = str((r.get("event") if isinstance(r, dict) else r[1]) or "")
+                break
+    if not isinstance(match_payload, dict):
+        return None
+    order_obj = match_payload.get("order") if isinstance(match_payload.get("order"), dict) else {}
+    return {
+        "status": (
+            match_payload.get("status")
+            or match_payload.get("new_status")
+            or order_obj.get("delivery_status")
+            or order_obj.get("status")
+            or order_obj.get("order_status")
+            or ""
+        ),
+        "order_reference": (
+            order_obj.get("order_name")
+            or order_obj.get("id")
+            or match_payload.get("order_name")
+            or match_payload.get("order_id")
+            or ""
+        ),
+        "tracking_number": (
+            order_obj.get("tracking_number")
+            or order_obj.get("partner_code")
+            or match_payload.get("tracking_number")
+            or ""
+        ),
+        "tracking_url": (
+            order_obj.get("tracking_url")
+            or match_payload.get("tracking_url")
+            or ""
+        ),
+        "driver_name": (
+            order_obj.get("driver_name")
+            or match_payload.get("driver_name")
+            or ""
+        ),
+        "event": match_event,
+        "city": order_obj.get("city") or match_payload.get("city") or "",
+        "raw": match_payload,
+    }
+
+
+async def _ai_get_agent_assignment_count(username: str, workspace: str) -> int:
+    ws = _coerce_workspace(workspace)
+    async with db_manager._conn() as db:
+        query = db_manager._convert("SELECT COUNT(*) AS c FROM conversation_meta WHERE assigned_agent = ?")
+        if db_manager.use_postgres:
+            row = await db.fetchrow(query, str(username or "").strip())
+            return int((row or {}).get("c") or 0)
+        cur = await db.execute(query, (str(username or "").strip(),))
+        row = await cur.fetchone()
+        return int((dict(row) if row else {}).get("c") or 0)
+
+
+ai_agent_service = AIAgentService(
+    AIAgentDependencies(
+        db_manager=db_manager,
+        message_processor=message_processor,
+        get_workspace=get_current_workspace,
+        normalize_workspace=_coerce_workspace,
+        make_settings_key=_ws_setting_key,
+        decrypt_secret=_decrypt_workspace_secret,
+        catalog_provider=_ai_catalog_provider,
+        fetch_customer_by_phone=_ai_fetch_customer_by_phone,
+        fetch_orders_for_customer=_ai_fetch_orders_for_customer,
+        fetch_delivery_snapshot=_ai_fetch_delivery_snapshot,
+        list_agents=auth_db_manager.list_agents,
+        get_agent_last_seen=redis_manager.get_agent_last_seen,
+        get_agent_assignment_count=_ai_get_agent_assignment_count,
+        set_conversation_assignment=db_manager.set_conversation_assignment,
+        logger=logging.getLogger("backend.ai_agent"),
+    )
+)
+message_processor.ai_agent_service = ai_agent_service
+
 # ────────────────────────────────────────────────────────────
 # Webhook ingress: ACK fast, process async
 # ────────────────────────────────────────────────────────────
@@ -12734,6 +12996,7 @@ async def startup():
                 tok = _CURRENT_WORKSPACE.set(w)
                 try:
                     await asyncio.wait_for(db_manager.init_db(), timeout=startup_db_timeout)
+                    await asyncio.wait_for(ai_agent_service.ensure_schema(), timeout=max(5.0, min(30.0, startup_db_timeout)))
                 except Exception as exc:
                     tenant_errors.append((w, str(exc)))
                     logging.getLogger(__name__).exception(
@@ -12749,6 +13012,7 @@ async def startup():
                         pass
         else:
             await asyncio.wait_for(db_manager.init_db(), timeout=startup_db_timeout)
+            await asyncio.wait_for(ai_agent_service.ensure_schema(), timeout=max(5.0, min(30.0, startup_db_timeout)))
 
         if tenant_errors and BLOCK_STARTUP_ON_DB_FAILURE:
             raise RuntimeError(f"Tenant DB init failures: {tenant_errors}")
@@ -14601,6 +14865,89 @@ async def set_inbox_env_endpoint(payload: dict = Body(...), _: dict = Depends(re
     except Exception:
         pass
     return {"ok": True, "workspace": get_current_workspace(), "saved": stored}
+
+
+# ---- AI agent settings (workspace-scoped) ----
+@app.get("/admin/ai-agent/config")
+async def get_ai_agent_config_endpoint(_: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    cfg = await ai_agent_service.get_config(ws)
+    return {
+        "workspace": ws,
+        "config": {
+            k: v
+            for k, v in cfg.items()
+            if k not in {"_openai_api_key", "openai_api_key_enc"}
+        },
+    }
+
+
+@app.post("/admin/ai-agent/config")
+async def set_ai_agent_config_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    raw_key = str((payload or {}).get("openai_api_key") or "").strip()
+    clear_key = bool((payload or {}).get("clear_openai_api_key"))
+    sanitized = dict(payload or {})
+    sanitized.pop("openai_api_key", None)
+    sanitized.pop("clear_openai_api_key", None)
+    saved = await ai_agent_service.save_config(sanitized, ws)
+    merged = dict(saved or {})
+    for transient_key in ("_openai_api_key", "openai_api_key_present", "openai_api_key_hint"):
+        merged.pop(transient_key, None)
+    try:
+        if clear_key:
+            merged.pop("openai_api_key_enc", None)
+        elif raw_key:
+            merged["openai_api_key_enc"] = _encrypt_workspace_secret(raw_key)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    if clear_key or raw_key:
+        await db_manager.set_setting(_ws_setting_key("ai_agent_config", ws), merged)
+    cfg = await ai_agent_service.get_config(ws)
+    return {
+        "ok": True,
+        "workspace": ws,
+        "config": {
+            k: v
+            for k, v in cfg.items()
+            if k not in {"_openai_api_key", "openai_api_key_enc"}
+        },
+    }
+
+
+@app.get("/admin/ai-agent/policies")
+async def list_ai_agent_policies_endpoint(_: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    return {"workspace": ws, "items": await ai_agent_service.list_policies(ws)}
+
+
+@app.post("/admin/ai-agent/policies")
+async def upsert_ai_agent_policy_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    try:
+        item = await ai_agent_service.upsert_policy(payload or {}, ws)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "workspace": ws, "item": item}
+
+
+@app.delete("/admin/ai-agent/policies/{policy_id}")
+async def delete_ai_agent_policy_endpoint(policy_id: int, _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    await ai_agent_service.delete_policy(int(policy_id), ws)
+    return {"ok": True, "workspace": ws}
+
+
+@app.get("/admin/ai-agent/turns")
+async def list_ai_agent_turns_endpoint(limit: int = 30, _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    await ai_agent_service.ensure_schema()
+    return {"workspace": ws, "items": await ai_agent_service.list_recent_turns(ws, limit=limit)}
 
 
 # ---- Meta OAuth (WhatsApp connect) ----
@@ -17834,6 +18181,74 @@ async def update_conversation_tags(user_id: str, payload: dict = Body(...), acto
     except Exception:
         pass
     return {"ok": True, "user_id": user_id, "tags": tags, "tags_updated_at": meta.get("tags_updated_at")}
+
+
+@app.get("/conversations/{user_id}/ai-state")
+async def get_conversation_ai_state(
+    user_id: str,
+    limit: int = 8,
+    actor: dict = Depends(get_current_agent),
+):
+    if not actor.get("is_admin"):
+        meta = await db_manager.get_conversation_meta(user_id)
+        assignee = (meta.get("assigned_agent") or "").strip() or None
+        if assignee not in (None, actor.get("username")):
+            raise HTTPException(status_code=403, detail="Forbidden")
+    await ai_agent_service.ensure_schema()
+    ws = get_current_workspace()
+    overview = await ai_agent_service.get_conversation_overview(user_id, ws, limit=max(1, min(limit, 20)))
+    cfg = await ai_agent_service.get_config(ws)
+    overview["config"] = {
+        "enabled": bool(cfg.get("enabled")),
+        "run_mode": str(cfg.get("run_mode") or "shadow"),
+        "model": str(cfg.get("model") or ""),
+        "handoff_enabled": bool(cfg.get("handoff_enabled")),
+    }
+    return overview
+
+
+@app.post("/conversations/{user_id}/ai-state")
+async def update_conversation_ai_state(
+    user_id: str,
+    payload: dict = Body(...),
+    actor: dict = Depends(get_current_agent),
+):
+    if not actor.get("is_admin"):
+        meta = await db_manager.get_conversation_meta(user_id)
+        assignee = (meta.get("assigned_agent") or "").strip() or None
+        if assignee not in (None, actor.get("username")):
+            raise HTTPException(status_code=403, detail="Forbidden")
+    status = str((payload or {}).get("status") or "").strip().lower()
+    if not status:
+        raise HTTPException(status_code=400, detail="status is required")
+    note = str((payload or {}).get("note") or "").strip() or None
+    await ai_agent_service.ensure_schema()
+    ws = get_current_workspace()
+    try:
+        overview = await ai_agent_service.update_conversation_mode(
+            user_id=user_id,
+            status=status,
+            workspace=ws,
+            actor_username=str(actor.get("username") or "").strip() or None,
+            note=note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        await connection_manager.broadcast_to_admins(
+            {
+                "type": "conversation_ai_state_updated",
+                "data": {
+                    "user_id": user_id,
+                    "state": overview.get("state") or {},
+                    "open_handoff_ticket": overview.get("open_handoff_ticket"),
+                },
+            },
+            workspace=ws,
+        )
+    except Exception:
+        pass
+    return {"ok": True, **overview}
 
 @app.get("/health")
 async def health_check():

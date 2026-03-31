@@ -1491,7 +1491,12 @@ class AIAgentService:
             "Content-Type": "application/json",
         }
         timeout = httpx.Timeout(45.0, connect=10.0)
-        input_items: list[Any] = [self._build_user_prompt(turn_payload)]
+        input_items: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": self._build_user_prompt(turn_payload),
+            }
+        ]
         usage_totals = {
             "input_tokens": 0,
             "output_tokens": 0,

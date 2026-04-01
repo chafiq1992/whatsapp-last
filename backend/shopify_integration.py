@@ -2524,7 +2524,29 @@ async def cod_storefront_create_order(
     if not draft_line_items:
         raise HTTPException(status_code=422, detail="No valid line items provided")
 
-    order_tags = "easysell_cod_form"
+    # ── Tags: combine default + frontend tags + qty_discount if applicable ──
+    tag_set = {"easysell_cod_form"}
+    incoming_tags = data.get("tags") or []
+    if isinstance(incoming_tags, str):
+        incoming_tags = [t.strip() for t in incoming_tags.split(",") if t.strip()]
+    for t in incoming_tags:
+        tag_set.add(t.strip())
+
+    # ── Order-level quantity discount ──
+    order_discount_amount = float(data.get("discount", 0) or 0)
+    discount_label = str(data.get("discount_label") or "").strip() or "Quantity discount"
+    order_applied_discount = None
+    if order_discount_amount > 0:
+        tag_set.add("qty_discount")
+        order_applied_discount = {
+            "value": _money2(order_discount_amount),
+            "value_type": "fixed_amount",
+            "amount": _money2(order_discount_amount),
+            "title": discount_label,
+            "description": discount_label,
+        }
+
+    order_tags = ", ".join(sorted(tag_set))
 
     draft_order_payload = {
         "draft_order": {
@@ -2536,6 +2558,7 @@ async def cod_storefront_create_order(
             "note": "Order placed via COD Quick-Order Form (Shopify Storefront)",
             "tags": order_tags,
             "customer": {"first_name": fn, "last_name": ln, "phone": normalize_phone(phone)},
+            **({"applied_discount": order_applied_discount} if order_applied_discount else {}),
         }
     }
 

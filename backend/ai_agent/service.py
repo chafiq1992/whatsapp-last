@@ -1108,6 +1108,10 @@ class AIAgentService:
         turns = await self.list_recent_turns_for_user(uid, ws, limit=limit)
         ticket = await self.get_open_handoff_ticket(uid, ws)
         last_turn = turns[0] if turns else None
+        last_skip_reason = str((state.get("risk_json") or {}).get("last_skip_reason") or "").strip()
+        last_skip_turn = next((turn for turn in turns if str(turn.get("turn_status") or "") == "skipped"), None)
+        if last_skip_turn and str(last_skip_turn.get("action") or "").strip():
+            last_skip_reason = str(last_skip_turn.get("action") or "").strip()
         return {
             "workspace": ws,
             "user_id": uid,
@@ -1115,6 +1119,7 @@ class AIAgentService:
             "open_handoff_ticket": ticket,
             "recent_turns": turns,
             "last_turn": last_turn,
+            "last_skip_reason": last_skip_reason,
         }
 
     async def update_conversation_mode(
@@ -1195,31 +1200,89 @@ class AIAgentService:
     async def maybe_handle_incoming_message(self, message_obj: dict[str, Any]) -> dict[str, Any]:
         ws = self.normalize_workspace(self.get_workspace())
         config = await self.get_config(ws)
-        if not bool(config.get("enabled")):
-            return {"handled": False, "skip_legacy": False, "reason": "disabled"}
-        if str(message_obj.get("type") or "") != "text":
-            return {"handled": False, "skip_legacy": False, "reason": "non_text"}
-        if not str(config.get("_openai_api_key") or "").strip():
-            return {"handled": False, "skip_legacy": False, "reason": "missing_api_key"}
-
         user_id = str(message_obj.get("user_id") or "").strip()
         inbound_wamid = str(message_obj.get("wa_message_id") or "").strip()
         incoming_text = str(message_obj.get("message") or "").strip()
+        msg_type = str(message_obj.get("type") or "").strip()
+        if not bool(config.get("enabled")):
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="disabled",
+                config=config,
+                message_obj=message_obj,
+            )
+            return {"handled": False, "skip_legacy": False, "reason": "disabled", "turn_id": turn_id}
+        if msg_type != "text":
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="non_text",
+                config=config,
+                message_obj=message_obj,
+            )
+            return {"handled": False, "skip_legacy": False, "reason": "non_text", "turn_id": turn_id}
+        if not str(config.get("_openai_api_key") or "").strip():
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="missing_api_key",
+                config=config,
+                message_obj=message_obj,
+            )
+            return {"handled": False, "skip_legacy": False, "reason": "missing_api_key", "turn_id": turn_id}
+
         if not user_id or not incoming_text:
-            return {"handled": False, "skip_legacy": False, "reason": "missing_input"}
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="missing_input",
+                config=config,
+                message_obj=message_obj,
+            )
+            return {"handled": False, "skip_legacy": False, "reason": "missing_input", "turn_id": turn_id}
         allowed_test_numbers = self._normalize_test_numbers(config.get("test_numbers"))
         if allowed_test_numbers and not self._is_test_number_allowed(user_id, allowed_test_numbers):
-            return {"handled": False, "skip_legacy": False, "reason": "not_test_number"}
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="not_test_number",
+                config=config,
+                message_obj=message_obj,
+            )
+            return {"handled": False, "skip_legacy": False, "reason": "not_test_number", "turn_id": turn_id}
 
         await self.ensure_schema()
         meta = await self.db_manager.get_conversation_meta(user_id)
         assigned_agent = str((meta or {}).get("assigned_agent") or "").strip()
         if assigned_agent:
-            return {"handled": False, "skip_legacy": False, "reason": "human_assigned"}
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="human_assigned",
+                config=config,
+                message_obj=message_obj,
+            )
+            return {"handled": False, "skip_legacy": False, "reason": "human_assigned", "turn_id": turn_id}
 
         state = await self._get_conversation_state(user_id=user_id, workspace=ws)
         if str(state.get("status") or "") == "human_managed":
-            return {"handled": False, "skip_legacy": False, "reason": "human_managed"}
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="human_managed",
+                config=config,
+                state=state,
+                message_obj=message_obj,
+            )
+            return {"handled": False, "skip_legacy": False, "reason": "human_managed", "turn_id": turn_id}
 
         requested_run_mode = str(config.get("run_mode") or "shadow").strip().lower()
         eval_gate_status = await self.get_autonomous_eval_gate_status(ws, config) if requested_run_mode == "autonomous" else {
@@ -1477,6 +1540,72 @@ class AIAgentService:
                 latency_ms=latency_ms,
             )
             return {"handled": False, "skip_legacy": False, "reason": "error", "error": str(exc)}
+
+    async def _record_skip(
+        self,
+        *,
+        workspace: str,
+        user_id: str,
+        inbound_wa_message_id: str,
+        reason: str,
+        config: dict[str, Any],
+        state: dict[str, Any] | None = None,
+        message_obj: dict[str, Any] | None = None,
+    ) -> int:
+        ws = self.normalize_workspace(workspace)
+        uid = str(user_id or "").strip()
+        if not uid:
+            self.log.info("ai_agent skip workspace=%s user=<missing> reason=%s", ws, reason)
+            return 0
+        await self.ensure_schema()
+        existing_state = state or await self._get_conversation_state(user_id=uid, workspace=ws)
+        counters = dict(existing_state.get("counters_json") or {})
+        counters["skipped_turns"] = int(counters.get("skipped_turns") or 0) + 1
+        risk = dict(existing_state.get("risk_json") or {})
+        risk["last_skip_reason"] = str(reason or "").strip()
+        risk["last_skip_at"] = datetime.utcnow().isoformat()
+        await self._upsert_conversation_state(
+            user_id=uid,
+            workspace=ws,
+            state={
+                "risk_json": risk,
+                "counters_json": counters,
+            },
+        )
+        turn_id = await self._log_turn(
+            workspace=ws,
+            user_id=uid,
+            inbound_wa_message_id=inbound_wa_message_id,
+            openai_response_id="",
+            openai_conversation_id=str(existing_state.get("openai_conversation_id") or "") or None,
+            turn_mode=str(config.get("run_mode") or "shadow").strip().lower() or "shadow",
+            turn_status="skipped",
+            detected_language="",
+            detected_intent="",
+            emotion="",
+            confidence=0.0,
+            action=str(reason or "").strip() or "skipped",
+            reply_text="",
+            request_json={
+                "workspace": ws,
+                "user_id": uid,
+                "message_type": str((message_obj or {}).get("type") or "").strip(),
+                "incoming_message": str((message_obj or {}).get("message") or "").strip(),
+                "configured_enabled": bool(config.get("enabled")),
+                "requested_run_mode": str(config.get("run_mode") or "shadow").strip().lower(),
+                "test_numbers": self._normalize_test_numbers(config.get("test_numbers")),
+            },
+            response_json={
+                "reason": str(reason or "").strip(),
+                "workspace": ws,
+                "state_status": str(existing_state.get("status") or "bot_managed"),
+            },
+            usage_json={},
+            error_text=None,
+            latency_ms=0,
+        )
+        self.log.info("ai_agent skip workspace=%s user=%s reason=%s turn_id=%s", ws, uid, reason, turn_id)
+        return turn_id
 
     async def _run_openai_turn(
         self,

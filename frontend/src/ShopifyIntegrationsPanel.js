@@ -121,6 +121,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
   const [aiTurns, setAiTurns] = useState([]);
   const [aiTicket, setAiTicket] = useState(null);
   const [aiConfig, setAiConfig] = useState(null);
+  const [aiWorkspace, setAiWorkspace] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSaving, setAiSaving] = useState(false);
   const [aiError, setAiError] = useState("");
@@ -311,6 +312,7 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
       setAiTurns([]);
       setAiTicket(null);
       setAiConfig(null);
+      setAiWorkspace("");
       setAiError("");
       return;
     }
@@ -325,11 +327,13 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
       setAiTurns(Array.isArray(data.recent_turns) ? data.recent_turns : []);
       setAiTicket(data.open_handoff_ticket || null);
       setAiConfig(data.config || null);
+      setAiWorkspace(String(data.workspace || ""));
     } catch (err) {
       setAiState(null);
       setAiTurns([]);
       setAiTicket(null);
       setAiConfig(null);
+      setAiWorkspace("");
       setAiError(err?.response?.data?.detail || "Failed to load AI state.");
     } finally {
       if (!silent) setAiLoading(false);
@@ -1004,6 +1008,13 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
     setOrderData(data => ({ ...data, [field]: value }));
   };
 
+  const latestAiTurn = aiTurns[0] || null;
+  const lastSkipReason = (
+    (latestAiTurn && latestAiTurn.turn_status === "skipped" && latestAiTurn.action) ||
+    aiState?.risk_json?.last_skip_reason ||
+    ""
+  );
+
   return (
     <div className="p-4 h-full flex flex-col">
       <div className="mb-2">
@@ -1043,6 +1054,11 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                   <span className="px-2 py-1 rounded-full bg-slate-700 text-slate-200">
                     {aiConfig?.enabled ? `AI ${aiConfig?.run_mode || "shadow"}` : "AI disabled"}
                   </span>
+                  {!!aiWorkspace && (
+                    <span className="px-2 py-1 rounded-full bg-cyan-500/15 text-cyan-200">
+                      ws: {aiWorkspace}
+                    </span>
+                  )}
                   {!!aiTicket?.id && (
                     <span className="px-2 py-1 rounded-full bg-rose-500/20 text-rose-200">
                       Handoff #{aiTicket.id}
@@ -1053,6 +1069,12 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                 {aiError && (
                   <div className="text-xs text-rose-300 bg-rose-500/10 border border-rose-500/20 rounded p-2">
                     {aiError}
+                  </div>
+                )}
+
+                {!!lastSkipReason && (
+                  <div className="text-xs text-amber-100 bg-amber-500/10 border border-amber-500/20 rounded p-2">
+                    Last AI skip reason: <span className="font-semibold">{lastSkipReason}</span>
                   </div>
                 )}
 
@@ -1166,6 +1188,9 @@ export default function ShopifyIntegrationsPanel({ activeUser, currentAgent }) {
                             {(turn.detected_language || "unknown")} • {(turn.detected_intent || "unknown")}
                             {Number.isFinite(Number(turn.confidence)) ? ` • ${Math.round(Number(turn.confidence || 0) * 100)}%` : ""}
                           </div>
+                          {turn.turn_status === "skipped" && (
+                            <div className="mt-2 text-amber-200">AI skipped this turn before replying.</div>
+                          )}
                           {turn.reply_text && (
                             <div className="mt-2 text-slate-100 whitespace-pre-wrap">{turn.reply_text}</div>
                           )}

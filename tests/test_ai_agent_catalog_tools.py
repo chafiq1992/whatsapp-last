@@ -40,7 +40,9 @@ async def _noop_meta(*args, **kwargs):
 
 def _make_toolbox() -> AIAgentToolbox:
     sets = [
+        {"id": "girls-2ans", "name": "Girls 2 ans"},
         {"id": "girls-24", "name": "Girls Shoes 24"},
+        {"id": "boys-22", "name": "Boys Shoes 22"},
         {"id": "boys-24", "name": "Boys Shoes 24"},
         {"id": "all-products", "name": "All Products"},
     ]
@@ -50,12 +52,30 @@ def _make_toolbox() -> AIAgentToolbox:
         {"label": "All", "type": "all"},
     ]
     set_products = {
+        "girls-2ans": [
+            {
+                "retailer_id": "G-2A-1",
+                "name": "Girls Outfit 2 ans",
+                "availability": "in stock",
+                "quantity": 5,
+                "images": [],
+            }
+        ],
         "girls-24": [
             {
                 "retailer_id": "G-24-1",
                 "name": "صندل بنات 24",
                 "availability": "in stock",
                 "quantity": 4,
+                "images": [],
+            }
+        ],
+        "boys-22": [
+            {
+                "retailer_id": "B-22-1",
+                "name": "Boys Sneakers 22",
+                "availability": "in stock",
+                "quantity": 6,
                 "images": [],
             }
         ],
@@ -173,6 +193,37 @@ async def test_search_catalog_products_uses_inbox_sets_and_returns_set_metadata(
     assert products[0]["catalog_set_id"] == "girls-24"
     assert products[0]["catalog_set_name"] == "Girls Shoes 24"
     assert result.data["preferred_set"] == {"id": "girls-24", "name": "Girls Shoes 24"}
+
+
+@pytest.mark.asyncio
+async def test_search_catalog_products_prefers_exact_age_set_over_full_catalog():
+    toolbox = _make_toolbox()
+
+    result = await toolbox.search_catalog_products(
+        query="girls 2 ans clothes",
+        workspace="default",
+        limit=4,
+    )
+
+    assert result.ok is True
+    assert result.data["matched_sets"][0] == {"id": "girls-2ans", "name": "Girls 2 ans"}
+    assert {item["id"] for item in result.data["matched_sets"]} == {"girls-2ans"}
+    assert result.data["products"][0]["catalog_set_id"] == "girls-2ans"
+
+
+@pytest.mark.asyncio
+async def test_search_catalog_products_returns_multiple_exact_sets_for_multi_request():
+    toolbox = _make_toolbox()
+
+    result = await toolbox.search_catalog_products(
+        query="boys 22 and girls 2 ans",
+        workspace="default",
+        limit=6,
+    )
+
+    assert result.ok is True
+    matched_ids = [item["id"] for item in result.data["matched_sets"]]
+    assert matched_ids == ["boys-22", "girls-2ans"]
 
 
 def test_system_prompt_forces_arabic_script_and_catalog_set_fields():

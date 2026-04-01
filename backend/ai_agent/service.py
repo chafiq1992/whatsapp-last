@@ -1379,14 +1379,26 @@ class AIAgentService:
             handled = False
             skip_legacy = False
             handoff_meta: dict[str, Any] = {}
+            matched_catalog_sets = [
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "name": str(item.get("name") or "").strip(),
+                }
+                for item in (turn_payload.get("matched_catalog_sets") or [])
+                if str(item.get("id") or "").strip()
+            ]
             recommended_set_id = (
                 str(output_data.get("recommended_catalog_set_id") or "").strip()
                 or str(((turn_payload.get("preferred_catalog_set") or {}) if self._message_mentions_catalog_request(incoming_text) else {}).get("id") or "").strip()
             )
+            auto_catalog_targets = matched_catalog_sets[:3] if matched_catalog_sets else (
+                [{"id": recommended_set_id, "name": str(output_data.get("recommended_catalog_set_name") or ((turn_payload.get("preferred_catalog_set") or {}).get("name") or "")).strip()}]
+                if recommended_set_id else []
+            )
             auto_catalog_set_possible = bool(
                 effective_mode == "autonomous"
                 and config.get("send_catalog_when_possible")
-                and recommended_set_id
+                and auto_catalog_targets
                 and "send_whatsapp_catalog_message" not in action_tool_names
             )
             auto_product_ids = [
@@ -1424,13 +1436,14 @@ class AIAgentService:
                     handled = True
                     skip_legacy = True
                 elif auto_catalog_set_possible:
-                    await self._send_ai_outbound_message(
-                        user_id=user_id,
-                        message_type="catalog_set",
-                        text=reply_text or str(output_data.get("recommended_catalog_set_name") or ((turn_payload.get("preferred_catalog_set") or {}).get("name") or "")).strip(),
-                        set_id=recommended_set_id,
-                    )
-                    action = "send_catalog_set"
+                    for idx, target in enumerate(auto_catalog_targets):
+                        await self._send_ai_outbound_message(
+                            user_id=user_id,
+                            message_type="catalog_set",
+                            text=reply_text if idx == 0 else str(target.get("name") or "").strip(),
+                            set_id=str(target.get("id") or "").strip(),
+                        )
+                    action = "send_catalog_set" if len(auto_catalog_targets) == 1 else "send_catalog_sets"
                     handled = True
                     skip_legacy = True
                 elif auto_product_carousel_possible:
@@ -2737,6 +2750,22 @@ class AIAgentService:
             )
         return sent
 
+    async def _send_ai_catalog_sets(self, *, user_id: str, sets: list[dict[str, Any]], caption: str = "") -> list[Any]:
+        sent: list[Any] = []
+        for idx, item in enumerate(sets or []):
+            set_id = str((item or {}).get("id") or "").strip()
+            if not set_id:
+                continue
+            sent.append(
+                await self._send_ai_outbound_message(
+                    user_id=user_id,
+                    message_type="catalog_set",
+                    text=caption if idx == 0 else str((item or {}).get("name") or "").strip(),
+                    set_id=set_id,
+                )
+            )
+        return sent
+
     def _response_tools(self) -> list[dict[str, Any]]:
         return [
             {
@@ -3063,15 +3092,26 @@ class AIAgentService:
         if name == "send_whatsapp_catalog_message":
             set_id = str(arguments.get("set_id") or "").strip()
             caption = str(arguments.get("caption") or "").strip()
+            matched_catalog_sets = [
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "name": str(item.get("name") or "").strip(),
+                }
+                for item in (turn_payload.get("matched_catalog_sets") or [])
+                if str(item.get("id") or "").strip()
+            ]
+            exact_targets = matched_catalog_sets[:3]
+            send_targets = exact_targets if exact_targets else (
+                [{"id": set_id, "name": str(arguments.get("caption") or "").strip()}] if set_id else []
+            )
             return await self._execute_send_tool(
                 run_mode=run_mode,
                 tool_name=name,
-                payload={"set_id": set_id, "caption": caption},
-                sender=lambda: self._send_ai_outbound_message(
+                payload={"set_ids": [item.get("id") for item in send_targets], "caption": caption},
+                sender=lambda: self._send_ai_catalog_sets(
                     user_id=user_id,
-                    message_type="catalog_set",
-                    text=caption,
-                    set_id=set_id,
+                    sets=send_targets,
+                    caption=caption,
                 ),
             )
         if name == "send_whatsapp_product_carousel":

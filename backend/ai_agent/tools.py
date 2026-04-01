@@ -21,6 +21,18 @@ GENDER_HINTS: dict[str, tuple[str, ...]] = {
     "girls": ("girls", "girl", "fille", "filles", "femme", "femmes", "women", "woman", "lady", "ladies", "بنت", "بنات", "للبنات", "نسائي", "نساء"),
     "boys": ("boys", "boy", "garcon", "garcons", "garçon", "garçons", "men", "man", "homme", "hommes", "ولد", "اولاد", "أولاد", "للأولاد", "رجالي", "رجال"),
 }
+SHOE_HINTS: tuple[str, ...] = (
+    "shoe", "shoes", "sneaker", "sneakers", "sandale", "sandales", "sandal", "sandals",
+    "chaussure", "chaussures", "chauss", "boot", "boots", "sabato", "sabat", "sbat",
+    "Ø­Ø°Ø§Ø¡", "Ø£Ø­Ø°ÙŠØ©", "Ø­Ø¯Ø§Ø¡", "Ø³Ù†ÙŠÙƒØ±", "Ø³Ù†ÙŠÙƒØ±Ø²", "ØµØ¨Ø§Ø·", "Ø³Ø¨Ø§Ø·", "ØµÙ†Ø¯Ù„", "ØµÙ†Ø§Ø¯Ù„",
+)
+
+CLOTHING_HINTS: tuple[str, ...] = (
+    "clothes", "clothing", "dress", "dresses", "shirt", "shirts", "pants", "trouser", "trousers",
+    "jogger", "joggers", "survet", "survetement", "survÃªtement", "robe", "robes", "vetement", "vetements",
+    "vÃªtement", "vÃªtements", "outfit", "outfits", "wear", "kidswear", "babywear",
+    "Ù„Ø¨Ø§Ø³", "Ù…Ù„Ø§Ø¨Ø³", "Ø­ÙˆØ§ÙŠØ¬", "Ù‚Ù…ÙŠØµ", "Ù‚Ù…ØµØ§Ù†", "Ø³Ø±ÙˆØ§Ù„", "Ø³Ø±Ø§ÙˆÙ„", "ÙØ³ØªØ§Ù†", "ÙØ³Ø§ØªÙŠÙ†",
+)
 
 
 @dataclass
@@ -176,7 +188,7 @@ class AIAgentToolbox:
         try:
             scoped_sets = await self._select_catalog_sets(query=query, workspace=ws, limit=limit)
             products = await self._load_catalog_scope_products(workspace=ws, scoped_sets=scoped_sets, limit=limit)
-            if not products:
+            if not products and not scoped_sets:
                 products = await self.catalog_provider(ws)
         except Exception as exc:
             self.log.warning("ai_tool search_catalog_products failed ws=%s err=%s", ws, exc)
@@ -420,6 +432,32 @@ class AIAgentToolbox:
         candidate_sets = self._apply_catalog_filter(sets=sets, selected_filter=chosen_filter)
         if not candidate_sets:
             candidate_sets = [dict(item) for item in sets if str(item.get("id") or "").strip()]
+        request_specs = self._extract_catalog_request_specs(query)
+        if len({str(spec.get("gender") or "").strip() for spec in request_specs if str(spec.get("gender") or "").strip()}) > 1:
+            candidate_sets = [dict(item) for item in sets if str(item.get("id") or "").strip()]
+        if request_specs:
+            exact_matches: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for spec in request_specs:
+                ranked_structured: list[tuple[float, dict[str, Any]]] = []
+                for item in candidate_sets:
+                    matched, score = self._structured_set_match_score(item=item, spec=spec)
+                    set_id = str(item.get("id") or "").strip()
+                    if not matched or not set_id or set_id in seen_ids:
+                        continue
+                    ranked_structured.append((score, dict(item)))
+                ranked_structured.sort(key=lambda row: (-row[0], str(row[1].get("name") or "")))
+                if ranked_structured:
+                    chosen = ranked_structured[0][1]
+                    chosen_id = str(chosen.get("id") or "").strip()
+                    if chosen_id and chosen_id not in seen_ids:
+                        seen_ids.add(chosen_id)
+                        exact_matches.append(chosen)
+            if exact_matches:
+                return exact_matches[: max(2, min(6, int(limit or 6)))]
+            candidate_sets = [item for item in candidate_sets if not self._is_broad_catalog_set(item)]
+            if not candidate_sets:
+                return []
         tokens = self._query_tokens(query)
         if not tokens:
             return candidate_sets[: max(4, min(8, int(limit or 6) * 2))]
@@ -445,6 +483,120 @@ class AIAgentToolbox:
         if ranked:
             return [row[1] for row in ranked[: max(3, min(6, int(limit or 6)))]]
         return candidate_sets[: max(4, min(8, int(limit or 6) * 2))]
+
+    def _extract_catalog_request_specs(self, query: str) -> list[dict[str, Any]]:
+        lowered = str(query or "").lower()
+        global_gender = self._detect_gender_bucket(lowered)
+        segments = self._split_catalog_query_segments(lowered)
+        specs: list[dict[str, Any]] = []
+        for segment in segments:
+            gender = self._detect_gender_bucket(segment) or global_gender
+            ages = self._extract_age_values(segment)
+            sizes = self._extract_size_values(segment)
+            category = self._detect_catalog_category(segment)
+            if not gender and not ages and not sizes:
+                continue
+            specs.append(
+                {
+                    "segment": segment,
+                    "gender": gender,
+                    "ages": ages,
+                    "sizes": sizes,
+                    "category": category,
+                }
+            )
+        return specs
+
+    def _split_catalog_query_segments(self, query: str) -> list[str]:
+        raw_segments = re.split(r"\s+(?:and|et)\s+|\s+و\s+|[،,;+]+", str(query or "").lower())
+        cleaned = [" ".join(segment.split()) for segment in raw_segments if str(segment or "").strip()]
+        return cleaned or ([str(query or "").lower().strip()] if str(query or "").strip() else [])
+
+    def _extract_age_values(self, text: str) -> list[int]:
+        values: list[int] = []
+        lowered = str(text or "").lower()
+        for match in re.finditer(r"(?<!\d)(\d{1,2})\s*(ans?|years?|yrs?|yo|y/o|an)(?!\d)", lowered):
+            age = self._safe_int(match.group(1))
+            if age is not None and 0 <= age <= 14 and age not in values:
+                values.append(age)
+        return values
+
+    def _extract_size_values(self, text: str) -> list[int]:
+        values: list[int] = []
+        lowered = str(text or "").lower()
+        for match in re.finditer(r"(?<!\d)(\d{2})(?!\d)", lowered):
+            size = self._safe_int(match.group(1))
+            if size is None:
+                continue
+            if 15 <= size <= 45 and size not in values:
+                values.append(size)
+        return values
+
+    def _detect_catalog_category(self, text: str) -> str | None:
+        lowered = str(text or "").lower()
+        if self._text_has_any(lowered, SHOE_HINTS):
+            return "shoes"
+        if self._text_has_any(lowered, CLOTHING_HINTS):
+            return "clothing"
+        return None
+
+    def _catalog_set_attributes(self, item: dict[str, Any]) -> dict[str, Any]:
+        set_id = str(item.get("id") or "").strip()
+        set_name = str(item.get("name") or "").strip()
+        hay = f"{set_name} {set_id}".lower()
+        ages = self._extract_age_values(hay)
+        sizes = self._extract_size_values(hay)
+        return {
+            "hay": hay,
+            "gender": self._detect_gender_bucket(hay),
+            "ages": ages,
+            "sizes": sizes,
+            "category": self._detect_catalog_category(hay),
+        }
+
+    def _structured_set_match_score(self, *, item: dict[str, Any], spec: dict[str, Any]) -> tuple[bool, float]:
+        attrs = self._catalog_set_attributes(item)
+        hay = str(attrs.get("hay") or "")
+        requested_gender = str(spec.get("gender") or "").strip()
+        requested_ages = [int(v) for v in (spec.get("ages") or []) if isinstance(v, int)]
+        requested_sizes = [int(v) for v in (spec.get("sizes") or []) if isinstance(v, int)]
+        requested_category = str(spec.get("category") or "").strip()
+        if requested_gender and attrs.get("gender") != requested_gender:
+            return False, 0.0
+        if requested_ages and not any(age in (attrs.get("ages") or []) for age in requested_ages):
+            return False, 0.0
+        if requested_sizes and not any(size in (attrs.get("sizes") or []) for size in requested_sizes):
+            return False, 0.0
+        if requested_category == "shoes" and attrs.get("category") != "shoes":
+            return False, 0.0
+        if requested_category == "clothing" and attrs.get("category") == "shoes":
+            return False, 0.0
+        score = 0.0
+        if requested_gender:
+            score += 4.0
+        if requested_ages:
+            score += 5.0 * len(requested_ages)
+        if requested_sizes:
+            score += 5.0 * len(requested_sizes)
+        if requested_category and attrs.get("category") == requested_category:
+            score += 2.0
+        if not requested_category and attrs.get("category") == "shoes" and requested_sizes:
+            score += 1.5
+        if not requested_category and attrs.get("category") == "clothing" and requested_ages:
+            score += 1.5
+        score += 0.1 * len(hay)
+        return True, score
+
+    def _is_broad_catalog_set(self, item: dict[str, Any]) -> bool:
+        hay = f"{item.get('name') or ''} {item.get('id') or ''}".strip().lower()
+        return bool(
+            "all products" in hay
+            or "all-products" in hay
+            or re.search(r"\ball\b", hay)
+            or "catalog" in hay
+            or "catalogue" in hay
+            or re.search(r"\bfull\b", hay)
+        )
 
     async def _load_catalog_scope_products(self, *, workspace: str, scoped_sets: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
         if not scoped_sets:

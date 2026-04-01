@@ -4519,6 +4519,7 @@ class DatabaseManager:
             ),
             "retailer_id": message.get("retailer_id"),
             "product_id": message.get("product_id"),
+            "agent_username": message.get("agent_username") or message.get("agent"),
             # Shopify order tagging metadata
             "shopify_order_id": message.get("shopify_order_id"),
             "shopify_tag_on_sent": message.get("shopify_tag_on_sent"),
@@ -6121,6 +6122,7 @@ class MessageProcessor:
             # Preserve raw fields as well for debugging/DB if present
             "retailer_id": message_data.get("retailer_id"),
             "product_id": message_data.get("product_id"),
+            "set_id": message_data.get("set_id"),
             # carry flags
             "needs_bilingual_prompt": bool(message_data.get("needs_bilingual_prompt")),
             # reply/reactions passthrough

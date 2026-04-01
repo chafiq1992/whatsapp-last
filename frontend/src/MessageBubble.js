@@ -233,7 +233,9 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
   const isReaction = msg.type === "reaction";
   const isLocation = msg.type === "location";
   const isContacts = msg.type === "contacts";
-  const isAiBotMessage = self && ["ai-agent", "ai-bot"].includes(String(msg?.agent_username || msg?.agent || "").trim().toLowerCase());
+  const outboundAgentName = self ? String(msg?.agent_username || msg?.agent || "").trim() : "";
+  const isAiBotMessage = ["ai-agent", "ai-bot"].includes(outboundAgentName.toLowerCase());
+  const outboundSenderBadge = isAiBotMessage ? "ai bot" : outboundAgentName;
   const isText = msg.type === "text" || (!isImage && !isAudio && !isVideo && !isOrder && !isGroupedImages && !isCatalogItem && !isCatalogSet && !isReaction && !isLocation && !isContacts);
   const [linkPreview, setLinkPreview] = useState(null);
   const [linkPreviewError, setLinkPreviewError] = useState(false);
@@ -1283,9 +1285,15 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
               </div>
             </div>
             <div className="flex items-center space-x-1">
-              {isAiBotMessage && (
-                <span className="mr-1 rounded-full bg-[#f6b562] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
-                  ai bot
+              {outboundSenderBadge && (
+                <span
+                  className={`mr-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium tracking-wide ${
+                    isAiBotMessage
+                      ? 'bg-[#f6b562] text-white uppercase'
+                      : 'bg-black/10 text-black/70'
+                  }`}
+                >
+                  {outboundSenderBadge}
                 </span>
               )}
               {typeof onReact === 'function' && (

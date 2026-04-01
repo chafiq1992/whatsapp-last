@@ -251,3 +251,76 @@ def test_send_to_whatsapp_prefers_upload(tmp_path, monkeypatch):
     assert captured["uploaded"] == str(file_path)
     assert captured["sent"] == "id123"
 
+
+@pytest.mark.asyncio
+async def test_process_outgoing_message_keeps_catalog_set_id(monkeypatch):
+    captured = {}
+
+    async def fake_send_to_user(user_id, payload):
+        return None
+
+    async def fake_broadcast_to_admins(payload):
+        return None
+
+    async def fake_cache_message(user_id, message, workspace=None):
+        return None
+
+    async def fake_bg(message):
+        captured["message"] = dict(message)
+
+    monkeypatch.setattr(main.message_processor.connection_manager, "send_to_user", fake_send_to_user)
+    monkeypatch.setattr(main.message_processor.connection_manager, "broadcast_to_admins", fake_broadcast_to_admins)
+    monkeypatch.setattr(main.message_processor.redis_manager, "cache_message", fake_cache_message)
+    monkeypatch.setattr(main.message_processor, "_send_to_whatsapp_bg", fake_bg)
+
+    result = await main.message_processor.process_outgoing_message(
+        {
+            "user_id": "u1",
+            "type": "catalog_set",
+            "message": "Girls 25",
+            "caption": "Girls 25",
+            "set_id": "girls-25",
+            "agent_username": "ai-agent",
+        }
+    )
+    await asyncio.sleep(0)
+
+    assert result["set_id"] == "girls-25"
+    assert captured["message"]["set_id"] == "girls-25"
+    assert captured["message"]["agent_username"] == "ai-agent"
+
+
+@pytest.mark.asyncio
+async def test_save_message_persists_agent_username(monkeypatch):
+    captured = {}
+
+    async def fake_upsert_message(self, data):
+        captured["saved"] = dict(data)
+
+    async def fake_log_agent_event(self, **kwargs):
+        captured["event"] = dict(kwargs)
+
+    async def fake_mark_latest_inbound_replied(self, **kwargs):
+        captured["reply"] = dict(kwargs)
+
+    monkeypatch.setattr(main.DatabaseManager, "upsert_message", fake_upsert_message)
+    monkeypatch.setattr(main.DatabaseManager, "log_agent_event", fake_log_agent_event)
+    monkeypatch.setattr(main.DatabaseManager, "mark_latest_inbound_replied", fake_mark_latest_inbound_replied)
+
+    await main.db_manager.save_message(
+        {
+            "temp_id": "t1",
+            "user_id": "u1",
+            "message": "hello",
+            "type": "text",
+            "timestamp": "2026-04-01T18:21:00Z",
+            "agent_username": "sara",
+        },
+        "wa123",
+        "sent",
+    )
+
+    assert captured["saved"]["agent_username"] == "sara"
+    assert captured["event"]["agent_username"] == "sara"
+    assert captured["reply"]["replied_by_agent"] == "sara"
+

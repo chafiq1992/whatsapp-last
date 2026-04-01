@@ -33,10 +33,12 @@
 {% assign upsell_timer = section.settings.upsell_timer | default: 300 %}
 
 {% comment %} Quantity Offers — Metafield overrides section defaults {% endcomment %}
-{% assign qty_offers_json = product.metafields.custom.quantity_offers.value %}
-{% if qty_offers_json == blank %}
-  {% assign qty_offers_json = section.settings.quantity_offers_json %}
-{% endif %}
+{% assign mf_qty2 = product.metafields.custom.qty_2_discount.value %}
+{% assign mf_qty3 = product.metafields.custom.qty_3_discount.value %}
+{% assign mf_qty4 = product.metafields.custom.qty_4_discount.value %}
+{% if mf_qty2 != blank %}{% assign qty_2_discount = mf_qty2 | plus: 0 %}{% else %}{% assign qty_2_discount = section.settings.qty_2_discount | plus: 0 %}{% endif %}
+{% if mf_qty3 != blank %}{% assign qty_3_discount = mf_qty3 | plus: 0 %}{% else %}{% assign qty_3_discount = section.settings.qty_3_discount | plus: 0 %}{% endif %}
+{% if mf_qty4 != blank %}{% assign qty_4_discount = mf_qty4 | plus: 0 %}{% else %}{% assign qty_4_discount = section.settings.qty_4_discount | plus: 0 %}{% endif %}
 
 <div class="cod-form-wrapper" dir="rtl">
 
@@ -538,7 +540,9 @@
   var UPSELL_DISCOUNT={{ upsell_discount | json | default: 0 }};
   var UPSELL_TIMER_SEC={{ upsell_timer | json | default: 300 }};
   var MONEY_FORMAT={{ 999111 | money | json }};
-  var QTY_OFFERS_RAW={{ qty_offers_json | json | default: 'null' }};
+  var QTY_2_DISCOUNT={{ qty_2_discount | json | default: '0' }};
+  var QTY_3_DISCOUNT={{ qty_3_discount | json | default: '0' }};
+  var QTY_4_DISCOUNT={{ qty_4_discount | json | default: '0' }};
 
   var _timerInterval=null,_customerData={},_upsellVariants=[],_draftOrderId=null;
   var _abandonSent=false,_orderCompleted=false,_modalOpened=false;
@@ -650,17 +654,9 @@
   /* ── Parse Quantity Offers ── */
   function _parseQtyOffers(){
     _qtyOffers=[];
-    if(!QTY_OFFERS_RAW)return;
-    try{
-      var raw=typeof QTY_OFFERS_RAW==='string'?JSON.parse(QTY_OFFERS_RAW):QTY_OFFERS_RAW;
-      if(Array.isArray(raw)){
-        raw.forEach(function(o){
-          var q=parseInt(o.qty||o.quantity,10),d=parseFloat(o.discount||0);
-          if(q>1&&d>=0)_qtyOffers.push({qty:q,discount:d});
-        });
-        _qtyOffers.sort(function(a,b){return a.qty-b.qty;});
-      }
-    }catch(e){}
+    if(QTY_2_DISCOUNT>0)_qtyOffers.push({qty:2,discount:QTY_2_DISCOUNT});
+    if(QTY_3_DISCOUNT>0)_qtyOffers.push({qty:3,discount:QTY_3_DISCOUNT});
+    if(QTY_4_DISCOUNT>0)_qtyOffers.push({qty:4,discount:QTY_4_DISCOUNT});
   }
 
   function _renderQtyOffers(){
@@ -907,14 +903,37 @@
     },
     {
       "type": "paragraph",
-      "content": "لتخصيص عروض كمية لكل منتج، أنشئ حقل ميتافيلد custom.quantity_offers بتنسيق JSON مثل: [{\"qty\":2,\"discount\":10},{\"qty\":3,\"discount\":20}]."
+      "content": "حدد نسبة الخصم لكل كمية. ضع 0 لإخفاء العرض. لتخصيص لكل منتج أنشئ ميتافيلدز: custom.qty_2_discount, custom.qty_3_discount, custom.qty_4_discount"
     },
     {
-      "type": "textarea",
-      "id": "quantity_offers_json",
-      "label": "عروض الكمية الافتراضية (JSON)",
-      "default": "[{\"qty\":2,\"discount\":10},{\"qty\":3,\"discount\":20},{\"qty\":4,\"discount\":30}]",
-      "info": "مصفوفة JSON. كل عنصر يحتوي على qty (الكمية) و discount (نسبة الخصم %). مثال: [{\"qty\":2,\"discount\":10}]"
+      "type": "range",
+      "id": "qty_2_discount",
+      "min": 0,
+      "max": 50,
+      "step": 5,
+      "unit": "%",
+      "label": "خصم شراء 2 قطع",
+      "default": 10
+    },
+    {
+      "type": "range",
+      "id": "qty_3_discount",
+      "min": 0,
+      "max": 60,
+      "step": 5,
+      "unit": "%",
+      "label": "خصم شراء 3 قطع",
+      "default": 20
+    },
+    {
+      "type": "range",
+      "id": "qty_4_discount",
+      "min": 0,
+      "max": 70,
+      "step": 5,
+      "unit": "%",
+      "label": "خصم شراء 4 قطع",
+      "default": 30
     }
   ],
   "presets": [

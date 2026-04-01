@@ -48,7 +48,8 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
         "Reply briefly and clearly in Arabic script only, using natural Arabic with a little Moroccan Darija written in Arabic letters. "
         "Never use Latin transliteration for Darija. Never invent stock, policies, prices, delivery details, or order facts. "
-        "Ask at most one useful clarification question. Prefer recommending products and catalog sets that exist in the current inbox catalog. Escalate when "
+        "Default to one short message only. Use the minimum words needed, ideally one short sentence. Ask at most one useful clarification question. "
+        "Prefer recommending products and catalog sets that exist in the current inbox catalog. Escalate when "
         "the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
     ),
     "business_context": (
@@ -1264,6 +1265,16 @@ class AIAgentService:
             return {"handled": False, "skip_legacy": False, "reason": "not_test_number", "turn_id": turn_id}
 
         await self.ensure_schema()
+        if inbound_wamid and await self._has_completed_turn_for_inbound_message(workspace=ws, inbound_wa_message_id=inbound_wamid):
+            turn_id = await self._record_skip(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                reason="duplicate_inbound",
+                config=config,
+                message_obj=message_obj,
+            )
+            return {"handled": True, "skip_legacy": True, "reason": "duplicate_inbound", "turn_id": turn_id}
         meta = await self.db_manager.get_conversation_meta(user_id)
         assigned_agent = str((meta or {}).get("assigned_agent") or "").strip()
         if assigned_agent:
@@ -1688,6 +1699,18 @@ class AIAgentService:
             "total_tokens": 0,
         }
         executed_tools: list[dict[str, Any]] = []
+        send_tool_names = {
+            "send_text_reply",
+            "send_whatsapp_product_message",
+            "send_whatsapp_catalog_message",
+            "send_whatsapp_product_carousel",
+        }
+        rich_send_tool_names = {
+            "send_whatsapp_product_message",
+            "send_whatsapp_catalog_message",
+            "send_whatsapp_product_carousel",
+        }
+        send_tool_executed = False
         response_id = ""
         conv_id = ""
         final_json: dict[str, Any] | None = None
@@ -1734,6 +1757,10 @@ class AIAgentService:
             ]
             if function_calls:
                 next_items: list[dict[str, Any]] = []
+                has_rich_send_call = any(
+                    isinstance(item, dict) and str(item.get("name") or "").strip() in rich_send_tool_names
+                    for item in function_calls
+                )
                 for tool_call in function_calls:
                     name = str(tool_call.get("name") or "").strip()
                     call_id = str(tool_call.get("call_id") or "").strip()
@@ -1742,12 +1769,29 @@ class AIAgentService:
                         arguments = json.loads(raw_arguments or "{}")
                     except Exception:
                         arguments = {}
-                    tool_result = await self._execute_response_tool(
-                        name=name,
-                        arguments=arguments if isinstance(arguments, dict) else {},
-                        turn_payload=turn_payload,
-                        config=config,
-                    )
+                    if name == "send_text_reply" and has_rich_send_call:
+                        tool_result = {
+                            "ok": True,
+                            "data": {"suppressed": True, "reason": "rich_send_in_same_turn"},
+                            "source": "ai_agent",
+                            "latency_ms": 0,
+                        }
+                    elif name in send_tool_names and send_tool_executed:
+                        tool_result = {
+                            "ok": True,
+                            "data": {"suppressed": True, "reason": "single_visible_message_per_turn"},
+                            "source": "ai_agent",
+                            "latency_ms": 0,
+                        }
+                    else:
+                        tool_result = await self._execute_response_tool(
+                            name=name,
+                            arguments=arguments if isinstance(arguments, dict) else {},
+                            turn_payload=turn_payload,
+                            config=config,
+                        )
+                        if name in send_tool_names and bool(tool_result.get("ok")):
+                            send_tool_executed = True
                     executed_tools.append(
                         self._tool_entry(
                             name,
@@ -2463,6 +2507,7 @@ class AIAgentService:
             "Always write reply_text in Arabic script. You may mix standard Arabic with light Moroccan Darija, but Darija must also be written in Arabic letters, never Latin letters.\n"
             "For catalog browsing requests, use the current inbox catalog structure. Prefer a matching product set when the customer is browsing by gender, age, size, or category, and prefer specific products only when you have clear item matches.\n"
             "When you use send_whatsapp_catalog_message or send_whatsapp_product_message, put the customer-facing sentence in the tool caption and leave reply_text empty unless you intentionally want a second separate message.\n"
+            "Default to one customer-visible message per turn. Keep wording minimal and direct, usually one short sentence.\n"
             "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n"
             "Return a JSON object only with this exact shape:\n"
             "{"
@@ -2603,6 +2648,46 @@ class AIAgentService:
             return False
         return True
 
+    async def _has_completed_turn_for_inbound_message(self, *, workspace: str, inbound_wa_message_id: str) -> bool:
+        ws = self.normalize_workspace(workspace)
+        wamid = str(inbound_wa_message_id or "").strip()
+        if not wamid:
+            return False
+        async with self.db_manager._conn() as db:
+            query = self.db_manager._convert(
+                """
+                SELECT 1
+                FROM ai_turns
+                WHERE workspace = ?
+                  AND inbound_wa_message_id = ?
+                  AND turn_status = 'completed'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            if self.db_manager.use_postgres:
+                row = await db.fetchrow(query, ws, wamid)
+            else:
+                cur = await db.execute(query, (ws, wamid))
+                row = await cur.fetchone()
+            return bool(row)
+
+    def _compact_ai_text(self, text: str, *, max_chars: int = 120) -> str:
+        raw = " ".join(str(text or "").strip().split())
+        if not raw:
+            return ""
+        first_line = raw.split("\n", 1)[0].strip()
+        if first_line:
+            raw = first_line
+        for delimiter in ("؟", "!", ".", "…"):
+            if delimiter in raw:
+                raw = raw.split(delimiter, 1)[0].strip() + delimiter
+                break
+        if len(raw) <= max_chars:
+            return raw
+        shortened = raw[: max(20, max_chars)].rstrip(" ,;:.-")
+        return shortened + "…"
+
     async def _send_ai_outbound_message(
         self,
         *,
@@ -2617,7 +2702,10 @@ class AIAgentService:
             "user_id": str(user_id or "").strip(),
             "type": str(message_type or "text").strip() or "text",
             "from_me": True,
-            "message": text or "",
+            "message": self._compact_ai_text(
+                text,
+                max_chars=90 if str(message_type or "").strip() == "text" else 120,
+            ),
             "timestamp": datetime.utcnow().isoformat(),
             "temp_id": f"ai-agent:{time.time_ns()}",
             "agent_username": "ai-agent",

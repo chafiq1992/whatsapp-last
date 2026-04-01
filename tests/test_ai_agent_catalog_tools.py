@@ -235,3 +235,48 @@ def test_reply_text_is_allowed_when_no_catalog_delivery_exists():
         reply_text="مرحبا",
         action_tool_names=set(),
     ) is True
+
+
+def test_compact_ai_text_keeps_one_short_sentence():
+    service = _make_service()
+
+    compact = service._compact_ai_text("ها هو الكتالوج ديال البنات. شوفي وزيدي قولي ليا اللون.")
+
+    assert compact == "ها هو الكتالوج ديال البنات."
+
+
+@pytest.mark.asyncio
+async def test_duplicate_inbound_message_is_skipped(monkeypatch):
+    service = _make_service()
+
+    async def fake_get_config(workspace: str):
+        return {
+            **DEFAULT_AGENT_CONFIG,
+            "enabled": True,
+            "run_mode": "autonomous",
+            "_openai_api_key": "test-key",
+        }
+
+    async def fake_completed(*, workspace: str, inbound_wa_message_id: str):
+        return True
+
+    async def fake_record_skip(**kwargs):
+        return 99
+
+    service.get_config = fake_get_config
+    service.ensure_schema = _noop_customer
+    service._has_completed_turn_for_inbound_message = fake_completed
+    service._record_skip = fake_record_skip
+
+    result = await service.maybe_handle_incoming_message(
+        {
+            "user_id": "212600000000",
+            "wa_message_id": "wamid.123",
+            "type": "text",
+            "message": "سلام",
+        }
+    )
+
+    assert result["reason"] == "duplicate_inbound"
+    assert result["handled"] is True
+    assert result["skip_legacy"] is True

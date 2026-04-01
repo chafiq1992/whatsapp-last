@@ -1326,10 +1326,23 @@ class AIAgentService:
         turn_payload.update(
             await self._prefetch_catalog_context(
                 incoming_text,
+                recent_messages=recent_messages,
                 workspace=ws,
                 limit=int(config.get("catalog_results_limit") or 6),
             )
         )
+        catalog_clarification = dict(turn_payload.get("catalog_clarification") or {})
+        if effective_run_mode == "autonomous" and bool(catalog_clarification.get("needed")):
+            return await self._handle_catalog_clarification(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                requested_run_mode=requested_run_mode,
+                effective_run_mode=effective_run_mode,
+                state=state,
+                turn_payload=turn_payload,
+                clarification=catalog_clarification,
+            )
 
         started = time.perf_counter()
         response_id = ""
@@ -1389,7 +1402,7 @@ class AIAgentService:
             ]
             recommended_set_id = (
                 str(output_data.get("recommended_catalog_set_id") or "").strip()
-                or str(((turn_payload.get("preferred_catalog_set") or {}) if self._message_mentions_catalog_request(incoming_text) else {}).get("id") or "").strip()
+                or str(((turn_payload.get("preferred_catalog_set") or {}) if turn_payload.get("catalog_query") else {}).get("id") or "").strip()
             )
             auto_catalog_targets = matched_catalog_sets[:3] if matched_catalog_sets else (
                 [{"id": recommended_set_id, "name": str(output_data.get("recommended_catalog_set_name") or ((turn_payload.get("preferred_catalog_set") or {}).get("name") or "")).strip()}]
@@ -2610,6 +2623,8 @@ class AIAgentService:
 
     def _message_mentions_catalog_request(self, text: str) -> bool:
         hay = str(text or "").lower()
+        if self.tools._extract_catalog_request_specs(hay):
+            return True
         return any(
             token in hay
             for token in (
@@ -2619,12 +2634,43 @@ class AIAgentService:
             )
         )
 
-    async def _prefetch_catalog_context(self, text: str, *, workspace: str, limit: int) -> dict[str, Any]:
-        if not self._message_mentions_catalog_request(text):
+    def _build_catalog_context_query(self, text: str, recent_messages: list[dict[str, Any]] | None = None) -> str:
+        latest = " ".join(str(text or "").strip().split())
+        pieces: list[str] = []
+        seen: set[str] = set()
+        history: list[str] = []
+        for message in recent_messages or []:
+            if bool(message.get("from_me")):
+                continue
+            body = " ".join(str(message.get("message") or "").strip().split())
+            if not body or body.lower() in seen or not self._message_mentions_catalog_request(body):
+                continue
+            history.append(body)
+            seen.add(body.lower())
+            if len(history) >= 3:
+                break
+        for body in reversed(history):
+            pieces.append(body)
+        if latest:
+            latest_key = latest.lower()
+            if latest_key not in seen and (self._message_mentions_catalog_request(latest) or pieces):
+                pieces.append(latest)
+        return " ".join(part for part in pieces if part).strip()
+
+    async def _prefetch_catalog_context(
+        self,
+        text: str,
+        *,
+        recent_messages: list[dict[str, Any]] | None = None,
+        workspace: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        catalog_query = self._build_catalog_context_query(text, recent_messages)
+        if not catalog_query:
             return {}
         try:
             result = await self.tools.search_catalog_products(
-                query=str(text or ""),
+                query=catalog_query,
                 workspace=workspace,
                 limit=max(1, min(int(limit or 6), 12)),
             )
@@ -2632,12 +2678,116 @@ class AIAgentService:
                 return {}
             data = result.data or {}
             return {
+                "catalog_query": catalog_query,
                 "catalog_candidates": list(data.get("products") or []),
                 "matched_catalog_sets": list(data.get("matched_sets") or []),
                 "preferred_catalog_set": data.get("preferred_set") or None,
+                "catalog_clarification": data.get("clarification") or None,
             }
         except Exception:
             return {}
+
+    def _build_catalog_clarification_reply(self, clarification: dict[str, Any]) -> str:
+        reason = str((clarification or {}).get("reason") or "").strip()
+        age = int(clarification.get("age") or 0)
+        size = int(clarification.get("size") or 0)
+        if reason == "missing_gender_for_age" and age > 0:
+            return f"واش باغية حوايج ديال البنات ولا الأولاد لعمر {age} سنين؟ وإذا بغيتي حتى الصبابط عطيني القياس ونصيفط ليك بجوج."
+        if reason == "missing_gender_for_size" and size > 0:
+            return f"واش هاد قياس {size} ديال البنات ولا الأولاد؟ وإذا بغيتي حتى الحوايج عطيني العمر."
+        return "واش باغية ديال البنات ولا الأولاد؟"
+
+    async def _handle_catalog_clarification(
+        self,
+        *,
+        workspace: str,
+        user_id: str,
+        inbound_wa_message_id: str,
+        requested_run_mode: str,
+        effective_run_mode: str,
+        state: dict[str, Any],
+        turn_payload: dict[str, Any],
+        clarification: dict[str, Any],
+    ) -> dict[str, Any]:
+        reply_text = self._build_catalog_clarification_reply(clarification)
+        started = time.perf_counter()
+        await self._send_ai_outbound_message(
+            user_id=user_id,
+            message_type="text",
+            text=reply_text,
+        )
+        output_data = {
+            "language": "ar",
+            "intent": "product_discovery",
+            "emotion": "neutral",
+            "confidence": 0.99,
+            "reply_text": reply_text,
+            "should_handoff": False,
+            "conversation_status": "bot_managed",
+            "entities": {
+                "gender": None,
+                "child_age": clarification.get("age"),
+                "size": clarification.get("size"),
+            },
+            "state_summary": str(state.get("summary") or "").strip(),
+            "handoff_reason": "",
+        }
+        new_state = {
+            "status": "bot_managed",
+            "owner_type": "bot",
+            "summary": str(state.get("summary") or "").strip(),
+            "last_language": "ar",
+            "last_intent": "product_discovery",
+            "slots_json": output_data.get("entities") or {},
+            "risk_json": {
+                "emotion": "neutral",
+                "urgency": "",
+                "handoff_reason": "",
+                "should_handoff": False,
+            },
+            "counters_json": {
+                **(state.get("counters_json") or {}),
+                "turns": int((state.get("counters_json") or {}).get("turns") or 0) + 1,
+            },
+            "openai_conversation_id": str(state.get("openai_conversation_id") or "") or None,
+        }
+        await self._upsert_conversation_state(user_id=user_id, workspace=workspace, state=new_state)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        turn_id = await self._log_turn(
+            workspace=workspace,
+            user_id=user_id,
+            inbound_wa_message_id=inbound_wa_message_id,
+            turn_mode=effective_run_mode,
+            turn_status="completed",
+            detected_language="ar",
+            detected_intent="product_discovery",
+            emotion="neutral",
+            confidence=0.99,
+            action="catalog_clarification",
+            reply_text=reply_text,
+            openai_response_id="",
+            openai_conversation_id=str(state.get("openai_conversation_id") or "").strip(),
+            request_json=turn_payload,
+            response_json=output_data,
+            usage_json={},
+            error_text=None,
+            latency_ms=latency_ms,
+        )
+        await self._log_tool(
+            workspace=workspace,
+            user_id=user_id,
+            turn_id=turn_id,
+            tool_name="catalog_clarification",
+            ok=True,
+            request_json={
+                "clarification": clarification,
+                "requested_run_mode": requested_run_mode,
+            },
+            response_json={"reply_text": reply_text},
+            error_code=None,
+            latency_ms=latency_ms,
+        )
+        return {"handled": True, "skip_legacy": True, "reason": "catalog_clarification", "turn_id": turn_id}
 
     def _should_send_reply_text_separately(
         self,

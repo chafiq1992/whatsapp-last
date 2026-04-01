@@ -40,6 +40,7 @@ async def _noop_meta(*args, **kwargs):
 
 def _make_toolbox() -> AIAgentToolbox:
     sets = [
+        {"id": "boys-2ans", "name": "Boys 2 ans"},
         {"id": "girls-2ans", "name": "Girls 2 ans"},
         {"id": "girls-24", "name": "Girls Shoes 24"},
         {"id": "boys-22", "name": "Boys Shoes 22"},
@@ -52,6 +53,15 @@ def _make_toolbox() -> AIAgentToolbox:
         {"label": "All", "type": "all"},
     ]
     set_products = {
+        "boys-2ans": [
+            {
+                "retailer_id": "B-2A-1",
+                "name": "Boys Outfit 2 ans",
+                "availability": "in stock",
+                "quantity": 4,
+                "images": [],
+            }
+        ],
         "girls-2ans": [
             {
                 "retailer_id": "G-2A-1",
@@ -212,6 +222,26 @@ async def test_search_catalog_products_prefers_exact_age_set_over_full_catalog()
 
 
 @pytest.mark.asyncio
+async def test_search_catalog_products_requests_clarification_for_age_only_query():
+    toolbox = _make_toolbox()
+
+    result = await toolbox.search_catalog_products(
+        query="2 years",
+        workspace="default",
+        limit=4,
+    )
+
+    assert result.ok is True
+    assert result.data["matched_sets"] == []
+    assert result.data["products"] == []
+    assert result.data["clarification"] == {
+        "needed": True,
+        "reason": "missing_gender_for_age",
+        "age": 2,
+    }
+
+
+@pytest.mark.asyncio
 async def test_search_catalog_products_returns_multiple_exact_sets_for_multi_request():
     toolbox = _make_toolbox()
 
@@ -263,6 +293,43 @@ async def test_prefetch_catalog_context_returns_preferred_set_and_candidates():
     assert context["preferred_catalog_set"] == {"id": "girls-25", "name": "Girls 25"}
     assert context["matched_catalog_sets"] == [{"id": "girls-25", "name": "Girls 25"}]
     assert context["catalog_candidates"][0]["retailer_id"] == "G-25-1"
+
+
+@pytest.mark.asyncio
+async def test_prefetch_catalog_context_combines_recent_customer_measurements():
+    service = _make_service()
+    captured: list[str] = []
+
+    async def fake_search_catalog_products(*, query: str, workspace: str, limit: int):
+        captured.append(query)
+
+        class _Result:
+            ok = True
+            data = {
+                "products": [],
+                "matched_sets": [{"id": "girls-2ans", "name": "Girls 2 ans"}],
+                "preferred_set": {"id": "girls-2ans", "name": "Girls 2 ans"},
+                "clarification": None,
+            }
+
+        return _Result()
+
+    service.tools.search_catalog_products = fake_search_catalog_products
+
+    context = await service._prefetch_catalog_context(
+        "girls only clothes",
+        recent_messages=[
+            {"from_me": False, "message": "2 years"},
+            {"from_me": True, "message": "question"},
+        ],
+        workspace="default",
+        limit=6,
+    )
+
+    assert "2 years" in captured[0]
+    assert "girls only clothes" in captured[0]
+    assert context["catalog_query"] == captured[0]
+    assert context["preferred_catalog_set"] == {"id": "girls-2ans", "name": "Girls 2 ans"}
 
 
 def test_reply_text_is_suppressed_when_catalog_send_is_planned():
@@ -331,3 +398,108 @@ async def test_duplicate_inbound_message_is_skipped(monkeypatch):
     assert result["reason"] == "duplicate_inbound"
     assert result["handled"] is True
     assert result["skip_legacy"] is True
+
+
+@pytest.mark.asyncio
+async def test_age_only_message_sends_short_catalog_clarification():
+    service = _make_service()
+    sent_messages: list[dict[str, str]] = []
+    logged_turns: list[dict[str, object]] = []
+
+    async def fake_get_config(workspace: str):
+        return {
+            **DEFAULT_AGENT_CONFIG,
+            "enabled": True,
+            "run_mode": "autonomous",
+            "_openai_api_key": "test-key",
+            "catalog_results_limit": 6,
+        }
+
+    async def fake_not_completed(*, workspace: str, inbound_wa_message_id: str):
+        return False
+
+    async def fake_get_state(*, user_id: str, workspace: str):
+        return {
+            "status": "bot_managed",
+            "owner_type": "bot",
+            "summary": "",
+            "last_language": "",
+            "last_intent": "",
+            "slots_json": {},
+            "risk_json": {},
+            "counters_json": {"turns": 0},
+            "openai_conversation_id": None,
+        }
+
+    async def fake_eval_gate(workspace: str, config: dict[str, object]):
+        return {
+            "enabled": True,
+            "blocking": False,
+            "reason_code": "ok",
+            "message": "",
+        }
+
+    async def fake_get_messages(user_id: str, offset: int = 0, limit: int = 12):
+        return [{"from_me": False, "message": "2 years"}]
+
+    async def fake_search_catalog_products(*, query: str, workspace: str, limit: int):
+        class _Result:
+            ok = True
+            data = {
+                "products": [],
+                "matched_sets": [],
+                "preferred_set": None,
+                "clarification": {
+                    "needed": True,
+                    "reason": "missing_gender_for_age",
+                    "age": 2,
+                },
+            }
+
+        return _Result()
+
+    async def fake_send_ai_outbound_message(*, user_id: str, message_type: str, text: str = "", **kwargs):
+        sent_messages.append({"user_id": user_id, "message_type": message_type, "text": text})
+        return {"id": 1}
+
+    async def fake_upsert_conversation_state(*, user_id: str, workspace: str, state: dict[str, object]):
+        return None
+
+    async def fake_log_turn(**kwargs):
+        logged_turns.append(kwargs)
+        return 321
+
+    async def fake_log_tool(**kwargs):
+        return None
+
+    service.get_config = fake_get_config
+    service.ensure_schema = _noop_customer
+    service._has_completed_turn_for_inbound_message = fake_not_completed
+    service._get_conversation_state = fake_get_state
+    service.get_autonomous_eval_gate_status = fake_eval_gate
+    service.db_manager.get_messages = fake_get_messages
+    service.tools.search_catalog_products = fake_search_catalog_products
+    service._send_ai_outbound_message = fake_send_ai_outbound_message
+    service._upsert_conversation_state = fake_upsert_conversation_state
+    service._log_turn = fake_log_turn
+    service._log_tool = fake_log_tool
+
+    result = await service.maybe_handle_incoming_message(
+        {
+            "user_id": "212600000000",
+            "wa_message_id": "wamid.456",
+            "type": "text",
+            "message": "2 years",
+        }
+    )
+
+    assert result["reason"] == "catalog_clarification"
+    assert result["handled"] is True
+    assert sent_messages == [
+        {
+            "user_id": "212600000000",
+            "message_type": "text",
+            "text": "واش باغية حوايج ديال البنات ولا الأولاد لعمر 2 سنين؟ وإذا بغيتي حتى الصبابط عطيني القياس ونصيفط ليك بجوج.",
+        }
+    ]
+    assert logged_turns[0]["action"] == "catalog_clarification"

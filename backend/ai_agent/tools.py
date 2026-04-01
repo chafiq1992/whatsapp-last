@@ -185,6 +185,19 @@ class AIAgentToolbox:
     async def search_catalog_products(self, *, query: str, workspace: str, limit: int = 6) -> ToolResult:
         started = time.perf_counter()
         ws = self.normalize_workspace(workspace)
+        request_specs = self._extract_catalog_request_specs(query)
+        clarification = self._determine_catalog_clarification(request_specs)
+        if clarification:
+            return self._ok(
+                {
+                    "products": [],
+                    "matched_sets": [],
+                    "preferred_set": None,
+                    "clarification": clarification,
+                },
+                "whatsapp_catalog",
+                started,
+            )
         try:
             scoped_sets = await self._select_catalog_sets(query=query, workspace=ws, limit=limit)
             products = await self._load_catalog_scope_products(workspace=ws, scoped_sets=scoped_sets, limit=limit)
@@ -239,6 +252,7 @@ class AIAgentToolbox:
                 "products": [row[1] for row in scored[: max(1, min(int(limit), 20))]],
                 "matched_sets": matched_sets,
                 "preferred_set": matched_sets[0] if matched_sets else None,
+                "clarification": None,
             },
             "whatsapp_catalog",
             started,
@@ -506,6 +520,27 @@ class AIAgentToolbox:
                 }
             )
         return specs
+
+    def _determine_catalog_clarification(self, request_specs: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if len(request_specs) != 1:
+            return None
+        spec = request_specs[0]
+        gender = str(spec.get("gender") or "").strip()
+        ages = [int(v) for v in (spec.get("ages") or []) if isinstance(v, int)]
+        sizes = [int(v) for v in (spec.get("sizes") or []) if isinstance(v, int)]
+        if ages and not gender and not sizes:
+            return {
+                "needed": True,
+                "reason": "missing_gender_for_age",
+                "age": ages[0],
+            }
+        if sizes and not gender and not ages:
+            return {
+                "needed": True,
+                "reason": "missing_gender_for_size",
+                "size": sizes[0],
+            }
+        return None
 
     def _split_catalog_query_segments(self, query: str) -> list[str]:
         raw_segments = re.split(r"\s+(?:and|et)\s+|\s+و\s+|[،,;+]+", str(query or "").lower())

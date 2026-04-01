@@ -1368,6 +1368,34 @@ class AIAgentService:
             handled = False
             skip_legacy = False
             handoff_meta: dict[str, Any] = {}
+            recommended_set_id = (
+                str(output_data.get("recommended_catalog_set_id") or "").strip()
+                or str(((turn_payload.get("preferred_catalog_set") or {}) if self._message_mentions_catalog_request(incoming_text) else {}).get("id") or "").strip()
+            )
+            auto_catalog_set_possible = bool(
+                effective_mode == "autonomous"
+                and config.get("send_catalog_when_possible")
+                and recommended_set_id
+                and "send_whatsapp_catalog_message" not in action_tool_names
+            )
+            auto_product_ids = [
+                str(x).strip()
+                for x in (output_data.get("recommended_product_ids") or [])
+                if str(x).strip()
+            ][: max(1, min(6, int(config.get("catalog_results_limit") or 6)))]
+            auto_product_carousel_possible = bool(
+                effective_mode == "autonomous"
+                and config.get("send_catalog_when_possible")
+                and auto_product_ids
+                and "send_whatsapp_product_carousel" not in action_tool_names
+                and not auto_catalog_set_possible
+            )
+            send_reply_text_separately = self._should_send_reply_text_separately(
+                reply_text=reply_text,
+                action_tool_names=action_tool_names,
+                auto_catalog_set_possible=auto_catalog_set_possible,
+                auto_product_carousel_possible=auto_product_carousel_possible,
+            )
             if effective_mode == "autonomous":
                 if should_handoff:
                     if reply_text and "send_text_reply" not in action_tool_names:
@@ -1384,7 +1412,25 @@ class AIAgentService:
                     action = "handoff"
                     handled = True
                     skip_legacy = True
-                elif reply_text and "send_text_reply" not in action_tool_names:
+                elif auto_catalog_set_possible:
+                    await self._send_ai_outbound_message(
+                        user_id=user_id,
+                        message_type="catalog_set",
+                        text=reply_text or str(output_data.get("recommended_catalog_set_name") or ((turn_payload.get("preferred_catalog_set") or {}).get("name") or "")).strip(),
+                        set_id=recommended_set_id,
+                    )
+                    action = "send_catalog_set"
+                    handled = True
+                    skip_legacy = True
+                elif auto_product_carousel_possible:
+                    try:
+                        await self._send_ai_product_carousel(user_id=user_id, product_ids=auto_product_ids)
+                        action = "send_product_carousel"
+                    except Exception as catalog_exc:
+                        self.log.warning("ai_agent catalog send failed workspace=%s user=%s err=%s", ws, user_id, catalog_exc)
+                    handled = True
+                    skip_legacy = True
+                elif send_reply_text_separately:
                     await self._send_ai_outbound_message(
                         user_id=user_id,
                         message_type="text",
@@ -1393,45 +1439,6 @@ class AIAgentService:
                     action = "send_text_reply"
                     handled = True
                     skip_legacy = True
-                    recommended_set_id = (
-                        str(output_data.get("recommended_catalog_set_id") or "").strip()
-                        or str(((turn_payload.get("preferred_catalog_set") or {}) if self._message_mentions_catalog_request(incoming_text) else {}).get("id") or "").strip()
-                    )
-                    if bool(config.get("send_catalog_when_possible")) and recommended_set_id and "send_whatsapp_catalog_message" not in action_tool_names:
-                        try:
-                            await self._send_ai_outbound_message(
-                                user_id=user_id,
-                                message_type="catalog_set",
-                                text=str(output_data.get("recommended_catalog_set_name") or ((turn_payload.get("preferred_catalog_set") or {}).get("name") or "")).strip() or reply_text,
-                                set_id=recommended_set_id,
-                            )
-                            action = "send_text_plus_catalog_set"
-                        except Exception as catalog_set_exc:
-                            self.log.warning(
-                                "ai_agent catalog set send failed workspace=%s user=%s set_id=%s err=%s",
-                                ws,
-                                user_id,
-                                recommended_set_id,
-                                catalog_set_exc,
-                            )
-                    elif bool(config.get("send_catalog_when_possible")) and output_data.get("recommended_product_ids") and "send_whatsapp_product_carousel" not in action_tool_names:
-                        product_ids = [
-                            str(x).strip()
-                            for x in (output_data.get("recommended_product_ids") or [])
-                            if str(x).strip()
-                        ][: max(1, min(6, int(config.get("catalog_results_limit") or 6)))]
-                        if product_ids:
-                            try:
-                                for product_id in product_ids:
-                                    await self._send_ai_outbound_message(
-                                        user_id=user_id,
-                                        message_type="catalog_item",
-                                        text="",
-                                        product_retailer_id=product_id,
-                                    )
-                                action = "send_text_plus_catalog"
-                            except Exception as catalog_exc:
-                                self.log.warning("ai_agent catalog send failed workspace=%s user=%s err=%s", ws, user_id, catalog_exc)
                 elif send_action_used:
                     handled = True
                     skip_legacy = True
@@ -2455,6 +2462,7 @@ class AIAgentService:
             "Before answering delivery, COD, exchange, return, refund, or complaint-policy questions, call get_business_policies and rely only on approved policies.\n"
             "Always write reply_text in Arabic script. You may mix standard Arabic with light Moroccan Darija, but Darija must also be written in Arabic letters, never Latin letters.\n"
             "For catalog browsing requests, use the current inbox catalog structure. Prefer a matching product set when the customer is browsing by gender, age, size, or category, and prefer specific products only when you have clear item matches.\n"
+            "When you use send_whatsapp_catalog_message or send_whatsapp_product_message, put the customer-facing sentence in the tool caption and leave reply_text empty unless you intentionally want a second separate message.\n"
             "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n"
             "Return a JSON object only with this exact shape:\n"
             "{"
@@ -2572,6 +2580,28 @@ class AIAgentService:
             }
         except Exception:
             return {}
+
+    def _should_send_reply_text_separately(
+        self,
+        *,
+        reply_text: str,
+        action_tool_names: set[str],
+        auto_catalog_set_possible: bool = False,
+        auto_product_carousel_possible: bool = False,
+    ) -> bool:
+        if not str(reply_text or "").strip():
+            return False
+        if "send_text_reply" in action_tool_names:
+            return False
+        if action_tool_names.intersection({
+            "send_whatsapp_product_message",
+            "send_whatsapp_catalog_message",
+            "send_whatsapp_product_carousel",
+        }):
+            return False
+        if auto_catalog_set_possible or auto_product_carousel_possible:
+            return False
+        return True
 
     async def _send_ai_outbound_message(
         self,

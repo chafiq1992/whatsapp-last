@@ -212,3 +212,26 @@ async def test_prefetch_catalog_context_returns_preferred_set_and_candidates():
     assert context["preferred_catalog_set"] == {"id": "girls-25", "name": "Girls 25"}
     assert context["matched_catalog_sets"] == [{"id": "girls-25", "name": "Girls 25"}]
     assert context["catalog_candidates"][0]["retailer_id"] == "G-25-1"
+
+
+def test_reply_text_is_suppressed_when_catalog_send_is_planned():
+    service = _make_service()
+
+    assert service._should_send_reply_text_separately(
+        reply_text="ها هو الكتالوج",
+        action_tool_names={"send_whatsapp_catalog_message"},
+    ) is False
+    assert service._should_send_reply_text_separately(
+        reply_text="ها هو الكتالوج",
+        action_tool_names=set(),
+        auto_catalog_set_possible=True,
+    ) is False
+
+
+def test_reply_text_is_allowed_when_no_catalog_delivery_exists():
+    service = _make_service()
+
+    assert service._should_send_reply_text_separately(
+        reply_text="مرحبا",
+        action_tool_names=set(),
+    ) is True

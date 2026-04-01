@@ -18,7 +18,7 @@ from .evals import load_eval_cases, score_results
 DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "enabled": False,
     "run_mode": "shadow",
-    "model": "gpt-5.1",
+    "model": "gpt-5.4-mini",
     "api_base": "https://api.openai.com/v1",
     "max_output_tokens": 900,
     "max_context_messages": 12,
@@ -46,8 +46,8 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "test_numbers": [],
     "instructions": (
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
-        "Reply briefly and clearly in Arabic script only, using natural Arabic with a little Moroccan Darija written in Arabic letters. "
-        "Never use Latin transliteration for Darija. Never invent stock, policies, prices, delivery details, or order facts. "
+        "Reply briefly and clearly in standard Arabic only, using Arabic script only. "
+        "Do not use Darija, slang, or Latin transliteration. Never invent stock, policies, prices, delivery details, or order facts. "
         "Default to one short message only. Use the minimum words needed, ideally one short sentence. Ask at most one useful clarification question. "
         "Prefer recommending products and catalog sets that exist in the current inbox catalog. Escalate when "
         "the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
@@ -288,6 +288,8 @@ class AIAgentService:
         if not isinstance(payload, dict):
             payload = {}
         config = {**DEFAULT_AGENT_CONFIG, **payload}
+        if str(config.get("model") or "").strip().lower() in {"", "gpt-5.1"}:
+            config["model"] = DEFAULT_AGENT_CONFIG["model"]
         config["test_numbers"] = self._normalize_test_numbers(config.get("test_numbers"))
         config["autonomous_blocked_intents"] = self._normalize_string_list(config.get("autonomous_blocked_intents"))
         enc = str(payload.get("openai_api_key_enc") or "").strip()
@@ -309,6 +311,8 @@ class AIAgentService:
         if not isinstance(current, dict):
             current = {}
         merged = {**DEFAULT_AGENT_CONFIG, **current}
+        if str(merged.get("model") or "").strip().lower() in {"", "gpt-5.1"}:
+            merged["model"] = DEFAULT_AGENT_CONFIG["model"]
         for key in (
             "enabled",
             "run_mode",
@@ -1408,6 +1412,10 @@ class AIAgentService:
                 [{"id": recommended_set_id, "name": str(output_data.get("recommended_catalog_set_name") or ((turn_payload.get("preferred_catalog_set") or {}).get("name") or "")).strip()}]
                 if recommended_set_id else []
             )
+            auto_catalog_targets = [
+                target for target in auto_catalog_targets
+                if not self._was_recent_catalog_set_sent(recent_messages, str(target.get("id") or "").strip(), limit=6)
+            ][:3]
             auto_catalog_set_possible = bool(
                 effective_mode == "autonomous"
                 and config.get("send_catalog_when_possible")
@@ -1468,12 +1476,15 @@ class AIAgentService:
                     handled = True
                     skip_legacy = True
                 elif send_reply_text_separately:
-                    await self._send_ai_outbound_message(
-                        user_id=user_id,
-                        message_type="text",
-                        text=reply_text,
-                    )
-                    action = "send_text_reply"
+                    if not self._was_recent_ai_text_sent(recent_messages, reply_text, limit=4):
+                        await self._send_ai_outbound_message(
+                            user_id=user_id,
+                            message_type="text",
+                            text=reply_text,
+                        )
+                        action = "send_text_reply"
+                    else:
+                        action = "send_text_reply_suppressed"
                     handled = True
                     skip_legacy = True
                 elif send_action_used:
@@ -2530,7 +2541,7 @@ class AIAgentService:
             f"Business context:\n{config.get('business_context')}\n\n"
             "You have access to tools for customer lookup, orders, delivery, policies, stock, catalog messages, human assignment, and conversation status.\n"
             "Before answering delivery, COD, exchange, return, refund, or complaint-policy questions, call get_business_policies and rely only on approved policies.\n"
-            "Always write reply_text in Arabic script. You may mix standard Arabic with light Moroccan Darija, but Darija must also be written in Arabic letters, never Latin letters.\n"
+            "Always write reply_text in standard Arabic only, using Arabic script only. Do not use Darija or Latin letters.\n"
             "For catalog browsing requests, use the current inbox catalog structure. Prefer a matching product set when the customer is browsing by gender, age, size, or category, and prefer specific products only when you have clear item matches.\n"
             "When you use send_whatsapp_catalog_message or send_whatsapp_product_message, put the customer-facing sentence in the tool caption and leave reply_text empty unless you intentionally want a second separate message.\n"
             "Default to one customer-visible message per turn. Keep wording minimal and direct, usually one short sentence.\n"
@@ -2657,6 +2668,39 @@ class AIAgentService:
                 pieces.append(latest)
         return " ".join(part for part in pieces if part).strip()
 
+    def _normalized_message_text(self, text: str) -> str:
+        return " ".join(str(text or "").strip().split()).lower()
+
+    def _was_recent_ai_text_sent(self, recent_messages: list[dict[str, Any]] | None, text: str, *, limit: int = 6) -> bool:
+        target = self._normalized_message_text(text)
+        if not target:
+            return False
+        checked = 0
+        for message in recent_messages or []:
+            if not bool(message.get("from_me")):
+                continue
+            checked += 1
+            if self._normalized_message_text(message.get("message") or "") == target:
+                return True
+            if checked >= max(1, int(limit or 6)):
+                break
+        return False
+
+    def _was_recent_catalog_set_sent(self, recent_messages: list[dict[str, Any]] | None, set_id: str, *, limit: int = 6) -> bool:
+        target = str(set_id or "").strip()
+        if not target:
+            return False
+        checked = 0
+        for message in recent_messages or []:
+            if not bool(message.get("from_me")):
+                continue
+            checked += 1
+            if str(message.get("set_id") or "") == target:
+                return True
+            if checked >= max(1, int(limit or 6)):
+                break
+        return False
+
     async def _prefetch_catalog_context(
         self,
         text: str,
@@ -2692,10 +2736,10 @@ class AIAgentService:
         age = int(clarification.get("age") or 0)
         size = int(clarification.get("size") or 0)
         if reason == "missing_gender_for_age" and age > 0:
-            return f"واش باغية حوايج ديال البنات ولا الأولاد لعمر {age} سنين؟ وإذا بغيتي حتى الصبابط عطيني القياس ونصيفط ليك بجوج."
+            return f"هل تريدين ملابس البنات أم الأولاد لعمر {age} سنوات؟ وإذا كنت تريدين الأحذية أيضًا فأرسلي القياس."
         if reason == "missing_gender_for_size" and size > 0:
-            return f"واش هاد قياس {size} ديال البنات ولا الأولاد؟ وإذا بغيتي حتى الحوايج عطيني العمر."
-        return "واش باغية ديال البنات ولا الأولاد؟"
+            return f"هل هذا قياس {size} للبنات أم للأولاد؟ وإذا كنت تريدين الملابس أيضًا فأرسلي العمر."
+        return "هل تريدين منتجات البنات أم الأولاد؟"
 
     async def _handle_catalog_clarification(
         self,
@@ -2711,17 +2755,19 @@ class AIAgentService:
     ) -> dict[str, Any]:
         reply_text = self._build_catalog_clarification_reply(clarification)
         started = time.perf_counter()
-        await self._send_ai_outbound_message(
-            user_id=user_id,
-            message_type="text",
-            text=reply_text,
-        )
+        suppressed_duplicate = self._was_recent_ai_text_sent(turn_payload.get("recent_messages") or [], reply_text, limit=4)
+        if not suppressed_duplicate:
+            await self._send_ai_outbound_message(
+                user_id=user_id,
+                message_type="text",
+                text=reply_text,
+            )
         output_data = {
             "language": "ar",
             "intent": "product_discovery",
             "emotion": "neutral",
             "confidence": 0.99,
-            "reply_text": reply_text,
+            "reply_text": "" if suppressed_duplicate else reply_text,
             "should_handoff": False,
             "conversation_status": "bot_managed",
             "entities": {
@@ -2763,8 +2809,8 @@ class AIAgentService:
             detected_intent="product_discovery",
             emotion="neutral",
             confidence=0.99,
-            action="catalog_clarification",
-            reply_text=reply_text,
+            action="catalog_clarification_suppressed" if suppressed_duplicate else "catalog_clarification",
+            reply_text="" if suppressed_duplicate else reply_text,
             openai_response_id="",
             openai_conversation_id=str(state.get("openai_conversation_id") or "").strip(),
             request_json=turn_payload,
@@ -2783,11 +2829,16 @@ class AIAgentService:
                 "clarification": clarification,
                 "requested_run_mode": requested_run_mode,
             },
-            response_json={"reply_text": reply_text},
+            response_json={"reply_text": reply_text, "suppressed_duplicate": suppressed_duplicate},
             error_code=None,
             latency_ms=latency_ms,
         )
-        return {"handled": True, "skip_legacy": True, "reason": "catalog_clarification", "turn_id": turn_id}
+        return {
+            "handled": True,
+            "skip_legacy": True,
+            "reason": "catalog_clarification_suppressed" if suppressed_duplicate else "catalog_clarification",
+            "turn_id": turn_id,
+        }
 
     def _should_send_reply_text_separately(
         self,

@@ -222,6 +222,21 @@ async def test_search_catalog_products_prefers_exact_age_set_over_full_catalog()
 
 
 @pytest.mark.asyncio
+async def test_search_catalog_products_understands_latin_darija_customer_request():
+    toolbox = _make_toolbox()
+
+    result = await toolbox.search_catalog_products(
+        query="9yass bniya 2ans lbissat",
+        workspace="default",
+        limit=4,
+    )
+
+    assert result.ok is True
+    assert result.data["clarification"] is None
+    assert result.data["matched_sets"] == [{"id": "girls-2ans", "name": "Girls 2 ans"}]
+
+
+@pytest.mark.asyncio
 async def test_search_catalog_products_requests_clarification_for_age_only_query():
     toolbox = _make_toolbox()
 
@@ -262,7 +277,7 @@ def test_system_prompt_forces_arabic_script_and_catalog_set_fields():
     prompt = service._build_system_prompt(DEFAULT_AGENT_CONFIG)
 
     assert "Arabic script" in prompt
-    assert "never Latin letters" in prompt
+    assert "standard Arabic only" in prompt
     assert "\"recommended_catalog_set_id\":\"\"" in prompt
     assert "\"recommended_catalog_set_name\":\"\"" in prompt
 
@@ -361,6 +376,16 @@ def test_compact_ai_text_keeps_one_short_sentence():
     compact = service._compact_ai_text("ها هو الكتالوج ديال البنات. شوفي وزيدي قولي ليا اللون.")
 
     assert compact == "ها هو الكتالوج ديال البنات."
+
+
+def test_catalog_clarification_reply_uses_standard_arabic():
+    service = _make_service()
+
+    reply = service._build_catalog_clarification_reply(
+        {"needed": True, "reason": "missing_gender_for_age", "age": 2}
+    )
+
+    assert reply == "\u0647\u0644 \u062a\u0631\u064a\u062f\u064a\u0646 \u0645\u0644\u0627\u0628\u0633 \u0627\u0644\u0628\u0646\u0627\u062a \u0623\u0645 \u0627\u0644\u0623\u0648\u0644\u0627\u062f \u0644\u0639\u0645\u0631 2 \u0633\u0646\u0648\u0627\u062a\u061f \u0648\u0625\u0630\u0627 \u0643\u0646\u062a \u062a\u0631\u064a\u062f\u064a\u0646 \u0627\u0644\u0623\u062d\u0630\u064a\u0629 \u0623\u064a\u0636\u064b\u0627 \u0641\u0623\u0631\u0633\u0644\u064a \u0627\u0644\u0642\u064a\u0627\u0633."
 
 
 @pytest.mark.asyncio
@@ -500,6 +525,225 @@ async def test_age_only_message_sends_short_catalog_clarification():
             "user_id": "212600000000",
             "message_type": "text",
             "text": "واش باغية حوايج ديال البنات ولا الأولاد لعمر 2 سنين؟ وإذا بغيتي حتى الصبابط عطيني القياس ونصيفط ليك بجوج.",
+        }
+    ]
+    assert logged_turns[0]["action"] == "catalog_clarification"
+
+
+def test_catalog_clarification_reply_uses_standard_arabic_new():
+    service = _make_service()
+
+    reply = service._build_catalog_clarification_reply(
+        {"needed": True, "reason": "missing_gender_for_age", "age": 2}
+    )
+
+    assert reply == "\u0647\u0644 \u062a\u0631\u064a\u062f\u064a\u0646 \u0645\u0644\u0627\u0628\u0633 \u0627\u0644\u0628\u0646\u0627\u062a \u0623\u0645 \u0627\u0644\u0623\u0648\u0644\u0627\u062f \u0644\u0639\u0645\u0631 2 \u0633\u0646\u0648\u0627\u062a\u061f \u0648\u0625\u0630\u0627 \u0643\u0646\u062a \u062a\u0631\u064a\u062f\u064a\u0646 \u0627\u0644\u0623\u062d\u0630\u064a\u0629 \u0623\u064a\u0636\u064b\u0627 \u0641\u0623\u0631\u0633\u0644\u064a \u0627\u0644\u0642\u064a\u0627\u0633."
+
+
+@pytest.mark.asyncio
+async def test_duplicate_catalog_clarification_is_suppressed_new():
+    service = _make_service()
+    sent_messages: list[dict[str, str]] = []
+    logged_turns: list[dict[str, object]] = []
+
+    async def fake_get_config(workspace: str):
+        return {
+            **DEFAULT_AGENT_CONFIG,
+            "enabled": True,
+            "run_mode": "autonomous",
+            "_openai_api_key": "test-key",
+            "catalog_results_limit": 6,
+        }
+
+    async def fake_not_completed(*, workspace: str, inbound_wa_message_id: str):
+        return False
+
+    async def fake_get_state(*, user_id: str, workspace: str):
+        return {
+            "status": "bot_managed",
+            "owner_type": "bot",
+            "summary": "",
+            "last_language": "",
+            "last_intent": "",
+            "slots_json": {},
+            "risk_json": {},
+            "counters_json": {"turns": 1},
+            "openai_conversation_id": None,
+        }
+
+    async def fake_eval_gate(workspace: str, config: dict[str, object]):
+        return {
+            "enabled": True,
+            "blocking": False,
+            "reason_code": "ok",
+            "message": "",
+        }
+
+    async def fake_get_messages(user_id: str, offset: int = 0, limit: int = 12):
+        return [
+            {
+                "from_me": True,
+                "message": "\u0647\u0644 \u062a\u0631\u064a\u062f\u064a\u0646 \u0645\u0644\u0627\u0628\u0633 \u0627\u0644\u0628\u0646\u0627\u062a \u0623\u0645 \u0627\u0644\u0623\u0648\u0644\u0627\u062f \u0644\u0639\u0645\u0631 2 \u0633\u0646\u0648\u0627\u062a\u061f \u0648\u0625\u0630\u0627 \u0643\u0646\u062a \u062a\u0631\u064a\u062f\u064a\u0646 \u0627\u0644\u0623\u062d\u0630\u064a\u0629 \u0623\u064a\u0636\u064b\u0627 \u0641\u0623\u0631\u0633\u0644\u064a \u0627\u0644\u0642\u064a\u0627\u0633.",
+            },
+            {"from_me": False, "message": "2 years"},
+        ]
+
+    async def fake_search_catalog_products(*, query: str, workspace: str, limit: int):
+        class _Result:
+            ok = True
+            data = {
+                "products": [],
+                "matched_sets": [],
+                "preferred_set": None,
+                "clarification": {
+                    "needed": True,
+                    "reason": "missing_gender_for_age",
+                    "age": 2,
+                },
+            }
+
+        return _Result()
+
+    async def fake_send_ai_outbound_message(*, user_id: str, message_type: str, text: str = "", **kwargs):
+        sent_messages.append({"user_id": user_id, "message_type": message_type, "text": text})
+        return {"id": 1}
+
+    async def fake_upsert_conversation_state(*, user_id: str, workspace: str, state: dict[str, object]):
+        return None
+
+    async def fake_log_turn(**kwargs):
+        logged_turns.append(kwargs)
+        return 654
+
+    async def fake_log_tool(**kwargs):
+        return None
+
+    service.get_config = fake_get_config
+    service.ensure_schema = _noop_customer
+    service._has_completed_turn_for_inbound_message = fake_not_completed
+    service._get_conversation_state = fake_get_state
+    service.get_autonomous_eval_gate_status = fake_eval_gate
+    service.db_manager.get_messages = fake_get_messages
+    service.tools.search_catalog_products = fake_search_catalog_products
+    service._send_ai_outbound_message = fake_send_ai_outbound_message
+    service._upsert_conversation_state = fake_upsert_conversation_state
+    service._log_turn = fake_log_turn
+    service._log_tool = fake_log_tool
+
+    result = await service.maybe_handle_incoming_message(
+        {
+            "user_id": "212600000000",
+            "wa_message_id": "wamid.789",
+            "type": "text",
+            "message": "2 years",
+        }
+    )
+
+    assert result["reason"] == "catalog_clarification_suppressed"
+    assert sent_messages == []
+    assert logged_turns[0]["action"] == "catalog_clarification_suppressed"
+
+
+@pytest.mark.asyncio
+async def test_age_only_message_sends_short_catalog_clarification():
+    service = _make_service()
+    sent_messages: list[dict[str, str]] = []
+    logged_turns: list[dict[str, object]] = []
+
+    async def fake_get_config(workspace: str):
+        return {
+            **DEFAULT_AGENT_CONFIG,
+            "enabled": True,
+            "run_mode": "autonomous",
+            "_openai_api_key": "test-key",
+            "catalog_results_limit": 6,
+        }
+
+    async def fake_not_completed(*, workspace: str, inbound_wa_message_id: str):
+        return False
+
+    async def fake_get_state(*, user_id: str, workspace: str):
+        return {
+            "status": "bot_managed",
+            "owner_type": "bot",
+            "summary": "",
+            "last_language": "",
+            "last_intent": "",
+            "slots_json": {},
+            "risk_json": {},
+            "counters_json": {"turns": 0},
+            "openai_conversation_id": None,
+        }
+
+    async def fake_eval_gate(workspace: str, config: dict[str, object]):
+        return {
+            "enabled": True,
+            "blocking": False,
+            "reason_code": "ok",
+            "message": "",
+        }
+
+    async def fake_get_messages(user_id: str, offset: int = 0, limit: int = 12):
+        return [{"from_me": False, "message": "2 years"}]
+
+    async def fake_search_catalog_products(*, query: str, workspace: str, limit: int):
+        class _Result:
+            ok = True
+            data = {
+                "products": [],
+                "matched_sets": [],
+                "preferred_set": None,
+                "clarification": {
+                    "needed": True,
+                    "reason": "missing_gender_for_age",
+                    "age": 2,
+                },
+            }
+
+        return _Result()
+
+    async def fake_send_ai_outbound_message(*, user_id: str, message_type: str, text: str = "", **kwargs):
+        sent_messages.append({"user_id": user_id, "message_type": message_type, "text": text})
+        return {"id": 1}
+
+    async def fake_upsert_conversation_state(*, user_id: str, workspace: str, state: dict[str, object]):
+        return None
+
+    async def fake_log_turn(**kwargs):
+        logged_turns.append(kwargs)
+        return 321
+
+    async def fake_log_tool(**kwargs):
+        return None
+
+    service.get_config = fake_get_config
+    service.ensure_schema = _noop_customer
+    service._has_completed_turn_for_inbound_message = fake_not_completed
+    service._get_conversation_state = fake_get_state
+    service.get_autonomous_eval_gate_status = fake_eval_gate
+    service.db_manager.get_messages = fake_get_messages
+    service.tools.search_catalog_products = fake_search_catalog_products
+    service._send_ai_outbound_message = fake_send_ai_outbound_message
+    service._upsert_conversation_state = fake_upsert_conversation_state
+    service._log_turn = fake_log_turn
+    service._log_tool = fake_log_tool
+
+    result = await service.maybe_handle_incoming_message(
+        {
+            "user_id": "212600000000",
+            "wa_message_id": "wamid.456",
+            "type": "text",
+            "message": "2 years",
+        }
+    )
+
+    assert result["reason"] == "catalog_clarification"
+    assert result["handled"] is True
+    assert sent_messages == [
+        {
+            "user_id": "212600000000",
+            "message_type": "text",
+            "text": "\u0647\u0644 \u062a\u0631\u064a\u062f\u064a\u0646 \u0645\u0644\u0627\u0628\u0633 \u0627\u0644\u0628\u0646\u0627\u062a \u0623\u0645 \u0627\u0644\u0623\u0648\u0644\u0627\u062f \u0644\u0639\u0645\u0631 2 \u0633\u0646\u0648\u0627\u062a\u061f \u0648\u0625\u0630\u0627 \u0643\u0646\u062a \u062a\u0631\u064a\u062f\u064a\u0646 \u0627\u0644\u0623\u062d\u0630\u064a\u0629 \u0623\u064a\u0636\u064b\u0627 \u0641\u0623\u0631\u0633\u0644\u064a \u0627\u0644\u0642\u064a\u0627\u0633.",
         }
     ]
     assert logged_turns[0]["action"] == "catalog_clarification"

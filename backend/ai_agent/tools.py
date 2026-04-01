@@ -8,6 +8,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+LATIN_GIRLS_HINTS: tuple[str, ...] = ("bnt", "bnat", "bnia", "bniya")
+LATIN_BOYS_HINTS: tuple[str, ...] = ("wld", "wlad", "awlad")
+LATIN_SHOE_HINTS: tuple[str, ...] = ("sbat", "sebbat", "spadri")
+LATIN_CLOTHING_HINTS: tuple[str, ...] = ("lbas", "lbasat", "lbissat", "hwayej")
+
 
 STOPWORDS = {
     "the", "and", "for", "with", "this", "that", "are", "you", "pls", "svp", "pour", "avec",
@@ -569,9 +574,9 @@ class AIAgentToolbox:
 
     def _detect_catalog_category(self, text: str) -> str | None:
         lowered = str(text or "").lower()
-        if self._text_has_any(lowered, SHOE_HINTS):
+        if self._text_has_any(lowered, SHOE_HINTS) or self._text_has_any(lowered, LATIN_SHOE_HINTS):
             return "shoes"
-        if self._text_has_any(lowered, CLOTHING_HINTS):
+        if self._text_has_any(lowered, CLOTHING_HINTS) or self._text_has_any(lowered, LATIN_CLOTHING_HINTS):
             return "clothing"
         return None
 
@@ -713,9 +718,9 @@ class AIAgentToolbox:
         return out
 
     def _detect_gender_bucket(self, lowered_query: str) -> str | None:
-        if self._text_has_any(lowered_query, GENDER_HINTS["girls"]):
+        if self._text_has_any(lowered_query, GENDER_HINTS["girls"]) or self._text_has_any(lowered_query, LATIN_GIRLS_HINTS):
             return "girls"
-        if self._text_has_any(lowered_query, GENDER_HINTS["boys"]):
+        if self._text_has_any(lowered_query, GENDER_HINTS["boys"]) or self._text_has_any(lowered_query, LATIN_BOYS_HINTS):
             return "boys"
         return None
 

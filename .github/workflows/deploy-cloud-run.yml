@@ -7,7 +7,7 @@ on:
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REGION: ${{ secrets.GCP_REGION }}
-  SERVICE: whatsapp-backend
+  SERVICE: whatsapp-last
   GAR_LOCATION: ${{ secrets.GAR_LOCATION }} # e.g. us-central1
   REPOSITORY: whatsapp
   IMAGE: ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE }}:${{ github.sha }}

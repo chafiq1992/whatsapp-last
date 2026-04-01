@@ -184,3 +184,31 @@ def test_system_prompt_forces_arabic_script_and_catalog_set_fields():
     assert "never Latin letters" in prompt
     assert "\"recommended_catalog_set_id\":\"\"" in prompt
     assert "\"recommended_catalog_set_name\":\"\"" in prompt
+
+
+@pytest.mark.asyncio
+async def test_prefetch_catalog_context_returns_preferred_set_and_candidates():
+    service = _make_service()
+
+    async def fake_search_catalog_products(*, query: str, workspace: str, limit: int):
+        class _Result:
+            ok = True
+            data = {
+                "products": [{"retailer_id": "G-25-1", "name": "حذاء بنات 25", "catalog_set_name": "Girls 25"}],
+                "matched_sets": [{"id": "girls-25", "name": "Girls 25"}],
+                "preferred_set": {"id": "girls-25", "name": "Girls 25"},
+            }
+
+        return _Result()
+
+    service.tools.search_catalog_products = fake_search_catalog_products
+
+    context = await service._prefetch_catalog_context(
+        "send me catalog set for size 25 girls",
+        workspace="default",
+        limit=6,
+    )
+
+    assert context["preferred_catalog_set"] == {"id": "girls-25", "name": "Girls 25"}
+    assert context["matched_catalog_sets"] == [{"id": "girls-25", "name": "Girls 25"}]
+    assert context["catalog_candidates"][0]["retailer_id"] == "G-25-1"

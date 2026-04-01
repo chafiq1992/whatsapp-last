@@ -233,6 +233,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
   const isReaction = msg.type === "reaction";
   const isLocation = msg.type === "location";
   const isContacts = msg.type === "contacts";
+  const isAiBotMessage = self && ["ai-agent", "ai-bot"].includes(String(msg?.agent_username || msg?.agent || "").trim().toLowerCase());
   const isText = msg.type === "text" || (!isImage && !isAudio && !isVideo && !isOrder && !isGroupedImages && !isCatalogItem && !isCatalogSet && !isReaction && !isLocation && !isContacts);
   const [linkPreview, setLinkPreview] = useState(null);
   const [linkPreviewError, setLinkPreviewError] = useState(false);
@@ -969,7 +970,7 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
       <div
         className={`group relative max-w-[80%] px-4 py-2 rounded-2xl shadow-sm transition-colors ${
           self 
-            ? `${highlighted ? 'bg-red-50 ring-2 ring-red-500 border border-red-500' : 'bg-[#e6f0ff]'} text-black rounded-br-none hover:bg-[#d8e8ff]`
+            ? `${highlighted ? 'bg-red-50 ring-2 ring-red-500 border border-red-500' : (isAiBotMessage ? 'bg-[#fff0db] border border-[#f5c98a]' : 'bg-[#e6f0ff]')} text-black rounded-br-none ${isAiBotMessage ? 'hover:bg-[#ffe7c5]' : 'hover:bg-[#d8e8ff]'}`
             : `${highlighted ? 'bg-red-50 ring-2 ring-red-500 border border-red-500' : 'bg-white'} text-black rounded-bl-none hover:bg-gray-50 ${highlighted ? '' : 'border border-gray-200'}`
         } text-[13px] leading-relaxed`}
       >
@@ -1282,6 +1283,11 @@ export default function MessageBubble({ msg, self, catalogProducts = {}, highlig
               </div>
             </div>
             <div className="flex items-center space-x-1">
+              {isAiBotMessage && (
+                <span className="mr-1 rounded-full bg-[#f6b562] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
+                  ai bot
+                </span>
+              )}
               {typeof onReact === 'function' && (
                 <div className="relative mr-1">
                   <button

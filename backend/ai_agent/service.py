@@ -1312,6 +1312,13 @@ class AIAgentService:
             "effective_run_mode": effective_run_mode,
             "eval_gate": eval_gate_status,
         }
+        turn_payload.update(
+            await self._prefetch_catalog_context(
+                incoming_text,
+                workspace=ws,
+                limit=int(config.get("catalog_results_limit") or 6),
+            )
+        )
 
         started = time.perf_counter()
         response_id = ""
@@ -1365,7 +1372,11 @@ class AIAgentService:
                 if should_handoff:
                     if reply_text and "send_text_reply" not in action_tool_names:
                         try:
-                            await self.message_processor.whatsapp_messenger.send_text_message(user_id, reply_text)
+                            await self._send_ai_outbound_message(
+                                user_id=user_id,
+                                message_type="text",
+                                text=reply_text,
+                            )
                         except Exception as handoff_reply_exc:
                             self.log.warning("ai_agent handoff reply send failed workspace=%s user=%s err=%s", ws, user_id, handoff_reply_exc)
                     if "create_handoff_ticket" not in action_tool_names and "assign_human_agent" not in action_tool_names:
@@ -1374,14 +1385,26 @@ class AIAgentService:
                     handled = True
                     skip_legacy = True
                 elif reply_text and "send_text_reply" not in action_tool_names:
-                    await self.message_processor.whatsapp_messenger.send_text_message(user_id, reply_text)
+                    await self._send_ai_outbound_message(
+                        user_id=user_id,
+                        message_type="text",
+                        text=reply_text,
+                    )
                     action = "send_text_reply"
                     handled = True
                     skip_legacy = True
-                    recommended_set_id = str(output_data.get("recommended_catalog_set_id") or "").strip()
+                    recommended_set_id = (
+                        str(output_data.get("recommended_catalog_set_id") or "").strip()
+                        or str(((turn_payload.get("preferred_catalog_set") or {}) if self._message_mentions_catalog_request(incoming_text) else {}).get("id") or "").strip()
+                    )
                     if bool(config.get("send_catalog_when_possible")) and recommended_set_id and "send_whatsapp_catalog_message" not in action_tool_names:
                         try:
-                            await self.message_processor.whatsapp_messenger.send_full_set(user_id, recommended_set_id)
+                            await self._send_ai_outbound_message(
+                                user_id=user_id,
+                                message_type="catalog_set",
+                                text=str(output_data.get("recommended_catalog_set_name") or ((turn_payload.get("preferred_catalog_set") or {}).get("name") or "")).strip() or reply_text,
+                                set_id=recommended_set_id,
+                            )
                             action = "send_text_plus_catalog_set"
                         except Exception as catalog_set_exc:
                             self.log.warning(
@@ -1399,7 +1422,13 @@ class AIAgentService:
                         ][: max(1, min(6, int(config.get("catalog_results_limit") or 6)))]
                         if product_ids:
                             try:
-                                await self.message_processor.whatsapp_messenger.send_catalog_products(user_id, product_ids)
+                                for product_id in product_ids:
+                                    await self._send_ai_outbound_message(
+                                        user_id=user_id,
+                                        message_type="catalog_item",
+                                        text="",
+                                        product_retailer_id=product_id,
+                                    )
                                 action = "send_text_plus_catalog"
                             except Exception as catalog_exc:
                                 self.log.warning("ai_agent catalog send failed workspace=%s user=%s err=%s", ws, user_id, catalog_exc)
@@ -2456,8 +2485,12 @@ class AIAgentService:
             if body:
                 recent_lines.append(f"{who}: {body}")
         product_lines = [
-            f"- {p.get('retailer_id')}: {p.get('name')} | price={p.get('price')} | qty={p.get('quantity')} | availability={p.get('availability')}"
+            f"- {p.get('retailer_id')}: {p.get('name')} | set={p.get('catalog_set_name')} | price={p.get('price')} | qty={p.get('quantity')} | availability={p.get('availability')}"
             for p in (turn_payload.get("catalog_candidates") or [])
+        ]
+        matched_set_lines = [
+            f"- {s.get('id')}: {s.get('name')}"
+            for s in (turn_payload.get("matched_catalog_sets") or [])
         ]
         stock_lines = [
             f"- {s.get('retailer_id')}: available={s.get('available')} qty={s.get('quantity')} availability={s.get('availability')}"
@@ -2476,6 +2509,7 @@ class AIAgentService:
             f"Delivery context: {json.dumps(turn_payload.get('delivery_context') or {}, ensure_ascii=False)}\n"
             f"Latest customer message: {turn_payload.get('incoming_message')}\n\n"
             f"Recent transcript:\n{chr(10).join(recent_lines[-12:]) if recent_lines else '(empty)'}\n\n"
+            f"Matched catalog sets:\n{chr(10).join(matched_set_lines) if matched_set_lines else '(none)'}\n\n"
             f"Catalog candidates:\n{chr(10).join(product_lines) if product_lines else '(none)'}\n\n"
             f"Stock checks:\n{chr(10).join(stock_lines) if stock_lines else '(none)'}\n\n"
             f"Approved policies:\n{chr(10).join(policy_lines) if policy_lines else '(none)'}\n"
@@ -2507,6 +2541,83 @@ class AIAgentService:
     def _message_mentions_order(self, text: str) -> bool:
         hay = str(text or "").lower()
         return any(token in hay for token in ("order", "commande", "طلب", "tracking", "delivery", "livraison"))
+
+    def _message_mentions_catalog_request(self, text: str) -> bool:
+        hay = str(text or "").lower()
+        return any(
+            token in hay
+            for token in (
+                "catalog", "catalogue", "set", "size", "taille", "pointure", "shoe", "shoes", "sandal", "sandals",
+                "chauss", "sneaker", "girls", "boys", "girl", "boy", "بنات", "بنت", "أولاد", "اولاد",
+                "ولد", "قياس", "مقاس", "سباط", "حذاء", "صندل", "كاتالوغ",
+            )
+        )
+
+    async def _prefetch_catalog_context(self, text: str, *, workspace: str, limit: int) -> dict[str, Any]:
+        if not self._message_mentions_catalog_request(text):
+            return {}
+        try:
+            result = await self.tools.search_catalog_products(
+                query=str(text or ""),
+                workspace=workspace,
+                limit=max(1, min(int(limit or 6), 12)),
+            )
+            if not result.ok:
+                return {}
+            data = result.data or {}
+            return {
+                "catalog_candidates": list(data.get("products") or []),
+                "matched_catalog_sets": list(data.get("matched_sets") or []),
+                "preferred_catalog_set": data.get("preferred_set") or None,
+            }
+        except Exception:
+            return {}
+
+    async def _send_ai_outbound_message(
+        self,
+        *,
+        user_id: str,
+        message_type: str,
+        text: str = "",
+        set_id: str | None = None,
+        product_retailer_id: str | None = None,
+        reply_to: str | None = None,
+    ) -> Any:
+        payload: dict[str, Any] = {
+            "user_id": str(user_id or "").strip(),
+            "type": str(message_type or "text").strip() or "text",
+            "from_me": True,
+            "message": text or "",
+            "timestamp": datetime.utcnow().isoformat(),
+            "temp_id": f"ai-agent:{time.time_ns()}",
+            "agent_username": "ai-agent",
+        }
+        if reply_to:
+            payload["reply_to"] = str(reply_to or "").strip()
+        if set_id:
+            payload["set_id"] = str(set_id or "").strip()
+        if product_retailer_id:
+            rid = str(product_retailer_id or "").strip()
+            payload["product_retailer_id"] = rid
+            payload["retailer_id"] = rid
+            payload["product_id"] = rid
+        return await self.message_processor.process_outgoing_message(payload)
+
+    async def _send_ai_product_carousel(self, *, user_id: str, product_ids: list[str]) -> list[Any]:
+        sent: list[Any] = []
+        for product_id in product_ids:
+            rid = str(product_id or "").strip()
+            if not rid:
+                continue
+            sent.append(
+                await self._send_ai_outbound_message(
+                    user_id=user_id,
+                    message_type="catalog_item",
+                    text="",
+                    product_retailer_id=rid,
+                )
+            )
+        return sent
 
     def _response_tools(self) -> list[dict[str, Any]]:
         return [
@@ -2811,7 +2922,11 @@ class AIAgentService:
                 run_mode=run_mode,
                 tool_name=name,
                 payload={"text": str(arguments.get("text") or "")},
-                sender=lambda: self.message_processor.whatsapp_messenger.send_text_message(user_id, str(arguments.get("text") or "")),
+                sender=lambda: self._send_ai_outbound_message(
+                    user_id=user_id,
+                    message_type="text",
+                    text=str(arguments.get("text") or ""),
+                ),
             )
         if name == "send_whatsapp_product_message":
             product_retailer_id = str(arguments.get("product_retailer_id") or "").strip()
@@ -2820,7 +2935,12 @@ class AIAgentService:
                 run_mode=run_mode,
                 tool_name=name,
                 payload={"product_retailer_id": product_retailer_id, "caption": caption},
-                sender=lambda: self.message_processor.whatsapp_messenger.send_single_catalog_item(user_id, product_retailer_id, caption),
+                sender=lambda: self._send_ai_outbound_message(
+                    user_id=user_id,
+                    message_type="catalog_item",
+                    text=caption,
+                    product_retailer_id=product_retailer_id,
+                ),
             )
         if name == "send_whatsapp_catalog_message":
             set_id = str(arguments.get("set_id") or "").strip()
@@ -2829,7 +2949,12 @@ class AIAgentService:
                 run_mode=run_mode,
                 tool_name=name,
                 payload={"set_id": set_id, "caption": caption},
-                sender=lambda: self.message_processor.whatsapp_messenger.send_full_set(user_id, set_id, caption),
+                sender=lambda: self._send_ai_outbound_message(
+                    user_id=user_id,
+                    message_type="catalog_set",
+                    text=caption,
+                    set_id=set_id,
+                ),
             )
         if name == "send_whatsapp_product_carousel":
             product_ids = [str(item or "").strip() for item in (arguments.get("product_retailer_ids") or []) if str(item or "").strip()]
@@ -2837,7 +2962,7 @@ class AIAgentService:
                 run_mode=run_mode,
                 tool_name=name,
                 payload={"product_retailer_ids": product_ids},
-                sender=lambda: self.message_processor.whatsapp_messenger.send_catalog_products(user_id, product_ids),
+                sender=lambda: self._send_ai_product_carousel(user_id=user_id, product_ids=product_ids),
             )
         return {"ok": False, "data": {}, "source": "ai_agent", "error_code": "unknown_tool", "error_message": f"Unknown tool {name}", "latency_ms": 0}
 

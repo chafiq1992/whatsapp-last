@@ -7099,6 +7099,12 @@ class MessageProcessor:
                                     **({"reply_to": wa_msg_id} if wa_msg_id else {}),
                                     "timestamp": datetime.utcnow().isoformat(),
                                 })
+                elif message["type"] == "catalog_set":
+                    set_id = str(message.get("set_id") or "").strip()
+                    caption = str(message.get("caption") or message.get("message") or "").strip()
+                    if not set_id:
+                        raise Exception("Missing set_id for catalog_set")
+                    wa_response = await self.whatsapp_messenger.send_full_set(user_id, set_id, caption)
                 elif message["type"] in ("buttons", "interactive_buttons"):
                     body_text = message.get("message") or ""
                     buttons = message.get("buttons") or []
@@ -7364,8 +7370,14 @@ class MessageProcessor:
             
             # Extract WhatsApp message ID
             wa_message_id = None
-            if "messages" in wa_response and wa_response["messages"]:
+            if isinstance(wa_response, dict) and "messages" in wa_response and wa_response["messages"]:
                 wa_message_id = wa_response["messages"][0].get("id")
+            elif isinstance(wa_response, list):
+                for item in wa_response:
+                    if isinstance(item, dict) and item.get("messages"):
+                        wa_message_id = ((item.get("messages") or [{}])[0] or {}).get("id")
+                        if wa_message_id:
+                            break
             
             if not wa_message_id:
                 raise Exception(f"No message ID in WhatsApp response: {wa_response}")
@@ -7472,8 +7484,8 @@ class MessageProcessor:
             await self.db_manager.save_message(message, wa_message_id, "sent")
             # Also refresh Redis cache with the final record (including wa_message_id and status),
             # so new agent sessions loading from cache see the same canonical message as DB.
+            final_cached = dict(message or {})
             try:
-                final_cached = dict(message or {})
                 final_cached["workspace"] = final_cached.get("workspace") or get_current_workspace()
                 final_cached["wa_message_id"] = wa_message_id
                 final_cached["status"] = "sent"
@@ -7481,6 +7493,12 @@ class MessageProcessor:
                 # Preserve optimistic id semantics so UIs that key off temp_id can reconcile.
                 final_cached["id"] = final_cached.get("id") or temp_id
                 await self.redis_manager.cache_message(user_id, final_cached, workspace=final_cached.get("workspace"))
+            except Exception:
+                pass
+            try:
+                outbound_event = {"type": "message_received", "data": final_cached}
+                await self.connection_manager.send_to_user(user_id, outbound_event)
+                await self.connection_manager.broadcast_to_admins(outbound_event)
             except Exception:
                 pass
 

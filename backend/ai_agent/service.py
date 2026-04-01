@@ -46,9 +46,9 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "test_numbers": [],
     "instructions": (
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
-        "Reply briefly, clearly, and in the customer's language. Never invent stock, policies, "
-        "prices, delivery details, or order facts. Ask at most one useful clarification question. "
-        "Prefer recommending products that exist in the provided catalog candidates. Escalate when "
+        "Reply briefly and clearly in Arabic script only, using natural Arabic with a little Moroccan Darija written in Arabic letters. "
+        "Never use Latin transliteration for Darija. Never invent stock, policies, prices, delivery details, or order facts. "
+        "Ask at most one useful clarification question. Prefer recommending products and catalog sets that exist in the current inbox catalog. Escalate when "
         "the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
     ),
     "business_context": (
@@ -68,6 +68,9 @@ class AIAgentDependencies:
     make_settings_key: Callable[[str, str | None], str]
     decrypt_secret: Callable[[Any], str]
     catalog_provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
+    catalog_sets_provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
+    catalog_set_products_provider: Callable[[str, str, int], Awaitable[list[dict[str, Any]]]]
+    catalog_filters_provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
     fetch_customer_by_phone: Callable[[str, str], Awaitable[dict[str, Any] | None]]
     fetch_orders_for_customer: Callable[[str, str, int], Awaitable[list[dict[str, Any]]]]
     fetch_delivery_snapshot: Callable[[str, str | None, str], Awaitable[dict[str, Any] | None]]
@@ -104,6 +107,9 @@ class AIAgentService:
                 set_conversation_assignment=deps.set_conversation_assignment,
                 get_conversation_meta=self.db_manager.get_conversation_meta,
                 catalog_provider=self.catalog_provider,
+                catalog_sets_provider=deps.catalog_sets_provider,
+                catalog_set_products_provider=deps.catalog_set_products_provider,
+                catalog_filters_provider=deps.catalog_filters_provider,
                 logger=self.log,
             )
         )
@@ -1372,7 +1378,20 @@ class AIAgentService:
                     action = "send_text_reply"
                     handled = True
                     skip_legacy = True
-                    if bool(config.get("send_catalog_when_possible")) and output_data.get("recommended_product_ids") and "send_whatsapp_product_carousel" not in action_tool_names:
+                    recommended_set_id = str(output_data.get("recommended_catalog_set_id") or "").strip()
+                    if bool(config.get("send_catalog_when_possible")) and recommended_set_id and "send_whatsapp_catalog_message" not in action_tool_names:
+                        try:
+                            await self.message_processor.whatsapp_messenger.send_full_set(user_id, recommended_set_id)
+                            action = "send_text_plus_catalog_set"
+                        except Exception as catalog_set_exc:
+                            self.log.warning(
+                                "ai_agent catalog set send failed workspace=%s user=%s set_id=%s err=%s",
+                                ws,
+                                user_id,
+                                recommended_set_id,
+                                catalog_set_exc,
+                            )
+                    elif bool(config.get("send_catalog_when_possible")) and output_data.get("recommended_product_ids") and "send_whatsapp_product_carousel" not in action_tool_names:
                         product_ids = [
                             str(x).strip()
                             for x in (output_data.get("recommended_product_ids") or [])
@@ -2405,6 +2424,8 @@ class AIAgentService:
             f"Business context:\n{config.get('business_context')}\n\n"
             "You have access to tools for customer lookup, orders, delivery, policies, stock, catalog messages, human assignment, and conversation status.\n"
             "Before answering delivery, COD, exchange, return, refund, or complaint-policy questions, call get_business_policies and rely only on approved policies.\n"
+            "Always write reply_text in Arabic script. You may mix standard Arabic with light Moroccan Darija, but Darija must also be written in Arabic letters, never Latin letters.\n"
+            "For catalog browsing requests, use the current inbox catalog structure. Prefer a matching product set when the customer is browsing by gender, age, size, or category, and prefer specific products only when you have clear item matches.\n"
             "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n"
             "Return a JSON object only with this exact shape:\n"
             "{"
@@ -2419,10 +2440,12 @@ class AIAgentService:
             "\"policy_topics\":[],"
             "\"reply_text\":\"\","
             "\"recommended_product_ids\":[],"
+            "\"recommended_catalog_set_id\":\"\","
+            "\"recommended_catalog_set_name\":\"\","
             "\"entities\":{\"gender\":null,\"child_age\":null,\"size\":null,\"color\":null,\"product_type\":null,\"budget\":null,\"city\":null,\"order_number\":null},"
             "\"state_summary\":\"\""
             "}\n"
-            "Rules: keep reply_text brief, do not invent unavailable products or policies, and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
+            "Rules: keep reply_text brief, do not invent unavailable products or policies, prefer Arabic-only wording, and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
         )
 
     def _build_user_prompt(self, turn_payload: dict[str, Any]) -> str:

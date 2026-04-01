@@ -12293,6 +12293,76 @@ async def _ai_catalog_provider(workspace: str) -> list[dict]:
         return []
 
 
+async def _ai_catalog_sets_provider(workspace: str) -> list[dict]:
+    ws = _coerce_workspace(workspace)
+    cid = await _get_effective_catalog_id(ws)
+    try:
+        return await CatalogManager.get_catalog_sets(catalog_id=cid, workspace=ws)
+    except Exception:
+        return []
+
+
+async def _ai_catalog_set_products_provider(workspace: str, set_id: str, limit: int = 120) -> list[dict]:
+    ws = _coerce_workspace(workspace)
+    cid = await _get_effective_catalog_id(ws)
+    cache_file = _catalog_cache_file_for(ws, cid)
+    try:
+        return await CatalogManager.get_products_for_set(
+            str(set_id or "").strip(),
+            limit=max(1, min(int(limit or 120), 300)),
+            catalog_id=cid,
+            cache_file=cache_file,
+            workspace=ws,
+        )
+    except Exception:
+        return []
+
+
+async def _ai_catalog_filters_provider(workspace: str) -> list[dict]:
+    ws = _coerce_workspace(workspace)
+    try:
+        raw = await db_manager.get_setting(_ws_setting_key("catalog_filters", ws))
+        if (not raw) and ws == _coerce_workspace(DEFAULT_WORKSPACE):
+            raw = await db_manager.get_setting("catalog_filters")
+        data = json.loads(raw) if raw else None
+        if isinstance(data, list) and len(data) >= 2:
+            return data
+    except Exception:
+        pass
+
+    try:
+        suf = re.sub(r"[^A-Z0-9]+", "_", str(ws or "").strip().upper())
+
+        def _env_ws(name: str) -> str:
+            value = os.getenv(f"{name}_{suf}", "")
+            if value is not None and str(value).strip() != "":
+                return str(value)
+            return str(os.getenv(name, "") or "")
+
+        def _read_filter(suffix: str) -> dict | None:
+            label = _env_ws(f"CATALOG_FILTER_{suffix}_LABEL").strip()
+            query = _env_ws(f"CATALOG_FILTER_{suffix}_QUERY").strip()
+            match = (_env_ws(f"CATALOG_FILTER_{suffix}_MATCH") or "includes").strip().lower()
+            if label and query:
+                return {
+                    "label": label,
+                    "query": query,
+                    "match": "startsWith" if match in ("start", "startswith", "starts_with", "startsWith") else "includes",
+                }
+            return None
+
+        f_a = _read_filter("A") or {"label": "Girls", "query": "girls", "match": "includes"}
+        f_b = _read_filter("B") or {"label": "Boys", "query": "boys", "match": "includes"}
+        fall = {"label": (_env_ws("CATALOG_FILTER_ALL_LABEL") or "All").strip() or "All", "type": "all"}
+        return [f_a, f_b, fall]
+    except Exception:
+        return [
+            {"label": "Girls", "query": "girls", "match": "includes"},
+            {"label": "Boys", "query": "boys", "match": "includes"},
+            {"label": "All", "type": "all"},
+        ]
+
+
 async def _ai_fetch_customer_by_phone(phone_number: str, workspace: str) -> dict | None:
     from .shopify_integration import fetch_customer_by_phone  # type: ignore
     data = await fetch_customer_by_phone(phone_number, x_workspace=_coerce_workspace(workspace))
@@ -12500,6 +12570,9 @@ ai_agent_service = AIAgentService(
         make_settings_key=_ws_setting_key,
         decrypt_secret=_decrypt_workspace_secret,
         catalog_provider=_ai_catalog_provider,
+        catalog_sets_provider=_ai_catalog_sets_provider,
+        catalog_set_products_provider=_ai_catalog_set_products_provider,
+        catalog_filters_provider=_ai_catalog_filters_provider,
         fetch_customer_by_phone=_ai_fetch_customer_by_phone,
         fetch_orders_for_customer=_ai_fetch_orders_for_customer,
         fetch_delivery_snapshot=_ai_fetch_delivery_snapshot,

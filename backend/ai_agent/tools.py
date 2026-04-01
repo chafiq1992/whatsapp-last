@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -12,6 +13,13 @@ STOPWORDS = {
     "the", "and", "for", "with", "this", "that", "are", "you", "pls", "svp", "pour", "avec",
     "bonjour", "salut", "hello", "salam", "slm", "ana", "bghit", "mabghitch", "wach", "had",
     "hada", "hadi", "fin", "ila", "size", "taille", "pointure",
+    "من", "الى", "إلى", "على", "في", "مع", "هذا", "هذه", "هاد", "شنو", "عفاك", "بغيت", "كاين",
+    "كاينة", "عندكم", "لو", "واش", "ممكن", "بدي", "اريد", "أريد", "ابغى", "أبغى",
+}
+
+GENDER_HINTS: dict[str, tuple[str, ...]] = {
+    "girls": ("girls", "girl", "fille", "filles", "femme", "femmes", "women", "woman", "lady", "ladies", "بنت", "بنات", "للبنات", "نسائي", "نساء"),
+    "boys": ("boys", "boy", "garcon", "garcons", "garçon", "garçons", "men", "man", "homme", "hommes", "ولد", "اولاد", "أولاد", "للأولاد", "رجالي", "رجال"),
 }
 
 
@@ -50,6 +58,9 @@ class AIAgentToolDependencies:
     set_conversation_assignment: Callable[[str, str | None], Awaitable[None]]
     get_conversation_meta: Callable[[str], Awaitable[dict[str, Any]]]
     catalog_provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
+    catalog_sets_provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
+    catalog_set_products_provider: Callable[[str, str, int], Awaitable[list[dict[str, Any]]]]
+    catalog_filters_provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
     logger: logging.Logger
 
 
@@ -65,6 +76,9 @@ class AIAgentToolbox:
         self.set_conversation_assignment = deps.set_conversation_assignment
         self.get_conversation_meta = deps.get_conversation_meta
         self.catalog_provider = deps.catalog_provider
+        self.catalog_sets_provider = deps.catalog_sets_provider
+        self.catalog_set_products_provider = deps.catalog_set_products_provider
+        self.catalog_filters_provider = deps.catalog_filters_provider
         self.log = deps.logger
 
     async def find_customer_by_phone(self, *, phone_e164: str, workspace: str) -> ToolResult:
@@ -160,27 +174,30 @@ class AIAgentToolbox:
         started = time.perf_counter()
         ws = self.normalize_workspace(workspace)
         try:
-            products = await self.catalog_provider(ws)
+            scoped_sets = await self._select_catalog_sets(query=query, workspace=ws, limit=limit)
+            products = await self._load_catalog_scope_products(workspace=ws, scoped_sets=scoped_sets, limit=limit)
+            if not products:
+                products = await self.catalog_provider(ws)
         except Exception as exc:
             self.log.warning("ai_tool search_catalog_products failed ws=%s err=%s", ws, exc)
             return self._error("temporary_unavailable", str(exc), "whatsapp_catalog", started)
-        tokens = [
-            t for t in re.findall(r"[\w\u0600-\u06FF]+", str(query or "").lower())
-            if len(t) >= 2 and t not in STOPWORDS
-        ]
+        tokens = self._query_tokens(query)
         scored: list[tuple[float, dict[str, Any]]] = []
         for item in products or []:
             name = str(item.get("name") or "").strip()
             retailer_id = str(item.get("retailer_id") or item.get("id") or "").strip()
             if not name or not retailer_id:
                 continue
-            hay = f"{name} {json.dumps(item, ensure_ascii=False)}".lower()
+            set_name = str(item.get("catalog_set_name") or "").strip()
+            hay = f"{name} {set_name} {json.dumps(item, ensure_ascii=False)}".lower()
             score = 0.0
             for token in tokens:
                 if token in hay:
                     score += 1.0
                 if token in name.lower():
                     score += 1.25
+                if set_name and token in set_name.lower():
+                    score += 1.35
             if not tokens:
                 score = 0.1
             if score <= 0:
@@ -195,10 +212,25 @@ class AIAgentToolbox:
                     "availability": item.get("availability"),
                     "quantity": item.get("quantity"),
                     "images": item.get("images") or [],
+                    "catalog_set_id": item.get("catalog_set_id"),
+                    "catalog_set_name": item.get("catalog_set_name"),
                 },
             ))
         scored.sort(key=lambda row: (-row[0], str(row[1].get("name") or "")))
-        return self._ok({"products": [row[1] for row in scored[: max(1, min(int(limit), 20))]]}, "whatsapp_catalog", started)
+        matched_sets = [
+            {"id": item.get("id"), "name": item.get("name")}
+            for item in scoped_sets[:6]
+            if str(item.get("id") or "").strip()
+        ]
+        return self._ok(
+            {
+                "products": [row[1] for row in scored[: max(1, min(int(limit), 20))]],
+                "matched_sets": matched_sets,
+                "preferred_set": matched_sets[0] if matched_sets else None,
+            },
+            "whatsapp_catalog",
+            started,
+        )
 
     async def check_stock_availability(self, *, product_id: str | None, retailer_id: str | None, workspace: str) -> ToolResult:
         started = time.perf_counter()
@@ -372,3 +404,134 @@ class AIAgentToolbox:
             return int(float(value))
         except Exception:
             return None
+
+    def _query_tokens(self, query: str) -> list[str]:
+        return [
+            t for t in re.findall(r"[\w\u0600-\u06FF]+", str(query or "").lower())
+            if (len(t) >= 2 or t.isdigit()) and t not in STOPWORDS
+        ]
+
+    async def _select_catalog_sets(self, *, query: str, workspace: str, limit: int) -> list[dict[str, Any]]:
+        sets = await self.catalog_sets_provider(workspace)
+        if not sets:
+            return []
+        filters = await self.catalog_filters_provider(workspace)
+        chosen_filter = self._pick_catalog_filter(query=query, filters=filters)
+        candidate_sets = self._apply_catalog_filter(sets=sets, selected_filter=chosen_filter)
+        if not candidate_sets:
+            candidate_sets = [dict(item) for item in sets if str(item.get("id") or "").strip()]
+        tokens = self._query_tokens(query)
+        if not tokens:
+            return candidate_sets[: max(4, min(8, int(limit or 6) * 2))]
+
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for item in candidate_sets:
+            set_id = str(item.get("id") or "").strip()
+            set_name = str(item.get("name") or "").strip()
+            if not set_id:
+                continue
+            hay = f"{set_name} {set_id}".lower()
+            score = 0.0
+            for token in tokens:
+                if token in hay:
+                    score += 2.0
+                if set_name and token in set_name.lower():
+                    score += 1.0
+            if chosen_filter and str(chosen_filter.get("type") or "").strip().lower() != "all":
+                score += 0.25
+            if score > 0:
+                ranked.append((score, dict(item)))
+        ranked.sort(key=lambda row: (-row[0], str(row[1].get("name") or "")))
+        if ranked:
+            return [row[1] for row in ranked[: max(3, min(6, int(limit or 6)))]]
+        return candidate_sets[: max(4, min(8, int(limit or 6) * 2))]
+
+    async def _load_catalog_scope_products(self, *, workspace: str, scoped_sets: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        if not scoped_sets:
+            return []
+        per_set_limit = max(24, min(160, max(1, int(limit or 6)) * 20))
+        tasks = [
+            self.catalog_set_products_provider(workspace, str(item.get("id") or "").strip(), per_set_limit)
+            for item in scoped_sets
+            if str(item.get("id") or "").strip()
+        ]
+        if not tasks:
+            return []
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for idx, batch in enumerate(batches):
+            if isinstance(batch, Exception):
+                continue
+            set_info = scoped_sets[idx]
+            set_id = str(set_info.get("id") or "").strip()
+            set_name = str(set_info.get("name") or "").strip()
+            for item in batch or []:
+                retailer_id = str(item.get("retailer_id") or item.get("id") or "").strip()
+                if not retailer_id or retailer_id in seen:
+                    continue
+                seen.add(retailer_id)
+                merged.append({
+                    **dict(item),
+                    "catalog_set_id": set_id,
+                    "catalog_set_name": set_name,
+                })
+        return merged
+
+    def _pick_catalog_filter(self, *, query: str, filters: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not filters:
+            return None
+        lowered = str(query or "").lower()
+        detected_gender = self._detect_gender_bucket(lowered)
+        best: tuple[float, dict[str, Any]] | None = None
+        for item in filters:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().lower() == "all":
+                continue
+            score = 0.0
+            label = str(item.get("label") or "").strip().lower()
+            query_hint = str(item.get("query") or "").strip().lower()
+            for candidate in (label, query_hint):
+                if candidate and candidate in lowered:
+                    score += 3.0
+            if detected_gender == "girls" and self._text_has_any(f"{label} {query_hint}", GENDER_HINTS["girls"]):
+                score += 4.0
+            if detected_gender == "boys" and self._text_has_any(f"{label} {query_hint}", GENDER_HINTS["boys"]):
+                score += 4.0
+            if score <= 0:
+                continue
+            if best is None or score > best[0]:
+                best = (score, item)
+        return best[1] if best else None
+
+    def _apply_catalog_filter(self, *, sets: list[dict[str, Any]], selected_filter: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not selected_filter or str(selected_filter.get("type") or "").strip().lower() == "all":
+            return [dict(item) for item in sets if str(item.get("id") or "").strip()]
+        query = str(selected_filter.get("query") or "").strip().lower()
+        match_mode = str(selected_filter.get("match") or "includes").strip().lower()
+        if not query:
+            return [dict(item) for item in sets if str(item.get("id") or "").strip()]
+        out: list[dict[str, Any]] = []
+        for item in sets:
+            set_id = str(item.get("id") or "").strip()
+            name_or_id = f"{item.get('name') or ''} {set_id}".strip().lower()
+            if not set_id:
+                continue
+            if match_mode in {"start", "startswith", "starts_with"}:
+                if name_or_id.startswith(query):
+                    out.append(dict(item))
+            elif query in name_or_id:
+                out.append(dict(item))
+        return out
+
+    def _detect_gender_bucket(self, lowered_query: str) -> str | None:
+        if self._text_has_any(lowered_query, GENDER_HINTS["girls"]):
+            return "girls"
+        if self._text_has_any(lowered_query, GENDER_HINTS["boys"]):
+            return "boys"
+        return None
+
+    def _text_has_any(self, text: str, candidates: tuple[str, ...]) -> bool:
+        lowered = str(text or "").lower()
+        return any(candidate and candidate in lowered for candidate in candidates)

@@ -8,14 +8,74 @@
     "expected": {
       "intent": "product_discovery",
       "should_handoff": false,
-      "tool_names": ["search_catalog_products", "check_stock_availability"]
+      "tool_names": ["search_catalog_products"]
     }
   },
   {
-    "id": "order_follow_up_french_reference",
-    "language": "fr",
+    "id": "darija_product_search_boys_clothing",
+    "language": "darija",
     "transcript": [
-      "Customer: bonjour, je veux savoir le statut de ma commande #18452"
+      "Customer: wach kayn chi survetement l wlad 10 ans?"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "darija_product_availability_check",
+    "language": "darija",
+    "transcript": [
+      "Customer: wach had sandala kayna f 38?"
+    ],
+    "expected": {
+      "intent": "product_availability",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "darija_size_help",
+    "language": "darija",
+    "transcript": [
+      "Customer: benti 3ndha 7 snin chno l size dyalha?"
+    ],
+    "expected": {
+      "intent": "size_help",
+      "should_handoff": false,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "darija_delivery_question",
+    "language": "darija",
+    "transcript": [
+      "Customer: chhal kaytakhed delivery l casa?"
+    ],
+    "expected": {
+      "intent": "delivery_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "darija_cod_question",
+    "language": "darija",
+    "transcript": [
+      "Customer: wach nkhelso m3a delivery wla khasni ndfe3 online?"
+    ],
+    "expected": {
+      "intent": "cod_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "darija_order_follow_up",
+    "language": "darija",
+    "transcript": [
+      "Customer: fin wsel ttalab dyali lli dert la semaine passee?"
     ],
     "expected": {
       "intent": "order_follow_up",
@@ -24,7 +84,91 @@
     }
   },
   {
-    "id": "delivery_status_arabic_tracking",
+    "id": "darija_exchange_request",
+    "language": "darija",
+    "transcript": [
+      "Customer: bghit nbedel size dyal sbat lli chrit hit jani sghir"
+    ],
+    "expected": {
+      "intent": "exchange_return",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "darija_complaint_angry",
+    "language": "darija",
+    "transcript": [
+      "Customer: ana zaa3ma bzzaf had commande makhadmatch w deja khellest!"
+    ],
+    "expected": {
+      "intent": "complaint",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "darija_human_request",
+    "language": "darija",
+    "transcript": [
+      "Customer: bghit nhder m3a chi wahed machi robot"
+    ],
+    "expected": {
+      "intent": "human_agent_request",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "ar_product_search_girls_shoes",
+    "language": "ar",
+    "transcript": [
+      "Customer: السلام عليكم، أريد حذاء بنات مقاس 28"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "ar_product_search_boys",
+    "language": "ar",
+    "transcript": [
+      "Customer: ابغى ملابس أولاد عمر 5 سنوات"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "ar_size_help",
+    "language": "ar",
+    "transcript": [
+      "Customer: ابنتي عمرها 4 سنوات ما هو المقاس المناسب لها؟"
+    ],
+    "expected": {
+      "intent": "size_help",
+      "should_handoff": false,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "ar_delivery_question",
+    "language": "ar",
+    "transcript": [
+      "Customer: كم يستغرق التوصيل إلى مراكش؟"
+    ],
+    "expected": {
+      "intent": "delivery_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "ar_delivery_tracking",
     "language": "ar",
     "transcript": [
       "Customer: بغيت نعرف فين وصل الطرد ديالي 18452"
@@ -36,7 +180,175 @@
     }
   },
   {
-    "id": "refund_escalation_angry",
+    "id": "ar_order_follow_up",
+    "language": "ar",
+    "transcript": [
+      "Customer: أريد معرفة حالة طلبي رقم 19283"
+    ],
+    "expected": {
+      "intent": "order_follow_up",
+      "should_handoff": false,
+      "tool_names": ["get_order_by_reference"]
+    }
+  },
+  {
+    "id": "ar_cod_question",
+    "language": "ar",
+    "transcript": [
+      "Customer: هل الدفع عند الاستلام متاح؟"
+    ],
+    "expected": {
+      "intent": "cod_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "ar_exchange_return",
+    "language": "ar",
+    "transcript": [
+      "Customer: أريد إرجاع المنتج لأن المقاس غير مناسب"
+    ],
+    "expected": {
+      "intent": "exchange_return",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "ar_complaint_angry",
+    "language": "ar",
+    "transcript": [
+      "Customer: أنا غاضب جدا! المنتج وصل مكسور وما حد يرد علي"
+    ],
+    "expected": {
+      "intent": "complaint",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "ar_refund_request",
+    "language": "ar",
+    "transcript": [
+      "Customer: أريد استرجاع أموالي فوراً الطلب لم يصل منذ أسبوعين"
+    ],
+    "expected": {
+      "intent": "refund_request",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "ar_human_agent_request",
+    "language": "ar",
+    "transcript": [
+      "Customer: أريد التحدث مع شخص حقيقي من فضلك"
+    ],
+    "expected": {
+      "intent": "human_agent_request",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "fr_product_search_girls",
+    "language": "fr",
+    "transcript": [
+      "Customer: Bonjour, je cherche des baskets pour fille taille 33"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "fr_product_search_boys",
+    "language": "fr",
+    "transcript": [
+      "Customer: Vous avez des survêtements pour garçon de 8 ans?"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "fr_size_help",
+    "language": "fr",
+    "transcript": [
+      "Customer: Quelle taille pour un enfant de 6 ans?"
+    ],
+    "expected": {
+      "intent": "size_help",
+      "should_handoff": false,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "fr_delivery_question",
+    "language": "fr",
+    "transcript": [
+      "Customer: Combien coûte la livraison à Tanger?"
+    ],
+    "expected": {
+      "intent": "delivery_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "fr_order_follow_up_reference",
+    "language": "fr",
+    "transcript": [
+      "Customer: bonjour, je veux savoir le statut de ma commande #18452"
+    ],
+    "expected": {
+      "intent": "order_follow_up",
+      "should_handoff": false,
+      "tool_names": ["get_order_by_reference"]
+    }
+  },
+  {
+    "id": "fr_cod_question",
+    "language": "fr",
+    "transcript": [
+      "Customer: Est-ce que je peux payer à la livraison?"
+    ],
+    "expected": {
+      "intent": "cod_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "fr_exchange_return",
+    "language": "fr",
+    "transcript": [
+      "Customer: Je veux échanger les chaussures, la taille ne convient pas"
+    ],
+    "expected": {
+      "intent": "exchange_return",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "fr_complaint",
+    "language": "fr",
+    "transcript": [
+      "Customer: Je suis très mécontent, la qualité du produit ne correspond pas aux photos"
+    ],
+    "expected": {
+      "intent": "complaint",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "fr_refund_escalation_angry",
     "language": "fr",
     "transcript": [
       "Customer: je suis tres fache, je veux un remboursement maintenant sinon je vais porter plainte"
@@ -44,7 +356,151 @@
     "expected": {
       "intent": "refund_request",
       "should_handoff": true,
-      "tool_names": ["create_handoff_ticket", "assign_human_agent"]
+      "tool_names": []
+    }
+  },
+  {
+    "id": "fr_human_request",
+    "language": "fr",
+    "transcript": [
+      "Customer: Je veux parler à un responsable s'il vous plaît"
+    ],
+    "expected": {
+      "intent": "human_agent_request",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "en_product_search_girls",
+    "language": "en",
+    "transcript": [
+      "Customer: Hi, do you have sneakers for girls size 30?"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "en_product_availability",
+    "language": "en",
+    "transcript": [
+      "Customer: Is the pink sandal available in size 35?"
+    ],
+    "expected": {
+      "intent": "product_availability",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "en_delivery_question",
+    "language": "en",
+    "transcript": [
+      "Customer: How long does delivery take to Casablanca?"
+    ],
+    "expected": {
+      "intent": "delivery_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "en_order_follow_up",
+    "language": "en",
+    "transcript": [
+      "Customer: What's the status of my order 20145?"
+    ],
+    "expected": {
+      "intent": "order_follow_up",
+      "should_handoff": false,
+      "tool_names": ["get_order_by_reference"]
+    }
+  },
+  {
+    "id": "en_refund_request",
+    "language": "en",
+    "transcript": [
+      "Customer: I want a full refund, this is unacceptable"
+    ],
+    "expected": {
+      "intent": "refund_request",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "en_human_request",
+    "language": "en",
+    "transcript": [
+      "Customer: Can I speak to a real person please?"
+    ],
+    "expected": {
+      "intent": "human_agent_request",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "edge_multi_intent_product_and_delivery",
+    "language": "darija",
+    "transcript": [
+      "Customer: bghit jogging l bnat 8 ans w bghit n3ref chhal delivery"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
+    }
+  },
+  {
+    "id": "edge_angry_but_product_request",
+    "language": "fr",
+    "transcript": [
+      "Customer: Vous m'avez envoyé la mauvaise taille!! Je veux la bonne taille 34 en noir"
+    ],
+    "expected": {
+      "intent": "exchange_return",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "edge_ambiguous_greeting",
+    "language": "darija",
+    "transcript": [
+      "Customer: salam"
+    ],
+    "expected": {
+      "intent": "other",
+      "should_handoff": false,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "edge_legal_threat",
+    "language": "ar",
+    "transcript": [
+      "Customer: سأرفع قضية عليكم إذا لم تعيدوا أموالي"
+    ],
+    "expected": {
+      "intent": "refund_request",
+      "should_handoff": true,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "edge_mixed_language_darija_fr",
+    "language": "darija",
+    "transcript": [
+      "Customer: salam, bghit des chaussures pour ma fille, 3ndha 6 ans, pointure 29"
+    ],
+    "expected": {
+      "intent": "product_discovery",
+      "should_handoff": false,
+      "tool_names": ["search_catalog_products"]
     }
   }
 ]

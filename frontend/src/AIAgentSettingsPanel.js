@@ -4,7 +4,7 @@ import api from './api';
 const DEFAULT_FORM = {
   enabled: false,
   run_mode: 'shadow',
-  model: 'gpt-5.1',
+  model: 'gpt-5.4-mini',
   api_base: 'https://api.openai.com/v1',
   max_output_tokens: 900,
   max_context_messages: 12,

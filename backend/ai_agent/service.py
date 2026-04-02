@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -46,9 +47,11 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "test_numbers": [],
     "instructions": (
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
-        "Reply briefly and clearly in standard Arabic only, using Arabic script only. "
-        "Do not use Darija, slang, or Latin transliteration. Never invent stock, policies, prices, delivery details, or order facts. "
-        "Default to one short message only. Use the minimum words needed, ideally one short sentence. Ask at most one useful clarification question. "
+        "LANGUAGE RULE: Always reply in the SAME language the customer is using. "
+        "If the customer writes in Darija, reply in simple Arabic script. If they write in French, reply in French. If in English, reply in English. "
+        "Never mix languages unless the customer does. Use Arabic script only (never Latin transliteration for Arabic/Darija). "
+        "Never invent stock, policies, prices, delivery details, or order facts. "
+        "Default to one short message only. Use the minimum words needed, ideally one or two short sentences. Ask at most one useful clarification question. "
         "Prefer recommending products and catalog sets that exist in the current inbox catalog. Escalate when "
         "the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
     ),
@@ -1622,6 +1625,17 @@ class AIAgentService:
         except Exception as exc:
             self.log.exception("ai_agent turn failed workspace=%s user=%s err=%s", ws, user_id, exc)
             latency_ms = int((time.perf_counter() - started) * 1000)
+            # --- Graceful fallback: send a polite message and mark for human follow-up ---
+            fallback_text = ""
+            if effective_run_mode == "autonomous":
+                fallback_text = "عذرًا، حدث خطأ تقني. سيتواصل معك أحد أعضاء الفريق قريبًا."
+                try:
+                    await self._send_ai_outbound_message(
+                        user_id=user_id, message_type="text", text=fallback_text,
+                    )
+                    await self._sync_conversation_tags(user_id=user_id, add_tags=["ai-error", "needs-human"])
+                except Exception:
+                    pass
             await self._log_turn(
                 workspace=ws,
                 user_id=user_id,
@@ -1632,8 +1646,8 @@ class AIAgentService:
                 detected_intent="",
                 emotion="",
                 confidence=0.0,
-                action="error",
-                reply_text="",
+                action="error_fallback" if fallback_text else "error",
+                reply_text=fallback_text,
                 openai_response_id=response_id,
                 openai_conversation_id=openai_conversation_id,
                 request_json=turn_payload,
@@ -1642,7 +1656,7 @@ class AIAgentService:
                 error_text=str(exc),
                 latency_ms=latency_ms,
             )
-            return {"handled": False, "skip_legacy": False, "reason": "error", "error": str(exc)}
+            return {"handled": bool(fallback_text), "skip_legacy": bool(fallback_text), "reason": "error_fallback" if fallback_text else "error", "error": str(exc)}
 
     async def _record_skip(
         self,
@@ -1767,8 +1781,26 @@ class AIAgentService:
             }
             if previous_conversation_id:
                 body["conversation"] = previous_conversation_id
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(endpoint, headers=headers, json=body)
+            resp = None
+            last_error: Exception | None = None
+            for _attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        resp = await client.post(endpoint, headers=headers, json=body)
+                    if resp.status_code >= 500:
+                        last_error = RuntimeError(f"Responses API server error {resp.status_code}: {resp.text[:300]}")
+                        self.log.warning("ai_agent openai retry attempt=%d status=%d", _attempt + 1, resp.status_code)
+                        await asyncio.sleep(min(2 ** _attempt, 4))
+                        continue
+                    break
+                except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadTimeout) as net_exc:
+                    last_error = net_exc
+                    self.log.warning("ai_agent openai retry attempt=%d err=%s", _attempt + 1, net_exc)
+                    if _attempt < 2:
+                        await asyncio.sleep(min(2 ** _attempt, 4))
+                    continue
+            if resp is None:
+                raise RuntimeError(f"OpenAI API unreachable after 3 attempts: {last_error}")
             if resp.status_code >= 400:
                 raise RuntimeError(f"Responses API error {resp.status_code}: {resp.text[:500]}")
             data = resp.json()
@@ -2509,18 +2541,35 @@ class AIAgentService:
             return []
         hay = incoming_text.lower()
         matched_topics: set[str] = set()
-        for keyword, topic in (
-            ("livraison", "delivery"),
-            ("delivery", "delivery"),
-            ("cod", "cod"),
-            ("cash on delivery", "cod"),
-            ("return", "return"),
-            ("exchange", "exchange"),
-            ("refund", "refund"),
-            ("complaint", "complaint"),
-            ("retour", "return"),
-            ("échange", "exchange"),
-        ):
+        # Multilingual keyword → topic mapping (darija, ar, fr, en)
+        _POLICY_KEYWORDS: list[tuple[str, str]] = [
+            # Delivery
+            ("livraison", "delivery"), ("delivery", "delivery"), ("توصيل", "delivery"),
+            ("تسليم", "delivery"), ("شحن", "delivery"), ("shipping", "delivery"),
+            ("fin wsel", "delivery"), ("wsel", "delivery"), ("tracking", "delivery"),
+            ("track", "delivery"), ("تتبع", "delivery"), ("suivi", "delivery"),
+            # COD
+            ("cod", "cod"), ("cash on delivery", "cod"), ("الدفع عند الاستلام", "cod"),
+            ("paiement à la livraison", "cod"), ("nkhelso m3a delivery", "cod"),
+            ("pay on delivery", "cod"), ("contre remboursement", "cod"),
+            # Return
+            ("return", "return"), ("retour", "return"), ("إرجاع", "return"),
+            ("رجع", "return"), ("nrej3", "return"), ("rendre", "return"),
+            # Exchange
+            ("exchange", "exchange"), ("échange", "exchange"), ("echange", "exchange"),
+            ("تبديل", "exchange"), ("بدل", "exchange"), ("nbedel", "exchange"),
+            ("changer", "exchange"), ("استبدال", "exchange"),
+            # Refund
+            ("refund", "refund"), ("remboursement", "refund"), ("استرجاع", "refund"),
+            ("رد المال", "refund"), ("rembourser", "refund"), ("flous", "refund"),
+            ("استرداد", "refund"), ("money back", "refund"),
+            # Complaint
+            ("complaint", "complaint"), ("plainte", "complaint"), ("réclamation", "complaint"),
+            ("reclamation", "complaint"), ("شكاية", "complaint"), ("شكوى", "complaint"),
+            ("problème", "complaint"), ("problem", "complaint"), ("مشكلة", "complaint"),
+            ("مشكل", "complaint"),
+        ]
+        for keyword, topic in _POLICY_KEYWORDS:
             if keyword in hay:
                 matched_topics.add(topic)
         if not matched_topics:
@@ -2529,23 +2578,32 @@ class AIAgentService:
             {"id": p.get("id"), "topic": p.get("topic"), "locale": p.get("locale"), "title": p.get("title"), "content": p.get("content")}
             for p in policies
             if str(p.get("status") or "approved") == "approved" and str(p.get("topic") or "") in matched_topics
-        ][:6]
+        ][:8]
 
     async def _search_catalog_products(self, query: str, *, workspace: str, limit: int) -> list[dict[str, Any]]:
         result = await self.tools.search_catalog_products(query=query, workspace=workspace, limit=limit)
         return list(result.data.get("products") or []) if result.ok else []
 
     def _build_system_prompt(self, config: dict[str, Any]) -> str:
+        supported_langs = config.get("supported_languages") or ["darija", "ar", "fr", "en"]
+        lang_list = ", ".join(supported_langs) if isinstance(supported_langs, list) else str(supported_langs)
         return (
             f"{config.get('instructions')}\n\n"
             f"Business context:\n{config.get('business_context')}\n\n"
+            f"Supported languages: {lang_list}\n\n"
             "You have access to tools for customer lookup, orders, delivery, policies, stock, catalog messages, human assignment, and conversation status.\n"
             "Before answering delivery, COD, exchange, return, refund, or complaint-policy questions, call get_business_policies and rely only on approved policies.\n"
-            "Always write reply_text in standard Arabic only, using Arabic script only. Do not use Darija or Latin letters.\n"
+            "CRITICAL LANGUAGE RULE: Detect the customer's language and write reply_text in that SAME language. "
+            "If they write Darija or Arabic, reply in Arabic script. If they write French, reply in French. If English, reply in English. "
+            "Never transliterate Arabic in Latin letters. Never reply in a different language than the customer used.\n"
             "For catalog browsing requests, use the current inbox catalog structure. Prefer a matching product set when the customer is browsing by gender, age, size, or category, and prefer specific products only when you have clear item matches.\n"
             "When you use send_whatsapp_catalog_message or send_whatsapp_product_message, put the customer-facing sentence in the tool caption and leave reply_text empty unless you intentionally want a second separate message.\n"
-            "Default to one customer-visible message per turn. Keep wording minimal and direct, usually one short sentence.\n"
+            "Default to one customer-visible message per turn. Keep wording minimal and direct, usually one or two short sentences.\n"
             "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n"
+            "CONFIDENCE SCORING: Set confidence based on how certain you are about the correct action. "
+            "Set confidence >= 0.85 only when you have retrieved real data (policy, order, product) that directly answers the question. "
+            "Set confidence 0.5-0.84 when you are making a reasonable inference without full data. "
+            "Set confidence < 0.5 when the query is ambiguous or you lack information to answer well.\n"
             "Return a JSON object only with this exact shape:\n"
             "{"
             "\"language\":\"darija|ar|fr|en|mixed\","
@@ -2564,7 +2622,8 @@ class AIAgentService:
             "\"entities\":{\"gender\":null,\"child_age\":null,\"size\":null,\"color\":null,\"product_type\":null,\"budget\":null,\"city\":null,\"order_number\":null},"
             "\"state_summary\":\"\""
             "}\n"
-            "Rules: keep reply_text brief, do not invent unavailable products or policies, prefer Arabic-only wording, and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
+            "Rules: keep reply_text brief (1-2 sentences max), do not invent unavailable products or policies, "
+            "always reply in the customer's language, and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
         )
 
     def _build_user_prompt(self, turn_payload: dict[str, Any]) -> str:
@@ -2886,20 +2945,25 @@ class AIAgentService:
                 row = await cur.fetchone()
             return bool(row)
 
-    def _compact_ai_text(self, text: str, *, max_chars: int = 120) -> str:
+    def _compact_ai_text(self, text: str, *, max_chars: int = 250) -> str:
         raw = " ".join(str(text or "").strip().split())
         if not raw:
             return ""
         first_line = raw.split("\n", 1)[0].strip()
         if first_line:
             raw = first_line
-        for delimiter in ("؟", "!", ".", "…"):
-            if delimiter in raw:
-                raw = raw.split(delimiter, 1)[0].strip() + delimiter
-                break
         if len(raw) <= max_chars:
             return raw
-        shortened = raw[: max(20, max_chars)].rstrip(" ,;:.-")
+        # Try to cut at a sentence boundary within the limit
+        best_cut = -1
+        for delimiter in ("؟", "!", ".", "…", "?", ";"):
+            idx = raw.rfind(delimiter, 0, max_chars)
+            if idx > 0 and idx > best_cut:
+                best_cut = idx + 1
+        if best_cut > max(20, max_chars // 3):
+            return raw[:best_cut].strip()
+        # Fall back to word boundary
+        shortened = raw[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:.-،")
         return shortened + "…"
 
     async def _send_ai_outbound_message(
@@ -2918,7 +2982,7 @@ class AIAgentService:
             "from_me": True,
             "message": self._compact_ai_text(
                 text,
-                max_chars=90 if str(message_type or "").strip() == "text" else 120,
+                max_chars=220 if str(message_type or "").strip() == "text" else 250,
             ),
             "timestamp": datetime.utcnow().isoformat(),
             "temp_id": f"ai-agent:{time.time_ns()}",

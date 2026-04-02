@@ -13,6 +13,10 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from .copilot import AgentCopilot
+from .rag import PolicyRAG
+from .validators import OutputValidator
+
 from .tools import AIAgentToolDependencies, AIAgentToolbox
 from .evals import load_eval_cases, score_results
 
@@ -117,6 +121,18 @@ class AIAgentService:
                 logger=self.log,
             )
         )
+        # --- New modules: RAG, Copilot, Validators ---
+        self.rag = PolicyRAG(
+            db_manager=self.db_manager,
+            get_api_key=self._get_openai_api_key,
+        )
+        self.copilot = AgentCopilot(
+            db_manager=self.db_manager,
+            get_api_key=self._get_openai_api_key,
+            get_config=self.get_config,
+            list_policies=self.list_policies,
+        )
+        self.validator = OutputValidator()
 
     async def ensure_schema(self) -> None:
         async with self.db_manager._conn() as db:
@@ -273,6 +289,17 @@ class AIAgentService:
                 "CREATE INDEX IF NOT EXISTS idx_ai_eval_results_run ON ai_eval_results (run_id, created_at ASC)",
                 "CREATE UNIQUE INDEX IF NOT EXISTS uniq_ai_eval_expectations_ws_user ON ai_eval_expectations (workspace, user_id)",
                 "CREATE INDEX IF NOT EXISTS idx_ai_eval_alerts_ws_created ON ai_eval_alerts (workspace, created_at DESC)",
+                """
+                CREATE TABLE IF NOT EXISTS ai_policy_embeddings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workspace TEXT NOT NULL,
+                    policy_id INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    embedding_json TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """,
+                "CREATE UNIQUE INDEX IF NOT EXISTS uniq_ai_policy_emb_ws_pid ON ai_policy_embeddings (workspace, policy_id)",
             ]
             for statement in statements:
                 stmt = statement.strip()
@@ -439,6 +466,134 @@ class AIAgentService:
             else:
                 await db.execute(query, (int(policy_id), ws))
                 await db.commit()
+
+    # ------------------------------------------------------------------
+    #  Helper: get OpenAI API key (used by RAG + Copilot modules)
+    # ------------------------------------------------------------------
+    async def _get_openai_api_key(self) -> str:
+        ws = self.normalize_workspace(self.get_workspace())
+        config = await self.get_config(ws)
+        return str(config.get("_openai_api_key") or "").strip()
+
+    # ------------------------------------------------------------------
+    #  Copilot: human-assist reply suggestions
+    # ------------------------------------------------------------------
+    async def get_copilot_suggestion(
+        self,
+        user_id: str,
+        workspace: str | None = None,
+        agent_username: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a draft reply suggestion for a human agent."""
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        return await self.copilot.generate_suggestion(
+            user_id=user_id,
+            workspace=ws,
+            agent_username=agent_username,
+        )
+
+    async def get_copilot_summary(
+        self,
+        user_id: str,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a concise conversation summary for handoff."""
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        return await self.copilot.summarize_conversation(
+            user_id=user_id,
+            workspace=ws,
+        )
+
+    # ------------------------------------------------------------------
+    #  RAG: semantic policy retrieval
+    # ------------------------------------------------------------------
+    async def rebuild_policy_embeddings(self, workspace: str | None = None) -> dict[str, Any]:
+        """Re-embed all policies for semantic search. Call after policy CRUD."""
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        await self.ensure_schema()
+        policies = await self.list_policies(ws)
+        return await self.rag.rebuild_embeddings(workspace=ws, policies=policies)
+
+    async def search_policies_semantic(
+        self,
+        query: str,
+        workspace: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Search policies using semantic vector similarity."""
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        policies = await self.list_policies(ws)
+        return await self.rag.search_policies(
+            query,
+            workspace=ws,
+            policies=policies,
+            limit=limit,
+        )
+
+    # ------------------------------------------------------------------
+    #  Shopify policy import + Arabic translation
+    # ------------------------------------------------------------------
+    async def import_shopify_policies(
+        self,
+        workspace: str | None = None,
+        translate_to_arabic: bool = True,
+    ) -> dict[str, Any]:
+        """Fetch store policies from Shopify and import them as AI policy docs.
+
+        Optionally translates each policy to Arabic and stores both versions.
+        After import, rebuilds policy embeddings for semantic search.
+        """
+        ws = self.normalize_workspace(workspace or self.get_workspace())
+        await self.ensure_schema()
+
+        # Resolve Shopify credentials
+        try:
+            from ..shopify_integration import _shopify_http_context
+            base, extra_args, _store_used, _store_prefix = await _shopify_http_context(None, ws)
+            shopify_headers = {}
+            if isinstance(extra_args, dict):
+                shopify_headers = extra_args.get("headers") or {}
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not resolve Shopify credentials: {exc}"}
+
+        # Define the upsert callback for the RAG module
+        async def _upsert_callback(
+            workspace: str,
+            topic: str,
+            locale: str,
+            title: str,
+            content: str,
+            source: str = "",
+        ) -> dict[str, Any]:
+            return await self.upsert_policy(
+                {
+                    "topic": topic,
+                    "locale": locale,
+                    "title": title,
+                    "content": content,
+                    "status": "approved",
+                    "version": f"shopify-import-{source}",
+                },
+                workspace=workspace,
+            )
+
+        result = await self.rag.import_shopify_policies(
+            workspace=ws,
+            shopify_base=base,
+            shopify_headers=shopify_headers,
+            upsert_policy=_upsert_callback,
+            translate_to_arabic=translate_to_arabic,
+        )
+
+        # Rebuild embeddings after import
+        if result.get("ok"):
+            try:
+                embed_result = await self.rebuild_policy_embeddings(ws)
+                result["embeddings"] = embed_result
+            except Exception as exc:
+                result["embeddings_error"] = str(exc)
+
+        return result
 
     async def list_recent_turns(self, workspace: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
         ws = self.normalize_workspace(workspace or self.get_workspace())
@@ -1366,6 +1521,25 @@ class AIAgentService:
             should_handoff = bool(output_data.get("should_handoff"))
             confidence = self._safe_float(output_data.get("confidence"), default=0.0)
             effective_mode = effective_run_mode
+            # --- Output validation layer ---
+            validation_result = self.validator.validate_output(
+                output_data=output_data,
+                catalog_products=turn_payload.get("catalog_candidates") or [],
+                policies=turn_payload.get("policies") or [],
+            )
+            if not validation_result.get("valid"):
+                self.log.warning(
+                    "ai_agent output validation warnings workspace=%s user=%s warnings=%s",
+                    ws, user_id, validation_result.get("all_warnings"),
+                )
+                # Auto-correct invalid product IDs
+                if validation_result.get("corrected_output"):
+                    output_data = validation_result["corrected_output"]
+                # If policy compliance failed and mode is autonomous, reduce confidence
+                if not validation_result.get("policy_check", {}).get("valid"):
+                    confidence = min(confidence, 0.55)
+                    output_data["confidence"] = confidence
+                    output_data["_validation_warnings"] = validation_result.get("all_warnings", [])
             action_tool_names = {
                 str(entry.get("tool_name") or "")
                 for entry in (executed_tools or [])

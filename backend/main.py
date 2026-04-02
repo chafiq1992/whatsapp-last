@@ -15190,6 +15190,7 @@ async def run_ai_agent_replay_eval_endpoint(payload: dict = Body(default={}), _:
     return {"ok": True, "workspace": ws, "item": item}
 
 
+
 @app.post("/admin/ai-agent/evals/run-nightly-now")
 async def run_ai_agent_scheduled_replay_now_endpoint(_: dict = Depends(require_admin)):
     ws = get_current_workspace()
@@ -15198,7 +15199,65 @@ async def run_ai_agent_scheduled_replay_now_endpoint(_: dict = Depends(require_a
     return {"ok": True, "workspace": ws, "item": item}
 
 
-# ---- Meta OAuth (WhatsApp connect) ----
+# ---- AI Agent Copilot (human-assist) ----
+@app.post("/admin/ai-agent/copilot/suggestion")
+async def get_ai_copilot_suggestion_endpoint(payload: dict = Body(...), agent: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    user_id = str((payload or {}).get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    result = await ai_agent_service.get_copilot_suggestion(
+        user_id=user_id,
+        workspace=ws,
+        agent_username=str((agent or {}).get("username") or "").strip(),
+    )
+    return {"ok": True, "workspace": ws, "result": result}
+
+
+@app.post("/admin/ai-agent/copilot/summary")
+async def get_ai_copilot_summary_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    user_id = str((payload or {}).get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    result = await ai_agent_service.get_copilot_summary(
+        user_id=user_id,
+        workspace=ws,
+    )
+    return {"ok": True, "workspace": ws, "result": result}
+
+
+# ---- AI Agent RAG & Shopify Policy Import ----
+@app.post("/admin/ai-agent/policies/import-shopify")
+async def import_shopify_policies_endpoint(payload: dict = Body(default={}), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    translate = bool((payload or {}).get("translate_to_arabic", True))
+    result = await ai_agent_service.import_shopify_policies(
+        workspace=ws,
+        translate_to_arabic=translate,
+    )
+    return {"ok": True, "workspace": ws, "result": result}
+
+
+@app.post("/admin/ai-agent/policies/rebuild-embeddings")
+async def rebuild_policy_embeddings_endpoint(_: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    result = await ai_agent_service.rebuild_policy_embeddings(workspace=ws)
+    return {"ok": True, "workspace": ws, "result": result}
+
+
+@app.post("/admin/ai-agent/policies/search")
+async def search_policies_semantic_endpoint(payload: dict = Body(...), _: dict = Depends(require_admin)):
+    ws = get_current_workspace()
+    query = str((payload or {}).get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    limit = max(1, min(int((payload or {}).get("limit") or 5), 20))
+    results = await ai_agent_service.search_policies_semantic(query=query, workspace=ws, limit=limit)
+    return {"ok": True, "workspace": ws, "results": results}
+
+
+
 def _meta_oauth_state_key(state: str) -> str:
     s = str(state or "").strip()
     return f"meta_oauth_state:{s}"

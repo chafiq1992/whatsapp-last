@@ -747,3 +747,190 @@ async def test_age_only_message_sends_short_catalog_clarification():
         }
     ]
     assert logged_turns[0]["action"] == "catalog_clarification"
+
+
+@pytest.mark.asyncio
+async def test_search_catalog_products_requests_age_for_gendered_clothing_query():
+    toolbox = _make_toolbox()
+
+    result = await toolbox.search_catalog_products(
+        query="girls clothes",
+        workspace="default",
+        limit=4,
+    )
+
+    assert result.ok is True
+    assert result.data["products"] == []
+    assert result.data["matched_sets"] == []
+    assert result.data["clarification"] == {
+        "needed": True,
+        "reason": "missing_age_for_clothing",
+        "gender": "girls",
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_catalog_products_requests_size_for_gendered_shoes_query():
+    toolbox = _make_toolbox()
+
+    result = await toolbox.search_catalog_products(
+        query="boys shoes",
+        workspace="default",
+        limit=4,
+    )
+
+    assert result.ok is True
+    assert result.data["products"] == []
+    assert result.data["matched_sets"] == []
+    assert result.data["clarification"] == {
+        "needed": True,
+        "reason": "missing_size_for_shoes",
+        "gender": "boys",
+    }
+
+
+@pytest.mark.asyncio
+async def test_prefetch_policy_context_loads_only_matching_policy():
+    service = _make_service()
+
+    async def fake_list_policies(workspace: str):
+        return [
+            {"id": 1, "topic": "delivery", "locale": "ar", "title": "Delivery", "content": "التوصيل خلال 24 إلى 48 ساعة.", "status": "approved"},
+            {"id": 2, "topic": "return", "locale": "ar", "title": "Return", "content": "يمكن الإرجاع خلال 7 أيام.", "status": "approved"},
+        ]
+
+    service.list_policies = fake_list_policies
+
+    context = await service._prefetch_policy_context("delivery time", workspace="default")
+
+    assert context["policy_topics"] == ["delivery"]
+    assert [item["topic"] for item in context["policies"]] == ["delivery"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_send_exception_does_not_emit_second_fallback_message():
+    service = _make_service()
+    sent_messages: list[dict[str, str]] = []
+
+    async def fake_get_config(workspace: str):
+        return {
+            **DEFAULT_AGENT_CONFIG,
+            "enabled": True,
+            "run_mode": "autonomous",
+            "_openai_api_key": "test-key",
+            "catalog_results_limit": 6,
+            "send_catalog_when_possible": True,
+        }
+
+    async def fake_not_completed(*, workspace: str, inbound_wa_message_id: str):
+        return False
+
+    async def fake_get_state(*, user_id: str, workspace: str):
+        return {
+            "status": "bot_managed",
+            "owner_type": "bot",
+            "summary": "",
+            "last_language": "",
+            "last_intent": "",
+            "slots_json": {},
+            "risk_json": {},
+            "counters_json": {"turns": 0},
+            "openai_conversation_id": None,
+        }
+
+    async def fake_eval_gate(workspace: str, config: dict[str, object]):
+        return {
+            "enabled": True,
+            "blocking": False,
+            "reason_code": "ok",
+            "message": "",
+        }
+
+    async def fake_get_messages(user_id: str, offset: int = 0, limit: int = 12):
+        return [{"from_me": False, "message": "girls 2 ans clothes"}]
+
+    async def fake_search_catalog_products(*, query: str, workspace: str, limit: int):
+        class _Result:
+            ok = True
+            data = {
+                "products": [],
+                "matched_sets": [{"id": "girls-2ans", "name": "Girls 2 ans"}],
+                "preferred_set": {"id": "girls-2ans", "name": "Girls 2 ans"},
+                "clarification": None,
+            }
+
+        return _Result()
+
+    async def fake_run_openai_turn(**kwargs):
+        return (
+            {
+                "language": "ar",
+                "intent": "product_discovery",
+                "confidence": 0.95,
+                "emotion": "neutral",
+                "urgency": "low",
+                "should_handoff": False,
+                "handoff_reason": "",
+                "conversation_status": "bot_managed",
+                "policy_topics": [],
+                "reply_text": "ها هي المجموعة المناسبة.",
+                "recommended_product_ids": [],
+                "recommended_catalog_set_id": "",
+                "recommended_catalog_set_name": "",
+                "entities": {"gender": "girls", "child_age": 2, "size": None},
+                "state_summary": "",
+            },
+            "resp_1",
+            "conv_1",
+            {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0},
+            [],
+        )
+
+    async def fake_send_ai_outbound_message(*, user_id: str, message_type: str, text: str = "", **kwargs):
+        sent_messages.append({"user_id": user_id, "message_type": message_type, "text": text, "set_id": str(kwargs.get("set_id") or "")})
+        return {"id": 1}
+
+    async def fake_upsert_conversation_state(*, user_id: str, workspace: str, state: dict[str, object]):
+        raise RuntimeError("post-send failure")
+
+    async def fake_log_turn(**kwargs):
+        return 999
+
+    async def fake_log_tool(**kwargs):
+        return None
+
+    async def fake_sync_conversation_tags(**kwargs):
+        return None
+
+    service.get_config = fake_get_config
+    service.ensure_schema = _noop_customer
+    service._has_completed_turn_for_inbound_message = fake_not_completed
+    service._get_conversation_state = fake_get_state
+    service.get_autonomous_eval_gate_status = fake_eval_gate
+    service.db_manager.get_messages = fake_get_messages
+    service.tools.search_catalog_products = fake_search_catalog_products
+    service._run_openai_turn = fake_run_openai_turn
+    service._send_ai_outbound_message = fake_send_ai_outbound_message
+    service._upsert_conversation_state = fake_upsert_conversation_state
+    service._log_turn = fake_log_turn
+    service._log_tool = fake_log_tool
+    service._sync_conversation_tags = fake_sync_conversation_tags
+
+    result = await service.maybe_handle_incoming_message(
+        {
+            "user_id": "212600000000",
+            "wa_message_id": "wamid.catalog.1",
+            "type": "text",
+            "message": "girls 2 ans clothes",
+        }
+    )
+
+    assert result["reason"] in {"error", "error_fallback"}
+    assert sent_messages == [
+        {
+            "user_id": "212600000000",
+            "message_type": "catalog_set",
+            "text": "ها هي المجموعة المناسبة.",
+            "set_id": "girls-2ans",
+        }
+    ]

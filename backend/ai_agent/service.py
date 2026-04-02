@@ -1493,6 +1493,12 @@ class AIAgentService:
                 limit=int(config.get("catalog_results_limit") or 6),
             )
         )
+        turn_payload.update(
+            await self._prefetch_policy_context(
+                incoming_text,
+                workspace=ws,
+            )
+        )
         catalog_clarification = dict(turn_payload.get("catalog_clarification") or {})
         if effective_run_mode == "autonomous" and bool(catalog_clarification.get("needed")):
             return await self._handle_catalog_clarification(
@@ -1511,6 +1517,7 @@ class AIAgentService:
         openai_conversation_id = str(state.get("openai_conversation_id") or "").strip()
         output_data: dict[str, Any] = {}
         tool_entries: list[dict[str, Any]] = []
+        visible_reply_sent = False
         try:
             output_data, response_id, openai_conversation_id, usage, executed_tools = await self._run_openai_turn(
                 config=runtime_config,
@@ -1559,6 +1566,17 @@ class AIAgentService:
                 "send_whatsapp_catalog_message",
                 "send_whatsapp_product_carousel",
             }))
+            visible_send_tool_used = any(
+                str(entry.get("tool_name") or "") in {
+                    "send_text_reply",
+                    "send_whatsapp_product_message",
+                    "send_whatsapp_catalog_message",
+                    "send_whatsapp_product_carousel",
+                }
+                and bool(entry.get("ok"))
+                and not bool(((entry.get("response_json") or {}).get("data") or {}).get("suppressed"))
+                for entry in (executed_tools or [])
+            )
             if confidence < self._safe_float(config.get("low_confidence_threshold"), default=0.58):
                 should_handoff = True
                 if not str(output_data.get("handoff_reason") or "").strip():
@@ -1626,6 +1644,7 @@ class AIAgentService:
                                 message_type="text",
                                 text=reply_text,
                             )
+                            visible_reply_sent = True
                         except Exception as handoff_reply_exc:
                             self.log.warning("ai_agent handoff reply send failed workspace=%s user=%s err=%s", ws, user_id, handoff_reply_exc)
                     if "create_handoff_ticket" not in action_tool_names and "assign_human_agent" not in action_tool_names:
@@ -1641,12 +1660,14 @@ class AIAgentService:
                             text=reply_text if idx == 0 else str(target.get("name") or "").strip(),
                             set_id=str(target.get("id") or "").strip(),
                         )
+                        visible_reply_sent = True
                     action = "send_catalog_set" if len(auto_catalog_targets) == 1 else "send_catalog_sets"
                     handled = True
                     skip_legacy = True
                 elif auto_product_carousel_possible:
                     try:
                         await self._send_ai_product_carousel(user_id=user_id, product_ids=auto_product_ids)
+                        visible_reply_sent = True
                         action = "send_product_carousel"
                     except Exception as catalog_exc:
                         self.log.warning("ai_agent catalog send failed workspace=%s user=%s err=%s", ws, user_id, catalog_exc)
@@ -1659,12 +1680,14 @@ class AIAgentService:
                             message_type="text",
                             text=reply_text,
                         )
+                        visible_reply_sent = True
                         action = "send_text_reply"
                     else:
                         action = "send_text_reply_suppressed"
                     handled = True
                     skip_legacy = True
                 elif send_action_used:
+                    visible_reply_sent = visible_send_tool_used
                     handled = True
                     skip_legacy = True
                     action = "tool_driven_reply"
@@ -1801,7 +1824,7 @@ class AIAgentService:
             latency_ms = int((time.perf_counter() - started) * 1000)
             # --- Graceful fallback: send a polite message and mark for human follow-up ---
             fallback_text = ""
-            if effective_run_mode == "autonomous":
+            if effective_run_mode == "autonomous" and not visible_reply_sent:
                 fallback_text = "عذرًا، حدث خطأ تقني. سيتواصل معك أحد أعضاء الفريق قريبًا."
                 try:
                     await self._send_ai_outbound_message(
@@ -2747,7 +2770,7 @@ class AIAgentService:
             if keyword in hay:
                 matched_topics.add(topic)
         if not matched_topics:
-            matched_topics = {str(p.get("topic") or "") for p in policies[:4]}
+            return []
         return [
             {"id": p.get("id"), "topic": p.get("topic"), "locale": p.get("locale"), "title": p.get("title"), "content": p.get("content")}
             for p in policies
@@ -2767,10 +2790,11 @@ class AIAgentService:
             f"Supported languages: {lang_list}\n\n"
             "You have access to tools for customer lookup, orders, delivery, policies, stock, catalog messages, human assignment, and conversation status.\n"
             "Before answering delivery, COD, exchange, return, refund, or complaint-policy questions, call get_business_policies and rely only on approved policies.\n"
-            "CRITICAL LANGUAGE RULE: Detect the customer's language and write reply_text in that SAME language. "
-            "If they write Darija or Arabic, reply in Arabic script. If they write French, reply in French. If English, reply in English. "
-            "Never transliterate Arabic in Latin letters. Never reply in a different language than the customer used.\n"
+            "CRITICAL LANGUAGE RULE: Always answer the customer in standard Arabic using Arabic script only. "
+            "Do not use Darija, French, English, or Latin transliteration in customer-visible replies.\n"
             "For catalog browsing requests, use the current inbox catalog structure. Prefer a matching product set when the customer is browsing by gender, age, size, or category, and prefer specific products only when you have clear item matches.\n"
+            "Do not send any catalog set unless the request is ready. A request is ready only when gender is known and the needed measurement is known: age for clothing, size for shoes.\n"
+            "If the customer asks about clothes or shoes without enough information, ask one short clarification question and do not send a catalog yet.\n"
             "When you use send_whatsapp_catalog_message or send_whatsapp_product_message, put the customer-facing sentence in the tool caption and leave reply_text empty unless you intentionally want a second separate message.\n"
             "Default to one customer-visible message per turn. Keep wording minimal and direct, usually one or two short sentences.\n"
             "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n"
@@ -2797,7 +2821,7 @@ class AIAgentService:
             "\"state_summary\":\"\""
             "}\n"
             "Rules: keep reply_text brief (1-2 sentences max), do not invent unavailable products or policies, "
-            "always reply in the customer's language, and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
+            "always reply in standard Arabic only, and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
         )
 
     def _build_user_prompt(self, turn_payload: dict[str, Any]) -> str:
@@ -2964,10 +2988,42 @@ class AIAgentService:
         except Exception:
             return {}
 
+    async def _prefetch_policy_context(
+        self,
+        text: str,
+        *,
+        workspace: str,
+    ) -> dict[str, Any]:
+        try:
+            policies = await self._load_policy_docs_for_prompt(text, workspace=workspace)
+        except Exception:
+            return {}
+        if not policies:
+            return {}
+        topics = [
+            str(item.get("topic") or "").strip().lower()
+            for item in policies
+            if str(item.get("topic") or "").strip()
+        ]
+        return {
+            "policies": policies,
+            "policy_topics": list(dict.fromkeys(topics)),
+        }
+
     def _build_catalog_clarification_reply(self, clarification: dict[str, Any]) -> str:
         reason = str((clarification or {}).get("reason") or "").strip()
         age = int(clarification.get("age") or 0)
         size = int(clarification.get("size") or 0)
+        if reason == "missing_age_for_clothing":
+            return "أرسلي عمر الطفل حتى أرسل لك مجموعة الملابس المناسبة."
+        if reason == "missing_size_for_shoes":
+            return "أرسلي قياس الحذاء حتى أرسل لك مجموعة الأحذية المناسبة."
+        if reason == "missing_gender_and_age_for_clothing":
+            return "هل تريدين ملابس البنات أم الأولاد؟ وأرسلي العمر حتى أرسل لك المجموعة المناسبة."
+        if reason == "missing_gender_and_size_for_shoes":
+            return "هل تريدين أحذية البنات أم الأولاد؟ وأرسلي القياس حتى أرسل لك المجموعة المناسبة."
+        if reason == "missing_measurement_for_gender":
+            return "هل تريدين ملابس أم أحذية؟ أرسلي العمر للملابس أو القياس للأحذية."
         if reason == "missing_gender_for_age" and age > 0:
             return f"هل تريدين ملابس البنات أم الأولاد لعمر {age} سنوات؟ وإذا كنت تريدين الأحذية أيضًا فأرسلي القياس."
         if reason == "missing_gender_for_size" and size > 0:

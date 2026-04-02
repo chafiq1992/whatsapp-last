@@ -206,7 +206,7 @@ class AIAgentToolbox:
         try:
             scoped_sets = await self._select_catalog_sets(query=query, workspace=ws, limit=limit)
             products = await self._load_catalog_scope_products(workspace=ws, scoped_sets=scoped_sets, limit=limit)
-            if not products and not scoped_sets:
+            if not products and not scoped_sets and not request_specs:
                 products = await self.catalog_provider(ws)
         except Exception as exc:
             self.log.warning("ai_tool search_catalog_products failed ws=%s err=%s", ws, exc)
@@ -474,6 +474,15 @@ class AIAgentToolbox:
                         exact_matches.append(chosen)
             if exact_matches:
                 return exact_matches[: max(2, min(6, int(limit or 6)))]
+            if any(
+                str(spec.get("gender") or "").strip()
+                and (
+                    any(isinstance(v, int) for v in (spec.get("ages") or []))
+                    or any(isinstance(v, int) for v in (spec.get("sizes") or []))
+                )
+                for spec in request_specs
+            ):
+                return []
             candidate_sets = [item for item in candidate_sets if not self._is_broad_catalog_set(item)]
             if not candidate_sets:
                 return []
@@ -513,7 +522,7 @@ class AIAgentToolbox:
             ages = self._extract_age_values(segment)
             sizes = self._extract_size_values(segment)
             category = self._detect_catalog_category(segment)
-            if not gender and not ages and not sizes:
+            if not gender and not ages and not sizes and not category:
                 continue
             specs.append(
                 {
@@ -527,24 +536,56 @@ class AIAgentToolbox:
         return specs
 
     def _determine_catalog_clarification(self, request_specs: list[dict[str, Any]]) -> dict[str, Any] | None:
-        if len(request_specs) != 1:
+        if not request_specs:
             return None
-        spec = request_specs[0]
-        gender = str(spec.get("gender") or "").strip()
-        ages = [int(v) for v in (spec.get("ages") or []) if isinstance(v, int)]
-        sizes = [int(v) for v in (spec.get("sizes") or []) if isinstance(v, int)]
-        if ages and not gender and not sizes:
-            return {
-                "needed": True,
-                "reason": "missing_gender_for_age",
-                "age": ages[0],
-            }
-        if sizes and not gender and not ages:
-            return {
-                "needed": True,
-                "reason": "missing_gender_for_size",
-                "size": sizes[0],
-            }
+        for spec in request_specs:
+            gender = str(spec.get("gender") or "").strip()
+            ages = [int(v) for v in (spec.get("ages") or []) if isinstance(v, int)]
+            sizes = [int(v) for v in (spec.get("sizes") or []) if isinstance(v, int)]
+            category = str(spec.get("category") or "").strip()
+            age = ages[0] if ages else None
+            size = sizes[0] if sizes else None
+
+            if age and not gender:
+                return {
+                    "needed": True,
+                    "reason": "missing_gender_for_age",
+                    "age": age,
+                }
+            if size and not gender:
+                return {
+                    "needed": True,
+                    "reason": "missing_gender_for_size",
+                    "size": size,
+                }
+            if category == "clothing" and gender and not age:
+                return {
+                    "needed": True,
+                    "reason": "missing_age_for_clothing",
+                    "gender": gender,
+                }
+            if category == "shoes" and gender and not size:
+                return {
+                    "needed": True,
+                    "reason": "missing_size_for_shoes",
+                    "gender": gender,
+                }
+            if category == "clothing" and not gender and not age:
+                return {
+                    "needed": True,
+                    "reason": "missing_gender_and_age_for_clothing",
+                }
+            if category == "shoes" and not gender and not size:
+                return {
+                    "needed": True,
+                    "reason": "missing_gender_and_size_for_shoes",
+                }
+            if gender and not age and not size:
+                return {
+                    "needed": True,
+                    "reason": "missing_measurement_for_gender",
+                    "gender": gender,
+                }
         return None
 
     def _split_catalog_query_segments(self, query: str) -> list[str]:

@@ -15026,9 +15026,21 @@ async def set_ai_agent_config_endpoint(payload: dict = Body(...), _: dict = Depe
     await ai_agent_service.ensure_schema()
     raw_key = str((payload or {}).get("openai_api_key") or "").strip()
     clear_key = bool((payload or {}).get("clear_openai_api_key"))
+    quick_policy_fields = {
+        "policy_delivery_ar": ("delivery", "سياسة التوصيل"),
+        "policy_return_ar": ("return", "سياسة الإرجاع"),
+        "policy_exchange_ar": ("exchange", "سياسة التبديل"),
+    }
+    quick_policy_values = {
+        field: str((payload or {}).get(field) or "")
+        for field in quick_policy_fields
+        if field in (payload or {})
+    }
     sanitized = dict(payload or {})
     sanitized.pop("openai_api_key", None)
     sanitized.pop("clear_openai_api_key", None)
+    for field in quick_policy_fields:
+        sanitized.pop(field, None)
     saved = await ai_agent_service.save_config(sanitized, ws)
     merged = dict(saved or {})
     for transient_key in ("_openai_api_key", "openai_api_key_present", "openai_api_key_hint"):
@@ -15042,6 +15054,35 @@ async def set_ai_agent_config_endpoint(payload: dict = Body(...), _: dict = Depe
         raise HTTPException(status_code=500, detail=str(exc))
     if clear_key or raw_key:
         await db_manager.set_setting(_ws_setting_key("ai_agent_config", ws), merged)
+    if quick_policy_values:
+        existing_policies = await ai_agent_service.list_policies(ws)
+        for field, text_value in quick_policy_values.items():
+            topic, title = quick_policy_fields[field]
+            matches = [
+                item for item in existing_policies
+                if str(item.get("topic") or "").strip().lower() == topic
+                and str(item.get("locale") or "").strip().lower() == "ar"
+            ]
+            clean_text = str(text_value or "").strip()
+            if clean_text:
+                target = matches[0] if matches else {}
+                await ai_agent_service.upsert_policy(
+                    {
+                        "id": target.get("id"),
+                        "topic": topic,
+                        "locale": "ar",
+                        "title": str(target.get("title") or title),
+                        "content": clean_text,
+                        "status": "approved",
+                        "version": str(target.get("version") or "1"),
+                    },
+                    ws,
+                )
+                for extra in matches[1:]:
+                    await ai_agent_service.delete_policy(int(extra.get("id")), ws)
+            else:
+                for match in matches:
+                    await ai_agent_service.delete_policy(int(match.get("id")), ws)
     cfg = await ai_agent_service.get_config(ws)
     return {
         "ok": True,

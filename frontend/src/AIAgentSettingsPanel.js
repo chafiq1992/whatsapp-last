@@ -31,6 +31,9 @@ const DEFAULT_FORM = {
   supported_languages: 'darija, ar, fr, en',
   instructions: '',
   business_context: '',
+  policy_delivery_ar: '',
+  policy_return_ar: '',
+  policy_exchange_ar: '',
   openai_api_key: '',
   clear_openai_api_key: false,
   openai_api_key_present: false,
@@ -97,18 +100,26 @@ export default function AIAgentSettingsPanel({ workspace }) {
         api.get('/admin/ai-agent/evals/alerts?limit=20', { headers: wsHeader }),
       ]);
       const cfg = cfgRes?.data?.config || {};
+      const policyItems = Array.isArray(policyRes?.data?.items) ? policyRes.data.items : [];
+      const findQuickPolicy = (topic) => {
+        const match = policyItems.find((item) => String(item?.topic || '').toLowerCase() === topic && String(item?.locale || '').toLowerCase() === 'ar');
+        return String(match?.content || '');
+      };
       setForm({
         ...DEFAULT_FORM,
         ...cfg,
         autonomous_blocked_intents: Array.isArray(cfg?.autonomous_blocked_intents) ? cfg.autonomous_blocked_intents.join(', ') : DEFAULT_FORM.autonomous_blocked_intents,
         test_numbers: Array.isArray(cfg?.test_numbers) ? cfg.test_numbers.join('\n') : '',
         supported_languages: Array.isArray(cfg?.supported_languages) ? cfg.supported_languages.join(', ') : DEFAULT_FORM.supported_languages,
+        policy_delivery_ar: findQuickPolicy('delivery'),
+        policy_return_ar: findQuickPolicy('return'),
+        policy_exchange_ar: findQuickPolicy('exchange'),
         openai_api_key: '',
         clear_openai_api_key: false,
         openai_api_key_present: Boolean(cfg?.openai_api_key_present),
         openai_api_key_hint: String(cfg?.openai_api_key_hint || ''),
       });
-      setPolicies(Array.isArray(policyRes?.data?.items) ? policyRes.data.items : []);
+      setPolicies(policyItems);
       setTurns(Array.isArray(turnsRes?.data?.items) ? turnsRes.data.items : []);
       setEvalRuns(Array.isArray(evalRunsRes?.data?.items) ? evalRunsRes.data.items : []);
       setGateStatus(gateRes?.data?.item || null);
@@ -172,6 +183,9 @@ export default function AIAgentSettingsPanel({ workspace }) {
           .filter(Boolean),
         instructions: form.instructions,
         business_context: form.business_context,
+        policy_delivery_ar: form.policy_delivery_ar,
+        policy_return_ar: form.policy_return_ar,
+        policy_exchange_ar: form.policy_exchange_ar,
         openai_api_key: String(form.openai_api_key || '').trim(),
         clear_openai_api_key: !!form.clear_openai_api_key,
       };
@@ -470,7 +484,7 @@ export default function AIAgentSettingsPanel({ workspace }) {
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
             <input type="checkbox" checked={!!form.send_catalog_when_possible} onChange={(e) => updateForm({ send_catalog_when_possible: e.target.checked })} />
-            Send catalog products when the AI has strong matches
+            Allow catalog sending only after gender and size/age are clear
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
             <input type="checkbox" checked={!!form.handoff_enabled} onChange={(e) => updateForm({ handoff_enabled: e.target.checked })} />
@@ -593,6 +607,42 @@ export default function AIAgentSettingsPanel({ workspace }) {
             <div className="mb-1 font-medium text-slate-800">Business context</div>
             <textarea className="min-h-[110px] w-full rounded-xl border border-slate-300 bg-white px-3 py-3 font-mono text-xs" value={form.business_context} onChange={(e) => updateForm({ business_context: e.target.value })} />
           </label>
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="text-sm font-semibold text-slate-900">Quick policy fields</div>
+          <div className="mt-1 text-xs text-slate-600">
+            These fields are saved as approved Arabic policy snippets and used by the AI for delivery, return, and exchange questions.
+          </div>
+          <div className="mt-4 grid grid-cols-1 gap-4">
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Delivery policy</div>
+              <textarea
+                className="min-h-[110px] w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm"
+                value={form.policy_delivery_ar}
+                onChange={(e) => updateForm({ policy_delivery_ar: e.target.value })}
+                placeholder="مثال: التوصيل إلى مراكش خلال 24 إلى 48 ساعة عادة..."
+              />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Return policy</div>
+              <textarea
+                className="min-h-[110px] w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm"
+                value={form.policy_return_ar}
+                onChange={(e) => updateForm({ policy_return_ar: e.target.value })}
+                placeholder="مثال: يمكن الإرجاع خلال عدد الأيام المسموح بها مع الشروط..."
+              />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1 font-medium text-slate-800">Exchange policy</div>
+              <textarea
+                className="min-h-[110px] w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm"
+                value={form.policy_exchange_ar}
+                onChange={(e) => updateForm({ policy_exchange_ar: e.target.value })}
+                placeholder="مثال: يمكن التبديل إذا كان المقاس غير مناسب خلال عدد الأيام..."
+              />
+            </label>
+          </div>
         </div>
       </div>
 

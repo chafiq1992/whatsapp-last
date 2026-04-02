@@ -51,12 +51,12 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "test_numbers": [],
     "instructions": (
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
-        "LANGUAGE RULE: Always reply in the SAME language the customer is using. "
-        "If the customer writes in Darija, reply in simple Arabic script. If they write in French, reply in French. If in English, reply in English. "
-        "Never mix languages unless the customer does. Use Arabic script only (never Latin transliteration for Arabic/Darija). "
+        "Always reply in standard Arabic using Arabic script only. "
         "Never invent stock, policies, prices, delivery details, or order facts. "
+        "Be friendly and welcoming. If the customer only greets you, reply with a short welcome and ask how you can help. "
         "Default to one short message only. Use the minimum words needed, ideally one or two short sentences. Ask at most one useful clarification question. "
-        "Prefer recommending products and catalog sets that exist in the current inbox catalog. Escalate when "
+        "Do not send any catalog unless the customer is clearly asking to see products and you already know the needed size or age plus gender. "
+        "Prefer recommending products and catalog sets that exist in the current inbox catalog only when you are ready to send them. Escalate when "
         "the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
     ),
     "business_context": (
@@ -1474,6 +1474,40 @@ class AIAgentService:
         runtime_config = {**config, "run_mode": effective_run_mode}
 
         recent_messages = await self.db_manager.get_messages(user_id, offset=0, limit=int(config.get("max_context_messages") or 12))
+        if effective_run_mode == "autonomous" and self._message_is_greeting(incoming_text):
+            greeting_reply = "مرحبًا، أهلًا بك في متجرنا. كيف يمكنني مساعدتك اليوم؟"
+            if not self._was_recent_ai_text_sent(recent_messages, greeting_reply, limit=4):
+                await self._send_ai_outbound_message(
+                    user_id=user_id,
+                    message_type="text",
+                    text=greeting_reply,
+                )
+            turn_id = await self._log_turn(
+                workspace=ws,
+                user_id=user_id,
+                inbound_wa_message_id=inbound_wamid,
+                turn_mode=effective_run_mode,
+                turn_status="completed",
+                detected_language="ar",
+                detected_intent="other",
+                emotion="neutral",
+                confidence=0.99,
+                should_handoff=False,
+                handoff_reason=None,
+                action="greeting_reply",
+                conversation_status=str(state.get("status") or "bot_managed"),
+                state_summary=str(state.get("summary") or "").strip(),
+                entities_json={},
+                risk_json={},
+                openai_response_id=None,
+                openai_conversation_id=None,
+                request_json={"incoming_message": incoming_text},
+                response_json={"reply_text": greeting_reply},
+                usage_json={},
+                error_text=None,
+                latency_ms=0,
+            )
+            return {"handled": True, "skip_legacy": True, "reason": "greeting_reply", "turn_id": turn_id}
         turn_payload = {
             "workspace": ws,
             "user_id": user_id,
@@ -1611,9 +1645,12 @@ class AIAgentService:
                 target for target in auto_catalog_targets
                 if not self._was_recent_catalog_set_sent(recent_messages, str(target.get("id") or "").strip(), limit=6)
             ][:3]
+            catalog_send_intents = {"product_discovery", "size_help", "product_availability"}
+            catalog_intent_ok = str(output_data.get("intent") or "").strip() in catalog_send_intents
             auto_catalog_set_possible = bool(
                 effective_mode == "autonomous"
                 and config.get("send_catalog_when_possible")
+                and catalog_intent_ok
                 and auto_catalog_targets
                 and "send_whatsapp_catalog_message" not in action_tool_names
             )
@@ -1625,6 +1662,7 @@ class AIAgentService:
             auto_product_carousel_possible = bool(
                 effective_mode == "autonomous"
                 and config.get("send_catalog_when_possible")
+                and catalog_intent_ok
                 and auto_product_ids
                 and "send_whatsapp_product_carousel" not in action_tool_names
                 and not auto_catalog_set_possible
@@ -2889,6 +2927,16 @@ class AIAgentService:
         hay = str(text or "").lower()
         return any(token in hay for token in ("order", "commande", "طلب", "tracking", "delivery", "livraison"))
 
+    def _message_is_greeting(self, text: str) -> bool:
+        hay = " ".join(str(text or "").strip().lower().split())
+        if not hay:
+            return False
+        greeting_tokens = {
+            "hi", "hello", "hey", "salam", "slm", "bonjour", "salut",
+            "سلام", "مرحبا", "أهلا", "اهلا", "أهلًا", "هلا", "السلام عليكم",
+        }
+        return hay in greeting_tokens
+
     def _message_mentions_catalog_request(self, text: str) -> bool:
         hay = str(text or "").lower()
         if self.tools._extract_catalog_request_specs(hay):
@@ -2904,9 +2952,14 @@ class AIAgentService:
 
     def _build_catalog_context_query(self, text: str, recent_messages: list[dict[str, Any]] | None = None) -> str:
         latest = " ".join(str(text or "").strip().split())
+        if not latest:
+            return ""
         pieces: list[str] = []
         seen: set[str] = set()
         history: list[str] = []
+        latest_has_specs = bool(self.tools._extract_catalog_request_specs(latest))
+        if not self._message_mentions_catalog_request(latest) and not latest_has_specs:
+            return ""
         for message in recent_messages or []:
             if bool(message.get("from_me")):
                 continue
@@ -2919,10 +2972,12 @@ class AIAgentService:
                 break
         for body in reversed(history):
             pieces.append(body)
-        if latest:
-            latest_key = latest.lower()
-            if latest_key not in seen and (self._message_mentions_catalog_request(latest) or pieces):
-                pieces.append(latest)
+        latest_key = latest.lower()
+        if latest_key not in seen and (
+            self._message_mentions_catalog_request(latest)
+            or (pieces and latest_has_specs)
+        ):
+            pieces.append(latest)
         return " ".join(part for part in pieces if part).strip()
 
     def _normalized_message_text(self, text: str) -> str:
@@ -3015,20 +3070,20 @@ class AIAgentService:
         age = int(clarification.get("age") or 0)
         size = int(clarification.get("size") or 0)
         if reason == "missing_age_for_clothing":
-            return "أرسلي عمر الطفل حتى أرسل لك مجموعة الملابس المناسبة."
+            return "يسعدني مساعدتك. من فضلك أرسلي عمر الطفل حتى أرسل لك الخيارات المناسبة."
         if reason == "missing_size_for_shoes":
-            return "أرسلي قياس الحذاء حتى أرسل لك مجموعة الأحذية المناسبة."
+            return "يسعدني مساعدتك. من فضلك أرسلي قياس الحذاء حتى أرسل لك الخيارات المناسبة."
         if reason == "missing_gender_and_age_for_clothing":
-            return "هل تريدين ملابس البنات أم الأولاد؟ وأرسلي العمر حتى أرسل لك المجموعة المناسبة."
+            return "أهلًا بك. هل تريدين ملابس للبنات أم للأولاد؟ ومن فضلك أرسلي العمر حتى أرسل لك المناسب."
         if reason == "missing_gender_and_size_for_shoes":
-            return "هل تريدين أحذية البنات أم الأولاد؟ وأرسلي القياس حتى أرسل لك المجموعة المناسبة."
+            return "أهلًا بك. هل تريدين أحذية للبنات أم للأولاد؟ ومن فضلك أرسلي القياس حتى أرسل لك المناسب."
         if reason == "missing_measurement_for_gender":
-            return "هل تريدين ملابس أم أحذية؟ أرسلي العمر للملابس أو القياس للأحذية."
+            return "يسعدني مساعدتك. هل تريدين ملابس أم أحذية؟ أرسلي العمر للملابس أو القياس للأحذية."
         if reason == "missing_gender_for_age" and age > 0:
             return f"هل تريدين ملابس البنات أم الأولاد لعمر {age} سنوات؟ وإذا كنت تريدين الأحذية أيضًا فأرسلي القياس."
         if reason == "missing_gender_for_size" and size > 0:
             return f"هل هذا قياس {size} للبنات أم للأولاد؟ وإذا كنت تريدين الملابس أيضًا فأرسلي العمر."
-        return "هل تريدين منتجات البنات أم الأولاد؟"
+        return "أهلًا بك. هل تريدين منتجات البنات أم الأولاد؟"
 
     async def _handle_catalog_clarification(
         self,
@@ -3227,6 +3282,16 @@ class AIAgentService:
             payload["product_retailer_id"] = rid
             payload["retailer_id"] = rid
             payload["product_id"] = rid
+        try:
+            recent_messages = await self.db_manager.get_messages(str(user_id or "").strip(), offset=0, limit=10)
+        except Exception:
+            recent_messages = []
+        payload_type = str(message_type or "").strip()
+        normalized_message = self._normalized_message_text(payload.get("message") or "")
+        if payload_type == "text" and normalized_message and self._was_recent_ai_text_sent(recent_messages, payload.get("message") or "", limit=4):
+            return {"suppressed": True, "reason": "duplicate_text"}
+        if payload_type == "catalog_set" and set_id and self._was_recent_catalog_set_sent(recent_messages, str(set_id or "").strip(), limit=6):
+            return {"suppressed": True, "reason": "duplicate_catalog_set", "set_id": str(set_id or "").strip()}
         return await self.message_processor.process_outgoing_message(payload)
 
     async def _send_ai_product_carousel(self, *, user_id: str, product_ids: list[str]) -> list[Any]:
@@ -3247,10 +3312,12 @@ class AIAgentService:
 
     async def _send_ai_catalog_sets(self, *, user_id: str, sets: list[dict[str, Any]], caption: str = "") -> list[Any]:
         sent: list[Any] = []
+        seen_ids: set[str] = set()
         for idx, item in enumerate(sets or []):
             set_id = str((item or {}).get("id") or "").strip()
-            if not set_id:
+            if not set_id or set_id in seen_ids:
                 continue
+            seen_ids.add(set_id)
             sent.append(
                 await self._send_ai_outbound_message(
                     user_id=user_id,
@@ -3595,10 +3662,18 @@ class AIAgentService:
                 for item in (turn_payload.get("matched_catalog_sets") or [])
                 if str(item.get("id") or "").strip()
             ]
-            exact_targets = matched_catalog_sets[:3]
-            send_targets = exact_targets if exact_targets else (
-                [{"id": set_id, "name": str(arguments.get("caption") or "").strip()}] if set_id else []
-            )
+            deduped_targets: list[dict[str, Any]] = []
+            seen_target_ids: set[str] = set()
+            for item in matched_catalog_sets:
+                target_id = str(item.get("id") or "").strip()
+                if not target_id or target_id in seen_target_ids:
+                    continue
+                seen_target_ids.add(target_id)
+                deduped_targets.append(item)
+            requested_target = next((item for item in deduped_targets if str(item.get("id") or "").strip() == set_id), None)
+            send_targets = ([requested_target] if requested_target else []) if set_id else deduped_targets[:3]
+            if not send_targets and set_id:
+                send_targets = [{"id": set_id, "name": str(arguments.get("caption") or "").strip()}]
             return await self._execute_send_tool(
                 run_mode=run_mode,
                 tool_name=name,

@@ -934,3 +934,121 @@ async def test_catalog_send_exception_does_not_emit_second_fallback_message():
             "set_id": "girls-2ans",
         }
     ]
+
+
+def test_build_catalog_context_query_ignores_non_catalog_followup():
+    service = _make_service()
+
+    query = service._build_catalog_context_query(
+        "شحال مدة التوصيل",
+        recent_messages=[
+            {"from_me": False, "message": "بغيت صبابط بنات مقاس 26"},
+            {"from_me": True, "message": "تفضلي"},
+        ],
+    )
+
+    assert query == ""
+
+
+@pytest.mark.asyncio
+async def test_send_ai_outbound_message_suppresses_duplicate_catalog_set():
+    service = _make_service()
+    sent_payloads: list[dict[str, object]] = []
+
+    async def fake_get_messages(user_id: str, offset: int = 0, limit: int = 10):
+        return [
+            {"from_me": True, "message": "هذه اختيارات بنات مقاس 26.", "set_id": "girls-26"},
+        ]
+
+    async def fake_process_outgoing_message(payload: dict[str, object]):
+        sent_payloads.append(payload)
+        return {"id": 1}
+
+    service.db_manager.get_messages = fake_get_messages
+    service.message_processor.process_outgoing_message = fake_process_outgoing_message
+
+    result = await service._send_ai_outbound_message(
+        user_id="212600000000",
+        message_type="catalog_set",
+        text="هذه اختيارات بنات مقاس 26.",
+        set_id="girls-26",
+    )
+
+    assert result["suppressed"] is True
+    assert result["reason"] == "duplicate_catalog_set"
+    assert sent_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_greeting_message_gets_friendly_reply_without_openai():
+    service = _make_service()
+    sent_messages: list[dict[str, str]] = []
+
+    async def fake_get_config(workspace: str):
+        return {
+            **DEFAULT_AGENT_CONFIG,
+            "enabled": True,
+            "run_mode": "autonomous",
+            "_openai_api_key": "test-key",
+        }
+
+    async def fake_not_completed(*, workspace: str, inbound_wa_message_id: str):
+        return False
+
+    async def fake_get_state(*, user_id: str, workspace: str):
+        return {
+            "status": "bot_managed",
+            "owner_type": "bot",
+            "summary": "",
+            "last_language": "",
+            "last_intent": "",
+            "slots_json": {},
+            "risk_json": {},
+            "counters_json": {"turns": 0},
+            "openai_conversation_id": None,
+        }
+
+    async def fake_get_messages(user_id: str, offset: int = 0, limit: int = 12):
+        return []
+
+    async def fake_eval_gate(workspace: str, config: dict[str, object]):
+        return {
+            "enabled": True,
+            "blocking": False,
+            "reason_code": "ok",
+            "message": "",
+        }
+
+    async def fake_send_ai_outbound_message(*, user_id: str, message_type: str, text: str = "", **kwargs):
+        sent_messages.append({"user_id": user_id, "message_type": message_type, "text": text})
+        return {"id": 1}
+
+    async def fake_log_turn(**kwargs):
+        return 4321
+
+    service.get_config = fake_get_config
+    service.ensure_schema = _noop_customer
+    service._has_completed_turn_for_inbound_message = fake_not_completed
+    service._get_conversation_state = fake_get_state
+    service.get_autonomous_eval_gate_status = fake_eval_gate
+    service.db_manager.get_messages = fake_get_messages
+    service._send_ai_outbound_message = fake_send_ai_outbound_message
+    service._log_turn = fake_log_turn
+
+    result = await service.maybe_handle_incoming_message(
+        {
+            "user_id": "212600000000",
+            "wa_message_id": "wamid.hello.1",
+            "type": "text",
+            "message": "سلام",
+        }
+    )
+
+    assert result["reason"] == "greeting_reply"
+    assert sent_messages == [
+        {
+            "user_id": "212600000000",
+            "message_type": "text",
+            "text": "مرحبًا، أهلًا بك في متجرنا. كيف يمكنني مساعدتك اليوم؟",
+        }
+    ]

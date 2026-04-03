@@ -1325,18 +1325,12 @@ class AIAgentService:
             except Exception:
                 pass
 
-        add_tags: list[str] = []
-        remove_tags: list[str] = []
-        if normalized_status == "human_managed":
-            add_tags = ["human-managed", "needs-human"]
-            remove_tags = ["ai-resolved"]
-        elif normalized_status == "hybrid":
-            add_tags = ["needs-human"]
-            remove_tags = ["human-managed", "ai-resolved"]
-        else:
-            add_tags = ["ai-resolved"] if normalized_status == "closed" else []
-            remove_tags = ["human-managed", "needs-human"]
-        await self._sync_conversation_tags(user_id=uid, add_tags=add_tags, remove_tags=remove_tags)
+        # Use assign_human_agent for human handoff, no custom tags (tags create visible [system] messages)
+        if normalized_status in ("human_managed", "hybrid") and not actor_username:
+            try:
+                await self.tools.assign_human_agent(user_id=uid, workspace=ws)
+            except Exception:
+                pass
 
         if normalized_status in {"bot_managed", "closed"}:
             await self._resolve_open_handoff_tickets(
@@ -1733,6 +1727,30 @@ class AIAgentService:
                     handled = True
                     skip_legacy = True
                     action = "tool_driven_reply"
+                # --- GUARANTEED REPLY SAFETY NET ---
+                # If autonomous mode processed a turn but no visible reply was sent,
+                # always send SOMETHING so the customer is never left without a response.
+                if not visible_reply_sent and not handled:
+                    safety_text = reply_text if reply_text else "مرحبًا، تم استلام رسالتك. سيتواصل معك أحد أعضاء الفريق قريبًا."
+                    try:
+                        await self._send_ai_outbound_message(
+                            user_id=user_id,
+                            message_type="text",
+                            text=safety_text,
+                        )
+                        visible_reply_sent = True
+                        action = "guaranteed_reply" if not reply_text else "send_text_reply"
+                    except Exception as safety_exc:
+                        self.log.warning("ai_agent guaranteed reply failed workspace=%s user=%s err=%s", ws, user_id, safety_exc)
+                    # If even the LLM reply was empty, assign a human agent
+                    if not reply_text:
+                        try:
+                            await self.tools.assign_human_agent(user_id=user_id, workspace=ws)
+                            action = "guaranteed_reply_with_handoff"
+                        except Exception:
+                            pass
+                    handled = True
+                    skip_legacy = True
             new_state = {
                 "status": (
                     "hybrid" if should_handoff else str(output_data.get("conversation_status") or "bot_managed")
@@ -1880,7 +1898,8 @@ class AIAgentService:
                     await self._send_ai_outbound_message(
                         user_id=user_id, message_type="text", text=fallback_text,
                     )
-                    await self._sync_conversation_tags(user_id=user_id, add_tags=["ai-error", "needs-human"])
+                    # Assign a human agent instead of using tags (tags create [system] messages)
+                    await self.tools.assign_human_agent(user_id=user_id, workspace=ws)
                 except Exception:
                     pass
             await self._log_turn(
@@ -2263,7 +2282,7 @@ class AIAgentService:
                 await db.commit()
 
     async def _mark_handoff(self, *, user_id: str, output_data: dict[str, Any], workspace: str) -> dict[str, Any]:
-        await self._sync_conversation_tags(user_id=user_id, add_tags=["ai-handoff", "needs-human"], remove_tags=["ai-resolved"])
+        # No custom tags — assign_human_agent below handles the handoff (tags create visible [system] messages)
         ticket = await self._create_handoff_ticket(
             user_id=user_id,
             workspace=workspace,

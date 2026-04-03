@@ -502,5 +502,102 @@
       "should_handoff": false,
       "tool_names": ["search_catalog_products"]
     }
+  },
+  {
+    "id": "negative_greeting_hello_no_catalog",
+    "language": "en",
+    "transcript": [
+      "Customer: Hello"
+    ],
+    "expected": {
+      "intent": "other",
+      "should_handoff": false,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "negative_greeting_bonjour_no_catalog",
+    "language": "fr",
+    "transcript": [
+      "Customer: Bonjour"
+    ],
+    "expected": {
+      "intent": "other",
+      "should_handoff": false,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "negative_delivery_question_no_catalog",
+    "language": "ar",
+    "transcript": [
+      "Customer: أين وصل الطلب ديالي؟"
+    ],
+    "expected": {
+      "intent": "order_follow_up",
+      "should_handoff": false,
+      "tool_names": ["get_order_by_reference"]
+    }
+  },
+  {
+    "id": "negative_size_question_existing_order_no_catalog",
+    "language": "ar",
+    "transcript": [
+      "Customer: هل المقاس 32 مناسب لابنتي عمرها 8 سنوات؟ طلبت من عندكم قبل"
+    ],
+    "expected": {
+      "intent": "size_help",
+      "should_handoff": false,
+      "tool_names": []
+    }
+  },
+  {
+    "id": "negative_exchange_with_size_no_catalog",
+    "language": "darija",
+    "transcript": [
+      "Customer: bghit nbedel l size hit jani sghir bghit size 34"
+    ],
+    "expected": {
+      "intent": "exchange_return",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "negative_delivery_cost_no_catalog",
+    "language": "darija",
+    "transcript": [
+      "Customer: chhal tatakhed livraison l fes?"
+    ],
+    "expected": {
+      "intent": "delivery_question",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "negative_return_policy_no_catalog",
+    "language": "fr",
+    "transcript": [
+      "Customer: Quelle est votre politique de retour?"
+    ],
+    "expected": {
+      "intent": "exchange_return",
+      "should_handoff": false,
+      "tool_names": ["get_business_policies"]
+    }
+  },
+  {
+    "id": "negative_order_tracking_with_number_no_catalog",
+    "language": "ar",
+    "transcript": [
+      "Customer: أريد تتبع طلبي رقم 15678"
+    ],
+    "expected": {
+      "intent": "order_follow_up",
+      "should_handoff": false,
+      "tool_names": ["get_order_by_reference"]
+    }
   }
 ]
+

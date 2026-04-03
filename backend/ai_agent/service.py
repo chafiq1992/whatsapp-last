@@ -28,7 +28,7 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "max_output_tokens": 900,
     "max_context_messages": 12,
     "catalog_results_limit": 6,
-    "send_catalog_when_possible": True,
+    "send_catalog_when_possible": False,
     "supported_languages": ["darija", "ar", "fr", "en"],
     "tone": "Brief, polite, commerce-native Moroccan retail customer service tone.",
     "handoff_enabled": True,
@@ -55,9 +55,10 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
         "Never invent stock, policies, prices, delivery details, or order facts. "
         "Be friendly and welcoming. If the customer only greets you, reply with a short welcome and ask how you can help. "
         "Default to one short message only. Use the minimum words needed, ideally one or two short sentences. Ask at most one useful clarification question. "
-        "Do not send any catalog unless the customer is clearly asking to see products and you already know the needed size or age plus gender. "
-        "Prefer recommending products and catalog sets that exist in the current inbox catalog only when you are ready to send them. Escalate when "
-        "the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
+        "CATALOG RULE: ONLY send catalog items when the customer EXPLICITLY asks to browse or buy NEW products. "
+        "Questions about existing orders, delivery, exchanges, returns, sizing advice for past orders, or general inquiries are NOT catalog requests. "
+        "Before sending any catalog, you must know: gender + age (for clothing) or gender + shoe size (for shoes). If missing, ask first. "
+        "Escalate when the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
     ),
     "business_context": (
         "Business type: clothing and shoes retailer in Morocco. "
@@ -1645,12 +1646,14 @@ class AIAgentService:
                 target for target in auto_catalog_targets
                 if not self._was_recent_catalog_set_sent(recent_messages, str(target.get("id") or "").strip(), limit=6)
             ][:3]
-            catalog_send_intents = {"product_discovery", "size_help", "product_availability"}
+            catalog_send_intents = {"product_discovery"}
             catalog_intent_ok = str(output_data.get("intent") or "").strip() in catalog_send_intents
+            llm_intends_catalog = bool(output_data.get("intends_catalog_send"))
             auto_catalog_set_possible = bool(
                 effective_mode == "autonomous"
                 and config.get("send_catalog_when_possible")
                 and catalog_intent_ok
+                and llm_intends_catalog
                 and auto_catalog_targets
                 and "send_whatsapp_catalog_message" not in action_tool_names
             )
@@ -1663,6 +1666,7 @@ class AIAgentService:
                 effective_mode == "autonomous"
                 and config.get("send_catalog_when_possible")
                 and catalog_intent_ok
+                and llm_intends_catalog
                 and auto_product_ids
                 and "send_whatsapp_product_carousel" not in action_tool_names
                 and not auto_catalog_set_possible
@@ -1741,7 +1745,15 @@ class AIAgentService:
                 "summary": str(output_data.get("state_summary") or state.get("summary") or "").strip(),
                 "last_language": str(output_data.get("language") or state.get("last_language") or "").strip(),
                 "last_intent": str(output_data.get("intent") or state.get("last_intent") or "").strip(),
-                "slots_json": output_data.get("entities") or {},
+                "slots_json": self._merge_conversation_slots(
+                    previous_slots=state.get("slots_json") or {},
+                    new_entities=output_data.get("entities") or {},
+                    sent_catalog_set_ids=[
+                        str(target.get("id") or "").strip()
+                        for target in (auto_catalog_targets if action in ("send_catalog_set", "send_catalog_sets") else [])
+                        if str(target.get("id") or "").strip()
+                    ],
+                ),
                 "risk_json": {
                     "emotion": output_data.get("emotion"),
                     "urgency": output_data.get("urgency"),
@@ -2829,13 +2841,27 @@ class AIAgentService:
             "You have access to tools for customer lookup, orders, delivery, policies, stock, catalog messages, human assignment, and conversation status.\n"
             "Before answering delivery, COD, exchange, return, refund, or complaint-policy questions, call get_business_policies and rely only on approved policies.\n"
             "CRITICAL LANGUAGE RULE: Always answer the customer in standard Arabic using Arabic script only. "
-            "Do not use Darija, French, English, or Latin transliteration in customer-visible replies.\n"
-            "For catalog browsing requests, use the current inbox catalog structure. Prefer a matching product set when the customer is browsing by gender, age, size, or category, and prefer specific products only when you have clear item matches.\n"
-            "Do not send any catalog set unless the request is ready. A request is ready only when gender is known and the needed measurement is known: age for clothing, size for shoes.\n"
-            "If the customer asks about clothes or shoes without enough information, ask one short clarification question and do not send a catalog yet.\n"
+            "Do not use Darija, French, English, or Latin transliteration in customer-visible replies.\n\n"
+            "=== CATALOG DECISION TREE ===\n"
+            "Step 1: Is the customer EXPLICITLY asking to browse, buy, or see NEW products? "
+            "If NO → do NOT send catalog. Set intends_catalog_send=false. Answer the question normally.\n"
+            "Step 2: Do you know the gender (girls/boys)? If NO → ask for gender. Do NOT send catalog yet.\n"
+            "Step 3: For clothing: do you know the child's age? For shoes: do you know the shoe size? "
+            "If NO → ask the missing info. Do NOT send catalog yet.\n"
+            "Step 4: All info is known → set intends_catalog_send=true. Use send tools or populate recommended fields.\n\n"
+            "CATALOG DO-NOTS (critical):\n"
+            "- Customer asks about delivery/shipping → do NOT send catalog\n"
+            "- Customer asks about their existing order → do NOT send catalog\n"
+            "- Customer asks about sizing for a past purchase → do NOT send catalog\n"
+            "- Customer asks about exchange/return → do NOT send catalog\n"
+            "- Customer greets you → do NOT send catalog\n"
+            "- Customer mentions 'size' in context of existing order → do NOT send catalog\n"
+            "- You are unsure if the customer wants to browse products → do NOT send catalog, ask first\n\n"
             "When you use send_whatsapp_catalog_message or send_whatsapp_product_message, put the customer-facing sentence in the tool caption and leave reply_text empty unless you intentionally want a second separate message.\n"
             "Default to one customer-visible message per turn. Keep wording minimal and direct, usually one or two short sentences.\n"
-            "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n"
+            "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n\n"
+            "CONVERSATION MEMORY: The user prompt may include a 'Conversation memory' section with previously collected customer details "
+            "(gender, age, size, shown catalog sets). Use this to avoid re-asking questions the customer already answered.\n\n"
             "CONFIDENCE SCORING: Set confidence based on how certain you are about the correct action. "
             "Set confidence >= 0.85 only when you have retrieved real data (policy, order, product) that directly answers the question. "
             "Set confidence 0.5-0.84 when you are making a reasonable inference without full data. "
@@ -2849,6 +2875,7 @@ class AIAgentService:
             "\"urgency\":\"low|medium|high\","
             "\"should_handoff\":false,"
             "\"handoff_reason\":\"\","
+            "\"intends_catalog_send\":false,"
             "\"conversation_status\":\"bot_managed|hybrid|human_managed|closed\","
             "\"policy_topics\":[],"
             "\"reply_text\":\"\","
@@ -2859,7 +2886,8 @@ class AIAgentService:
             "\"state_summary\":\"\""
             "}\n"
             "Rules: keep reply_text brief (1-2 sentences max), do not invent unavailable products or policies, "
-            "always reply in standard Arabic only, and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
+            "always reply in standard Arabic only, set intends_catalog_send=true ONLY when the customer explicitly wants product browsing and all needed info is collected, "
+            "and hand off if the customer is angry, requests a human, or raises a refund/complaint risk."
         )
 
     def _build_user_prompt(self, turn_payload: dict[str, Any]) -> str:
@@ -2885,6 +2913,8 @@ class AIAgentService:
             f"- [{p.get('topic')}/{p.get('locale')}] {p.get('title')}: {p.get('content')}"
             for p in (turn_payload.get("policies") or [])
         ]
+        # Build conversation memory from carried-forward slots
+        memory_lines = self._build_conversation_memory(turn_payload)
         return (
             f"Workspace: {turn_payload.get('workspace')}\n"
             f"Customer phone/user id: {turn_payload.get('user_id')}\n"
@@ -2894,6 +2924,7 @@ class AIAgentService:
             f"Delivery context: {json.dumps(turn_payload.get('delivery_context') or {}, ensure_ascii=False)}\n"
             f"Latest customer message: {turn_payload.get('incoming_message')}\n\n"
             f"Recent transcript:\n{chr(10).join(recent_lines[-12:]) if recent_lines else '(empty)'}\n\n"
+            f"Conversation memory:\n{chr(10).join(memory_lines) if memory_lines else '(no prior context)'}\n\n"
             f"Matched catalog sets:\n{chr(10).join(matched_set_lines) if matched_set_lines else '(none)'}\n\n"
             f"Catalog candidates:\n{chr(10).join(product_lines) if product_lines else '(none)'}\n\n"
             f"Stock checks:\n{chr(10).join(stock_lines) if stock_lines else '(none)'}\n\n"
@@ -2909,6 +2940,81 @@ class AIAgentService:
             "error_code": result.get("error_code"),
             "latency_ms": int(result.get("latency_ms") or 0),
         }
+
+    def _build_conversation_memory(self, turn_payload: dict[str, Any]) -> list[str]:
+        """Build conversation memory lines from carried-forward slots and state."""
+        lines: list[str] = []
+        state = turn_payload.get("conversation_state") or {}
+        slots = state.get("slots_json") or {}
+        risk = state.get("risk_json") or {}
+        counters = state.get("counters_json") or {}
+        turn_count = int(counters.get("turns") or 0)
+        if turn_count > 0:
+            lines.append(f"- Conversation turn: {turn_count + 1}")
+        last_intent = str(state.get("last_intent") or "").strip()
+        if last_intent:
+            lines.append(f"- Last detected intent: {last_intent}")
+        last_lang = str(state.get("last_language") or "").strip()
+        if last_lang:
+            lines.append(f"- Customer language: {last_lang}")
+        # Carried-forward entities from previous turns
+        gender = str(slots.get("gender") or "").strip()
+        if gender:
+            lines.append(f"- Gender: {gender}")
+        child_age = slots.get("child_age")
+        if child_age is not None and str(child_age).strip():
+            lines.append(f"- Child age: {child_age}")
+        size = slots.get("size")
+        if size is not None and str(size).strip():
+            lines.append(f"- Size: {size}")
+        color = str(slots.get("color") or "").strip()
+        if color:
+            lines.append(f"- Color preference: {color}")
+        product_type = str(slots.get("product_type") or "").strip()
+        if product_type:
+            lines.append(f"- Product type: {product_type}")
+        order_number = str(slots.get("order_number") or "").strip()
+        if order_number:
+            lines.append(f"- Order number: {order_number}")
+        city = str(slots.get("city") or "").strip()
+        if city:
+            lines.append(f"- City: {city}")
+        # Track shown catalog sets to avoid re-sends
+        shown_set_ids = list(slots.get("shown_catalog_set_ids") or [])
+        if shown_set_ids:
+            lines.append(f"- Already shown catalog set IDs: {', '.join(str(s) for s in shown_set_ids[:6])}")
+        summary = str(state.get("summary") or "").strip()
+        if summary:
+            lines.append(f"- Summary: {summary}")
+        return lines
+
+    def _merge_conversation_slots(
+        self,
+        *,
+        previous_slots: dict[str, Any],
+        new_entities: dict[str, Any],
+        sent_catalog_set_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Merge new LLM-extracted entities with previously carried-forward slots.
+
+        New non-null values override old ones. Null values in new_entities
+        preserve the previous value (carry-forward).
+        """
+        merged = dict(previous_slots)
+        entity_keys = ("gender", "child_age", "size", "color", "product_type", "budget", "city", "order_number")
+        for key in entity_keys:
+            new_val = new_entities.get(key)
+            if new_val is not None and str(new_val).strip():
+                merged[key] = new_val
+        # Track shown catalog set IDs across turns
+        existing_shown = list(merged.get("shown_catalog_set_ids") or [])
+        for set_id in (sent_catalog_set_ids or []):
+            clean_id = str(set_id or "").strip()
+            if clean_id and clean_id not in existing_shown:
+                existing_shown.append(clean_id)
+        if existing_shown:
+            merged["shown_catalog_set_ids"] = existing_shown[:20]
+        return merged
 
     def _extract_order_reference_candidate(self, text: str) -> str:
         raw = str(text or "")
@@ -2939,14 +3045,29 @@ class AIAgentService:
 
     def _message_mentions_catalog_request(self, text: str) -> bool:
         hay = str(text or "").lower()
+        # Exclude non-shopping contexts: delivery, order, exchange, return, refund, complaint
+        non_catalog_markers = (
+            "delivery", "livraison", "توصيل", "تتبع", "tracking", "track", "suivi",
+            "order", "commande", "طلب", "طلبي", "طلبية",
+            "exchange", "échange", "echange", "تبديل", "بدل", "nbedel", "استبدال",
+            "return", "retour", "إرجاع", "رجع", "nrej3",
+            "refund", "remboursement", "استرجاع", "رد المال", "استرداد",
+            "complaint", "plainte", "شكاية", "شكوى", "مشكلة", "réclamation",
+        )
+        if any(marker in hay for marker in non_catalog_markers):
+            return False
         if self.tools._extract_catalog_request_specs(hay):
             return True
+        # Only trigger on explicit product-browsing keywords, not generic "size" or "taille"
         return any(
             token in hay
             for token in (
-                "catalog", "catalogue", "set", "size", "taille", "pointure", "shoe", "shoes", "sandal", "sandals",
-                "chauss", "sneaker", "girls", "boys", "girl", "boy", "بنات", "بنت", "أولاد", "اولاد",
-                "ولد", "قياس", "مقاس", "سباط", "حذاء", "صندل", "كاتالوغ",
+                "catalog", "catalogue", "كاتالوغ",
+                "shoe", "shoes", "sandal", "sandals", "chauss", "sneaker",
+                "حذاء", "أحذية", "صندل", "صنادل", "سباط", "سنيكر",
+                "بنات", "بنت", "أولاد", "اولاد", "ولد",
+                "girls", "boys", "girl", "boy",
+                "بغيت", "أريد حذاء", "أريد ملابس", "bghit",
             )
         )
 

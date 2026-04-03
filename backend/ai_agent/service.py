@@ -52,12 +52,16 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "instructions": (
         "You are the AI customer service assistant for a Moroccan clothing and shoes retailer. "
         "Always reply in standard Arabic using Arabic script only. "
+        "IMPORTANT: Always use Western/English numerals (0-9) in replies, never Arabic-Indic numerals (٠-٩). "
         "Never invent stock, policies, prices, delivery details, or order facts. "
         "Be friendly and welcoming. If the customer only greets you, reply with a short welcome and ask how you can help. "
         "Default to one short message only. Use the minimum words needed, ideally one or two short sentences. Ask at most one useful clarification question. "
         "CATALOG RULE: ONLY send catalog items when the customer EXPLICITLY asks to browse or buy NEW products. "
         "Questions about existing orders, delivery, exchanges, returns, sizing advice for past orders, or general inquiries are NOT catalog requests. "
         "Before sending any catalog, you must know: gender + age (for clothing) or gender + shoe size (for shoes). If missing, ask first. "
+        "PRODUCT INQUIRY: When the customer sends a catalog item or product image, read the product details (name, price, variant) and respond helpfully about that specific product. "
+        "UPSELLING: When a customer shows clear buying intent for clothing (e.g. confirms they want to buy, asks about price/availability), "
+        "suggest matching shoes once by asking something like 'هل تريدين أيضًا أحذية مناسبة؟'. Do NOT upsell on every message — only once per buying conversation, and only for clothing→shoes. "
         "Escalate when the customer is angry, asks for a human, or raises a refund, dispute, or legal-risk issue."
     ),
     "business_context": (
@@ -1378,7 +1382,11 @@ class AIAgentService:
                 message_obj=message_obj,
             )
             return {"handled": False, "skip_legacy": False, "reason": "disabled", "turn_id": turn_id}
-        if msg_type != "text":
+        # Allow text, button, interactive (already normalized to text in main.py),
+        # and catalog/product messages. Skip only truly unsupported types.
+        _ai_supported_types = {"text", "order", "interactive", "button"}
+        has_product_ref = bool(str(message_obj.get("product_retailer_id") or "").strip())
+        if msg_type not in _ai_supported_types and not has_product_ref:
             turn_id = await self._record_skip(
                 workspace=ws,
                 user_id=user_id,
@@ -1388,6 +1396,12 @@ class AIAgentService:
                 message_obj=message_obj,
             )
             return {"handled": False, "skip_legacy": False, "reason": "non_text", "turn_id": turn_id}
+        # For product/catalog messages, build a text description so the LLM can understand
+        if has_product_ref or msg_type == "order":
+            incoming_text = self._build_product_message_text(message_obj)
+            message_obj["message"] = incoming_text
+            message_obj["type"] = "text"
+            msg_type = "text"
         if not str(config.get("_openai_api_key") or "").strip():
             turn_id = await self._record_skip(
                 workspace=ws,
@@ -2879,6 +2893,17 @@ class AIAgentService:
             "When you use send_whatsapp_catalog_message or send_whatsapp_product_message, put the customer-facing sentence in the tool caption and leave reply_text empty unless you intentionally want a second separate message.\n"
             "Default to one customer-visible message per turn. Keep wording minimal and direct, usually one or two short sentences.\n"
             "Use tools whenever facts are needed. Use send tools only when you are ready to act. In shadow/suggest modes, send tools may dry-run.\n\n"
+            "PRODUCT INQUIRY: When the customer message includes '[Customer is asking about product ID: ...]', "
+            "they clicked on a catalog item. Look up that product from catalog_candidates and respond about THAT specific product "
+            "(name, price, availability, size). If the product is in stock, confirm details. If not, suggest alternatives.\n\n"
+            "UPSELLING: When a customer shows clear buying intent for clothing (confirms purchase, asks price/availability, or you just sent them a clothing catalog set), "
+            "suggest shoes ONCE by saying something like 'هل تريدين أيضًا أحذية مناسبة؟'. Rules:\n"
+            "- Only upsell clothing→shoes (never shoes→clothing, never same category)\n"
+            "- Only once per conversation (check conversation memory for 'upsell_offered')\n"
+            "- Only when buying intent is clear (not during browsing/questions)\n"
+            "- Keep the upsell short and natural, not pushy\n\n"
+            "NUMERAL RULE: Always use Western/English numerals (0, 1, 2, ..., 9) in all replies. "
+            "Never use Arabic-Indic numerals (٠, ١, ٢, ..., ٩). Example: write '279.99 درهم' not '٢٧٩.٩٩ درهم'.\n\n"
             "CONVERSATION MEMORY: The user prompt may include a 'Conversation memory' section with previously collected customer details "
             "(gender, age, size, shown catalog sets). Use this to avoid re-asking questions the customer already answered.\n\n"
             "CONFIDENCE SCORING: Set confidence based on how certain you are about the correct action. "
@@ -3391,6 +3416,45 @@ class AIAgentService:
         shortened = raw[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:.-،")
         return shortened + "…"
 
+    @staticmethod
+    def _convert_arabic_numerals(text: str) -> str:
+        """Convert Arabic-Indic numerals (٠١٢٣٤٥٦٧٨٩) to Western numerals (0123456789)."""
+        if not text:
+            return text
+        _arabic_indic_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+        return text.translate(_arabic_indic_map)
+
+    def _build_product_message_text(self, message_obj: dict[str, Any]) -> str:
+        """Convert a catalog item / product / order message_obj into descriptive text for the LLM."""
+        parts: list[str] = []
+        # Customer's original text (e.g. "Bghit hada ch7al taman")
+        original_text = str(message_obj.get("message") or "").strip()
+        if original_text and not original_text.startswith("[") and not original_text.startswith("{"):
+            parts.append(original_text)
+        # Product reference from catalog item click
+        product_id = str(message_obj.get("product_retailer_id") or message_obj.get("retailer_id") or "").strip()
+        if product_id:
+            parts.append(f"[Customer is asking about product ID: {product_id}]")
+        # Order payload (WhatsApp order message)
+        if str(message_obj.get("type") or "").strip() == "order":
+            raw_body = str(message_obj.get("message") or "").strip()
+            try:
+                order_data = json.loads(raw_body) if raw_body.startswith("{") else {}
+                items = order_data.get("product_items") or []
+                if items:
+                    item_descs = []
+                    for item in items[:5]:
+                        rid = str(item.get("product_retailer_id") or "").strip()
+                        qty = item.get("quantity") or 1
+                        price = item.get("item_price") or ""
+                        currency = item.get("currency") or "MAD"
+                        item_descs.append(f"product_id={rid} qty={qty} price={price} {currency}")
+                    parts.append(f"[Customer placed an order: {'; '.join(item_descs)}]")
+            except (json.JSONDecodeError, TypeError):
+                if raw_body:
+                    parts.append(f"[Customer sent an order: {raw_body[:200]}]")
+        return " ".join(parts) if parts else "[Customer sent a product/catalog item]"
+
     async def _send_ai_outbound_message(
         self,
         *,
@@ -3427,8 +3491,11 @@ class AIAgentService:
         except Exception:
             recent_messages = []
         payload_type = str(message_type or "").strip()
-        normalized_message = self._normalized_message_text(payload.get("message") or "")
-        if payload_type == "text" and normalized_message and self._was_recent_ai_text_sent(recent_messages, payload.get("message") or "", limit=4):
+        # Convert Arabic-Indic numerals to Western before sending
+        final_text = self._convert_arabic_numerals(payload.get("message") or "")
+        payload["message"] = final_text
+        normalized_message = self._normalized_message_text(final_text)
+        if payload_type == "text" and normalized_message and self._was_recent_ai_text_sent(recent_messages, final_text, limit=4):
             return {"suppressed": True, "reason": "duplicate_text"}
         if payload_type == "catalog_set" and set_id and self._was_recent_catalog_set_sent(recent_messages, str(set_id or "").strip(), limit=6):
             return {"suppressed": True, "reason": "duplicate_catalog_set", "set_id": str(set_id or "").strip()}

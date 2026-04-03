@@ -8346,7 +8346,11 @@ class MessageProcessor:
 
         ai_result = {"handled": False, "skip_legacy": False}
         try:
-            if msg_type == "text" and getattr(self, "ai_agent_service", None):
+            _ai_eligible = (
+                msg_type in ("text", "order", "interactive", "button")
+                or bool(str(message_obj.get("product_retailer_id") or "").strip())
+            )
+            if _ai_eligible and getattr(self, "ai_agent_service", None):
                 ai_result = await self.ai_agent_service.maybe_handle_incoming_message(message_obj)
         except Exception as _exc:
             print(f"AI agent failed: {_exc}")

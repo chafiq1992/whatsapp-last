@@ -283,6 +283,7 @@ const ACTION_CATEGORIES = [
   { id: 'delivery', label: 'Delivery Actions',   icon: <ScanLine className="w-3.5 h-3.5" />,      color: 'sky' },
   { id: 'catalog',  label: 'Catalog & Orders',   icon: <Package className="w-3.5 h-3.5" />,       color: 'indigo' },
   { id: 'workflow', label: 'Workflow Control',   icon: <Zap className="w-3.5 h-3.5" />,           color: 'slate' },
+  { id: 'ai',       label: 'AI Actions',          icon: <Sparkles className="w-3.5 h-3.5" />,      color: 'violet' },
 ];
 
 const ACTION_CATALOG = [
@@ -309,6 +310,8 @@ const ACTION_CATALOG = [
   { id: 'assign_agent',      label: 'Assign to Agent',         icon: <Zap className="w-4 h-4 text-cyan-500" />,              type: 'assign_agent',                  cat: 'workflow', desc: 'Route conversation to a specific agent' },
   { id: 'close_conversation',label: 'Close Conversation',      icon: <Ban className="w-4 h-4 text-slate-500" />,             type: 'close_conversation',            cat: 'workflow', desc: 'Mark conversation as resolved' },
   { id: 'exit',              label: 'Stop / Exit',             icon: <Ban className="w-4 h-4 text-rose-500" />,              type: 'exit',                          cat: 'workflow', desc: 'End the workflow here' },
+  // ── AI Actions ──
+  { id: 'ai_analyze_reply',  label: 'AI Analyze & Reply',      icon: <Sparkles className="w-4 h-4 text-violet-500" />,        type: 'ai_analyze_and_reply',           cat: 'ai',      desc: 'AI reads conversation, transcribes audio, sends personalized follow-up' },
 ];
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -351,6 +354,32 @@ const FLOW_TEMPLATES = [
     label: 'Abandoned Cart Recovery',
     description: 'Send a reminder when a checkout is abandoned',
     build: () => buildTemplateFlow('checkouts/update', 'Abandoned Checkout', 'send_template', 'Send WhatsApp Template', 'abandoned_cart_reminder'),
+  },
+  {
+    id: 'tpl_abandoned_chat',
+    label: '🤖 Abandoned Chat Recovery',
+    description: 'AI analyzes idle conversations and sends personalized re-engagement messages',
+    build: () => {
+      const tId = 'n_' + Date.now() + '_t1';
+      const aId = 'n_' + Date.now() + '_a1';
+      return {
+        nodes: [
+          rfNode(tId, 'startTrigger', 0, 0, {
+            configured: true, source: 'whatsapp', label: 'No Reply (4 hours)',
+            event: 'no_reply', description: 'Customer hasn\'t replied in 4 hours',
+          }),
+          rfNode(aId, 'actionFlow', 0, 200, {
+            actionType: 'ai_analyze_and_reply', actionLabel: 'AI Analyze & Reply',
+            ai_run_mode: 'suggest', ai_max_messages: 30,
+            ai_transcribe_audio: true, ai_language: 'auto',
+            description: 'AI reads conversation and crafts re-engagement message',
+          }),
+        ],
+        edges: [rfEdge(tId, aId)],
+        meta: { name: 'Abandoned Chat Recovery' },
+        condition: { seconds: 14400, no_order_in_last_hours: 96, once_per_customer: true, keep_unresponded: true },
+      };
+    },
   },
 ];
 
@@ -1126,6 +1155,15 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
             actions.push({ type: 'assign_agent', agent: d.agent || '' });
           } else if (at === 'close_conversation') {
             actions.push({ type: 'close_conversation' });
+          } else if (at === 'ai_analyze_and_reply') {
+            actions.push({
+              type: 'ai_analyze_and_reply',
+              ai_run_mode: d.ai_run_mode || 'suggest',
+              ai_max_messages: Number(d.ai_max_messages || 30),
+              ai_transcribe_audio: d.ai_transcribe_audio !== false,
+              ai_language: d.ai_language || 'auto',
+              ai_instructions: d.ai_instructions || '',
+            });
           } else if (at === 'exit') {
             actions.push({ type: 'exit' });
           }
@@ -2222,6 +2260,48 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             />
           )}
 
+
+          {/* ── AI Analyze & Reply ── */}
+          {d.actionType === 'ai_analyze_and_reply' && (
+            <div className="space-y-3">
+              <div className="p-3 rounded-lg bg-violet-50 border border-violet-200 text-sm text-violet-700">
+                <div className="font-semibold mb-1 flex items-center gap-2"><Sparkles className="w-4 h-4" /> AI Analyze &amp; Reply</div>
+                <div className="text-xs">Reads conversation history, transcribes voice notes with Whisper, and uses AI to craft a personalized re-engagement message.</div>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-500 mb-1 block">Run mode</label>
+                <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.ai_run_mode || 'suggest'} onChange={(e) => onUpdate({ ai_run_mode: e.target.value })}>
+                  <option value="shadow">Shadow — log analysis only</option>
+                  <option value="suggest">Suggest — show in AI turns for review</option>
+                  <option value="autonomous">Autonomous — send message directly</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Max messages to read</label>
+                  <input type="number" className="w-full border rounded-lg px-3 py-2 text-sm" min="5" max="50" value={d.ai_max_messages || 30} onChange={(e) => onUpdate({ ai_max_messages: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Reply language</label>
+                  <select className="w-full border rounded-lg px-3 py-2 text-sm" value={d.ai_language || 'auto'} onChange={(e) => onUpdate({ ai_language: e.target.value })}>
+                    <option value="auto">Auto-detect</option>
+                    <option value="ar">Arabic</option>
+                    <option value="darija">Darija</option>
+                    <option value="fr">French</option>
+                    <option value="en">English</option>
+                  </select>
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                <input type="checkbox" checked={d.ai_transcribe_audio !== false} onChange={(e) => onUpdate({ ai_transcribe_audio: e.target.checked })} />
+                Transcribe voice notes (Whisper)
+              </label>
+              <div>
+                <label className="text-xs font-semibold text-slate-500 mb-1 block">Custom instructions (optional)</label>
+                <textarea className="w-full border rounded-lg px-3 py-2 text-sm h-20 resize-none" value={d.ai_instructions || ''} onChange={(e) => onUpdate({ ai_instructions: e.target.value })} placeholder="e.g. Mention our free shipping promotion, focus on shoes..." />
+              </div>
+            </div>
+          )}
           {/* â”€â”€ Tag / Remove Tag â”€â”€ */}
           {(d.actionType === 'shopify_tag' || d.actionType === 'shopify_remove_tag' || d.actionType === 'shopify_order_tag') && (
             <div className="space-y-2">
@@ -2596,6 +2676,13 @@ export default function FlowBuilder() {
           extra.agent = a.agent || '';
         } else if (at === 'close_conversation') {
           actionType = 'close_conversation'; label = 'Close';
+        } else if (at === 'ai_analyze_and_reply' || at === 'ai_agent_analyze') {
+          actionType = 'ai_analyze_and_reply'; label = 'AI Analyze & Reply';
+          extra.ai_run_mode = a.ai_run_mode || 'suggest';
+          extra.ai_max_messages = a.ai_max_messages || 30;
+          extra.ai_transcribe_audio = a.ai_transcribe_audio !== false;
+          extra.ai_language = a.ai_language || 'auto';
+          extra.ai_instructions = a.ai_instructions || '';
         } else if (at === 'exit') {
           actionType = 'exit'; label = 'Stop';
         }

@@ -9772,6 +9772,112 @@ class MessageProcessor:
                                             )
                                         except Exception:
                                             pass
+                                elif at in ("ai_analyze_and_reply", "ai_agent_analyze"):
+                                    # ── AI Analyze & Reply ──
+                                    try:
+                                        _ai_rm = str(act.get("ai_run_mode") or "autonomous").strip().lower()
+                                        _ai_maxm = max(5, min(50, int(act.get("ai_max_messages") or 30)))
+                                        _ai_tr = bool(act.get("ai_transcribe_audio") if act.get("ai_transcribe_audio") is not None else True)
+                                        _ai_lang = str(act.get("ai_language") or "auto").strip()
+                                        _ai_instr = str(act.get("ai_instructions") or "").strip()
+                                        _ai_svc = getattr(self, "ai_agent_service", None)
+                                        _ai_cfg = {}
+                                        _api_key = ""
+                                        if _ai_svc:
+                                            try:
+                                                _ai_cfg = await _ai_svc.get_config(ws)
+                                                _api_key = str(_ai_cfg.get("_openai_api_key") or "").strip()
+                                            except Exception:
+                                                pass
+                                        if not _api_key:
+                                            _api_key = str(os.environ.get("OPENAI_API_KEY") or "").strip()
+                                        if not _api_key:
+                                            continue
+                                        _msgs = await self.db_manager.get_messages(user_id, offset=0, limit=_ai_maxm)
+                                        if not _msgs or len(_msgs) < 2:
+                                            continue
+                                        if _ai_tr:
+                                            try:
+                                                from .ai_agent.whisper import WhisperTranscriber
+                                                _wh = WhisperTranscriber()
+                                                _wl = None if _ai_lang == "auto" else _ai_lang
+                                                _msgs = await _wh.transcribe_messages(_msgs, _api_key, max_audio=5, language=_wl)
+                                            except Exception:
+                                                pass
+                                        _cl = []
+                                        for _mm in reversed(_msgs):
+                                            _snd = "Customer" if not bool(_mm.get("from_me")) else "Agent"
+                                            _mt = str(_mm.get("message") or _mm.get("text") or "").strip()
+                                            if _mt:
+                                                _cl.append(f"{_snd}: {_mt}")
+                                        _ctxt = "\n".join(_cl[-60:])
+                                        _lm = {"ar": "Reply in standard Arabic.", "darija": "Reply in Moroccan Darija using Arabic script.", "fr": "Reply in French.", "en": "Reply in English."}.get(_ai_lang, "Reply in the same language the customer used.")
+                                        _ex = f"\nAdditional: {_ai_instr}" if _ai_instr else ""
+                                        _prompt = (
+                                            f"You are a sales recovery assistant. Analyze this WhatsApp conversation. "
+                                            f"The customer showed interest but did not complete a purchase.\n\n"
+                                            f"Tasks:\n1. Identify why they didn't buy.\n2. Write a warm, personalized WhatsApp re-engagement message.\n"
+                                            f"3. Reference specific products/topics from the conversation.\n4. {_lm}\n"
+                                            f"5. Use Western numerals (0-9). Keep it short (2-3 sentences).{_ex}\n\n"
+                                            f"Conversation:\n{_ctxt}\n\n"
+                                            f'Respond with ONLY JSON: {{"reason":"...","message":"...","confidence":0.0}}'
+                                        )
+                                        _mdl = str(_ai_cfg.get("model") or "gpt-5.4-mini").strip()
+                                        _base = str(_ai_cfg.get("api_base") or "https://api.openai.com/v1").strip().rstrip("/")
+                                        try:
+                                            async with httpx.AsyncClient(timeout=30.0) as _acl:
+                                                _aresp = await _acl.post(
+                                                    f"{_base}/chat/completions",
+                                                    headers={"Authorization": f"Bearer {_api_key}", "Content-Type": "application/json"},
+                                                    json={"model": _mdl, "messages": [{"role": "user", "content": _prompt}], "max_tokens": 500, "temperature": 0.7},
+                                                )
+                                            if _aresp.status_code >= 400:
+                                                continue
+                                            _abody = _aresp.json()
+                                            _raw = str((_abody.get("choices") or [{}])[0].get("message", {}).get("content", "")).strip()
+                                        except Exception:
+                                            continue
+                                        _amsg = ""
+                                        _areason = ""
+                                        _aconf = 0.0
+                                        try:
+                                            _js = _raw
+                                            if "```" in _js:
+                                                _js = _js.split("```")[1]
+                                                if _js.startswith("json"):
+                                                    _js = _js[4:]
+                                            _pp = json.loads(_js.strip())
+                                            _amsg = str(_pp.get("message") or "").strip()
+                                            _areason = str(_pp.get("reason") or "").strip()
+                                            _aconf = float(_pp.get("confidence") or 0.0)
+                                        except Exception:
+                                            _amsg = _raw
+                                        if not _amsg:
+                                            continue
+                                        if _ai_rm == "autonomous":
+                                            await self.process_outgoing_message({
+                                                "user_id": user_id, "type": "text", "from_me": True,
+                                                "message": _amsg, "timestamp": datetime.utcnow().isoformat(),
+                                                "agent_username": "ai-recovery", "do_not_count_as_reply": _keep_unresponded,
+                                            })
+                                            sent_any_message = True
+                                        if _ai_svc:
+                                            try:
+                                                await _ai_svc._log_turn(
+                                                    workspace=ws, user_id=user_id, inbound_wa_message_id="",
+                                                    turn_mode=_ai_rm, turn_status="completed",
+                                                    detected_language=_ai_lang if _ai_lang != "auto" else "",
+                                                    detected_intent="abandoned_chat_recovery", emotion="", confidence=_aconf,
+                                                    action=f"abandoned_chat_{_ai_rm}", reply_text=_amsg,
+                                                    openai_response_id="", openai_conversation_id=None,
+                                                    request_json={"action": "ai_analyze_and_reply", "user_id": user_id, "reason": _areason, "run_mode": _ai_rm},
+                                                    response_json={"reason": _areason, "message": _amsg, "confidence": _aconf},
+                                                    usage_json={}, error_text=None, latency_ms=0,
+                                                )
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
                             if _once_per_customer and sent_any_message:
                                 try:
                                     await self.db_manager.mark_automation_rule_once_sent(

@@ -8393,9 +8393,9 @@ class MessageProcessor:
                     txt = str(message_obj.get("interactive_title") or message_obj.get("message") or "")
                 ws = get_current_workspace()
                 asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
-                _vlog(f"inbound_message: user={sender} txt_len={len(txt or '')} wa_msg_id={str(message_obj.get('wa_message_id') or '').strip()[:20]} ws={ws}")
+                logger.info(f"inbound_message: user={sender} txt_len={len(txt or '')} wa_msg_id={str(message_obj.get('wa_message_id') or '').strip()[:20]} ws={ws}")
                 if txt and str(message_obj.get("wa_message_id") or "").strip():
-                    _vlog(f"inbound_message: scheduling no_reply_followups for user={sender} ws={ws}")
+                    logger.info(f"inbound_message: scheduling no_reply_followups for user={sender} ws={ws}")
                     asyncio.create_task(self._schedule_no_reply_followups(
                         ws=_coerce_workspace(ws),
                         user_id=sender,
@@ -9498,12 +9498,12 @@ class MessageProcessor:
         """
         try:
             if not inbound_wa_message_id:
-                _vlog(f"no_reply_followups: skip – no wa_message_id for user={user_id} ws={ws}")
+                logger.info(f"no_reply_followups: skip – no wa_message_id for user={user_id} ws={ws}")
                 return
             rules = await self._load_automation_rules(ws)
-            _vlog(f"no_reply_followups: loaded {len(rules or [])} rules for ws={ws} user={user_id}")
+            logger.info(f"no_reply_followups: loaded {len(rules or [])} rules for ws={ws} user={user_id}")
             if not rules:
-                _vlog(f"no_reply_followups: no rules found for ws={ws}")
+                logger.info(f"no_reply_followups: no rules found for ws={ws}")
                 return
             text = str(incoming_text or "")
             text_lc = text.lower()
@@ -9511,20 +9511,20 @@ class MessageProcessor:
             for rule in rules:
                 try:
                     rid = str(rule.get("id") or "")
-                    _vlog(f"no_reply_followups: checking rule={rid} enabled={rule.get('enabled')} trigger={rule.get('trigger')} ws={ws} user={user_id}")
+                    logger.info(f"no_reply_followups: checking rule={rid} enabled={rule.get('enabled')} trigger={rule.get('trigger')} ws={ws} user={user_id}")
                     if not isinstance(rule, dict) or not bool(rule.get("enabled", False)):
-                        _vlog(f"no_reply_followups: skip rule={rid} – not enabled")
+                        logger.info(f"no_reply_followups: skip rule={rid} – not enabled")
                         continue
                     trigger = rule.get("trigger") or {}
                     if not isinstance(trigger, dict):
                         continue
                     if str(trigger.get("source") or "").lower() != "whatsapp":
-                        _vlog(f"no_reply_followups: skip rule={rid} – source={trigger.get('source')} not whatsapp")
+                        logger.info(f"no_reply_followups: skip rule={rid} – source={trigger.get('source')} not whatsapp")
                         continue
                     if str(trigger.get("event") or "").lower() not in _NO_REPLY_EVENTS:
-                        _vlog(f"no_reply_followups: skip rule={rid} – event={trigger.get('event')} not no_reply")
+                        logger.info(f"no_reply_followups: skip rule={rid} – event={trigger.get('event')} not no_reply")
                         continue
-                    _vlog(f"no_reply_followups: MATCHED rule={rid} seconds={rule.get('condition',{}).get('seconds')} user={user_id}")
+                    logger.info(f"no_reply_followups: MATCHED rule={rid} seconds={rule.get('condition',{}).get('seconds')} user={user_id}")
                     cond = rule.get("condition") or {}
                     if not isinstance(cond, dict):
                         cond = {}
@@ -9566,12 +9566,12 @@ class MessageProcessor:
 
                     async def _job(_rule: dict, _rid: str, _sec: int, _no_order_hours: float, _keep_unresponded: bool, _once_per_customer: bool):
                         try:
-                            _vlog(f"no_reply_job: SCHEDULED rule={_rid} delay={_sec}s user={user_id} ws={ws}")
+                            logger.info(f"no_reply_job: SCHEDULED rule={_rid} delay={_sec}s user={user_id} ws={ws}")
                             await asyncio.sleep(max(1, int(_sec)))
-                            _vlog(f"no_reply_job: WOKE UP rule={_rid} user={user_id} – checking if replied")
+                            logger.info(f"no_reply_job: WOKE UP rule={_rid} user={user_id} – checking if replied")
                             # If replied, skip
                             if await self.db_manager.has_inbound_reply(user_id=user_id, inbound_wa_message_id=inbound_wa_message_id):
-                                _vlog(f"no_reply_job: SKIP rule={_rid} user={user_id} – has reply")
+                                logger.info(f"no_reply_job: SKIP rule={_rid} user={user_id} – has reply")
                                 return
                             if _once_per_customer:
                                 try:
@@ -9946,7 +9946,7 @@ class MessageProcessor:
                         except Exception:
                             return
 
-                    _vlog(f"no_reply_followups: creating async task for rule={rid} delay={seconds}s user={user_id} ws={ws}")
+                    logger.info(f"no_reply_followups: creating async task for rule={rid} delay={seconds}s user={user_id} ws={ws}")
                     asyncio.create_task(_job(rule, rid, seconds, no_order_hours, keep_unresponded, once_per_customer))
                 except Exception:
                     continue

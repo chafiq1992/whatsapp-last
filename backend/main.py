@@ -8393,6 +8393,8 @@ class MessageProcessor:
                     txt = str(message_obj.get("interactive_title") or message_obj.get("message") or "")
                 ws = get_current_workspace()
                 asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
+                # Check for deferred no_reply jobs on each inbound message
+                asyncio.create_task(self._check_deferred_no_reply_jobs(ws))
                 _wa_msg_id = str(message_obj.get("wa_message_id") or "").strip()
                 logger.info(f"inbound_message: user={sender} typ={typ} txt_len={len(txt or '')} wa_msg_id={_wa_msg_id[:20]} ws={ws}")
                 # Schedule no_reply followups for ANY inbound message type (not just text)
@@ -9570,9 +9572,48 @@ class MessageProcessor:
                     keep_unresponded = bool((rule.get("condition") or {}).get("keep_unresponded"))
                     once_per_customer = bool((rule.get("condition") or {}).get("once_per_customer"))
 
+                    # Instead of asyncio.sleep (killed by Cloud Run CPU throttle),
+                    # store deferred job in DB and execute via _check_deferred_no_reply_jobs
+                    try:
+                        fire_at = (datetime.utcnow() + timedelta(seconds=max(1, seconds))).isoformat() + "Z"
+                        deferred_job = {
+                            "rule_id": rid,
+                            "user_id": user_id,
+                            "ws": ws,
+                            "fire_at": fire_at,
+                            "inbound_wa_message_id": inbound_wa_message_id,
+                            "no_order_hours": no_order_hours,
+                            "keep_unresponded": keep_unresponded,
+                            "once_per_customer": once_per_customer,
+                            "rule": rule,
+                            "created_at": datetime.utcnow().isoformat() + "Z",
+                        }
+                        _db_key = f"deferred_no_reply_jobs:{ws}"
+                        _existing_raw = None
+                        try:
+                            _existing_raw = await self.db_manager.get_setting(_db_key)
+                        except Exception:
+                            pass
+                        _existing_jobs = []
+                        if _existing_raw:
+                            try:
+                                if isinstance(_existing_raw, (bytes, bytearray)):
+                                    _existing_raw = _existing_raw.decode("utf-8", errors="ignore")
+                                _existing_jobs = json.loads(_existing_raw) if isinstance(_existing_raw, str) else []
+                                if not isinstance(_existing_jobs, list):
+                                    _existing_jobs = []
+                            except Exception:
+                                _existing_jobs = []
+                        _existing_jobs.append(deferred_job)
+                        await self.db_manager.set_setting(_db_key, json.dumps(_existing_jobs, ensure_ascii=False))
+                        logger.info(f"no_reply_followups: DEFERRED job stored rule={rid} fire_at={fire_at} delay={seconds}s user={user_id} ws={ws} total_pending={len(_existing_jobs)}")
+                    except Exception as _defer_exc:
+                        logger.info(f"no_reply_followups: ERROR storing deferred job rule={rid}: {_defer_exc}")
+
+                    # LEGACY: keep the async job as fallback but also rely on the deferred check
                     async def _job(_rule: dict, _rid: str, _sec: int, _no_order_hours: float, _keep_unresponded: bool, _once_per_customer: bool):
                         try:
-                            logger.info(f"no_reply_job: SCHEDULED rule={_rid} delay={_sec}s user={user_id} ws={ws}")
+                            logger.info(f"no_reply_job: SCHEDULED (async fallback) rule={_rid} delay={_sec}s user={user_id} ws={ws}")
                             await asyncio.sleep(max(1, int(_sec)))
                             logger.info(f"no_reply_job: WOKE UP rule={_rid} user={user_id} – checking if replied")
                             # If replied, skip
@@ -9959,7 +10000,167 @@ class MessageProcessor:
         except Exception:
             return
 
-    async def _handle_order_confirm_click(self, *, ws: str, user_id: str, title: str, reply_id: str) -> bool:
+    async def _check_deferred_no_reply_jobs(self, ws: str) -> None:
+        """Check for and execute any deferred no_reply jobs whose fire_at has passed.
+        
+        Called on each inbound webhook to ensure jobs execute even when Cloud Run
+        throttles CPU between requests (which kills asyncio.sleep tasks).
+        """
+        try:
+            _db_key = f"deferred_no_reply_jobs:{_coerce_workspace(ws)}"
+            _raw = None
+            try:
+                _raw = await self.db_manager.get_setting(_db_key)
+            except Exception:
+                return
+            if not _raw:
+                return
+            try:
+                if isinstance(_raw, (bytes, bytearray)):
+                    _raw = _raw.decode("utf-8", errors="ignore")
+                jobs = json.loads(_raw) if isinstance(_raw, str) else []
+                if not isinstance(jobs, list):
+                    return
+            except Exception:
+                return
+            if not jobs:
+                return
+            now = datetime.utcnow()
+            remaining = []
+            executed = 0
+            for job in jobs:
+                try:
+                    if not isinstance(job, dict):
+                        continue
+                    fire_at_str = str(job.get("fire_at") or "")
+                    if not fire_at_str:
+                        continue
+                    fire_at = datetime.fromisoformat(fire_at_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if now < fire_at:
+                        remaining.append(job)
+                        continue
+                    # Job is due – execute it
+                    _rid = str(job.get("rule_id") or "")
+                    _uid = str(job.get("user_id") or "")
+                    _ws = str(job.get("ws") or ws)
+                    _wamid = str(job.get("inbound_wa_message_id") or "")
+                    _no_order_hours = float(job.get("no_order_hours") or 0)
+                    _keep_unresponded = bool(job.get("keep_unresponded"))
+                    _once_per_customer = bool(job.get("once_per_customer"))
+                    _rule = job.get("rule") or {}
+                    logger.info(f"deferred_no_reply: EXECUTING rule={_rid} user={_uid} ws={_ws} (was scheduled at {job.get('created_at')})")
+                    # Check if user has replied since
+                    if _wamid:
+                        try:
+                            if await self.db_manager.has_inbound_reply(user_id=_uid, inbound_wa_message_id=_wamid):
+                                logger.info(f"deferred_no_reply: SKIP rule={_rid} user={_uid} – has reply")
+                                continue
+                        except Exception:
+                            pass
+                    if _once_per_customer:
+                        try:
+                            already_sent = await self.db_manager.has_automation_rule_once_sent(workspace=_ws, rule_id=_rid, user_id=_uid)
+                            if already_sent:
+                                logger.info(f"deferred_no_reply: SKIP rule={_rid} user={_uid} – once_per_customer already sent")
+                                continue
+                        except Exception:
+                            pass
+                    if _no_order_hours > 0:
+                        try:
+                            has_recent = await self._has_shopify_order_in_last_hours(user_id=_uid, hours=_no_order_hours, workspace=_ws)
+                            if has_recent:
+                                logger.info(f"deferred_no_reply: SKIP rule={_rid} user={_uid} – has recent order")
+                                continue
+                        except Exception:
+                            pass
+                    # Execute actions
+                    actions = _rule.get("actions") if isinstance(_rule.get("actions"), list) else []
+                    sent_any_message = False
+                    for act in actions:
+                        if not isinstance(act, dict):
+                            continue
+                        atype = str(act.get("type") or "")
+                        try:
+                            if atype == "send_whatsapp_text":
+                                _txt = self._render_template(str(act.get("text") or ""), {"phone": _uid, "contact_name": ""})
+                                if _txt.strip():
+                                    await self._send_wa_text(workspace=_ws, to=_uid, text=_txt)
+                                    sent_any_message = True
+                            elif atype == "send_whatsapp_template":
+                                tname = str(act.get("template_name") or "")
+                                tlang = str(act.get("language") or "en")
+                                comps = act.get("components") if isinstance(act.get("components"), list) else []
+                                if tname:
+                                    await self._send_wa_template(workspace=_ws, to=_uid, template_name=tname, language=tlang, components=comps)
+                                    sent_any_message = True
+                            elif atype == "send_catalog_set":
+                                await self._send_catalog_set(workspace=_ws, to=_uid, set_id=str(act.get("set_id") or ""), caption=str(act.get("caption") or ""))
+                                sent_any_message = True
+                            elif atype == "ai_analyze_reply":
+                                logger.info(f"deferred_no_reply: triggering AI analyze for user={_uid} ws={_ws}")
+                                try:
+                                    await self._execute_ai_analyze_reply(workspace=_ws, user_id=_uid, action_config=act, rule=_rule)
+                                    sent_any_message = True
+                                except Exception as ai_exc:
+                                    logger.info(f"deferred_no_reply: AI analyze error: {ai_exc}")
+                        except Exception as act_exc:
+                            logger.info(f"deferred_no_reply: action error type={atype}: {act_exc}")
+                    # Log node status for UI
+                    try:
+                        _run_key = f"flow_run_result:{_ws}:{_rid}"
+                        _ts = datetime.utcnow().isoformat() + "Z"
+                        _existing_status = {}
+                        try:
+                            _sr = await self.db_manager.get_setting(_run_key)
+                            if _sr:
+                                if isinstance(_sr, (bytes, bytearray)):
+                                    _sr = _sr.decode("utf-8", errors="ignore")
+                                _existing_status = json.loads(_sr) if isinstance(_sr, str) else {}
+                        except Exception:
+                            pass
+                        _fg = (_rule.get("meta") or {}).get("flow_graph") or {}
+                        _fnodes = _fg.get("nodes") if isinstance(_fg.get("nodes"), list) else []
+                        for _fn in _fnodes:
+                            if not isinstance(_fn, dict):
+                                continue
+                            _fid = str(_fn.get("id") or "")
+                            if not _fid:
+                                continue
+                            _ftype = str(_fn.get("type") or "")
+                            if _ftype in ("addStep",):
+                                continue
+                            _existing_status[_fid] = {"status": "success", "message": f"Executed for {_uid}", "timestamp": _ts}
+                        await self.db_manager.set_setting(_run_key, json.dumps(_existing_status, ensure_ascii=False))
+                    except Exception:
+                        pass
+                    if _once_per_customer and sent_any_message:
+                        try:
+                            await self.db_manager.mark_automation_rule_once_sent(workspace=_ws, rule_id=_rid, user_id=_uid)
+                        except Exception:
+                            pass
+                    if _keep_unresponded and sent_any_message:
+                        try:
+                            await self.db_manager.mark_conversation_unresponded(user_id=_uid)
+                        except Exception:
+                            pass
+                    executed += 1
+                    logger.info(f"deferred_no_reply: DONE rule={_rid} user={_uid} sent={sent_any_message}")
+                except Exception as job_exc:
+                    logger.info(f"deferred_no_reply: job error: {job_exc}")
+            # Save remaining (not-yet-due) jobs back
+            try:
+                if remaining:
+                    await self.db_manager.set_setting(_db_key, json.dumps(remaining, ensure_ascii=False))
+                else:
+                    await self.db_manager.set_setting(_db_key, "[]")
+            except Exception:
+                pass
+            if executed:
+                logger.info(f"deferred_no_reply: executed {executed} jobs for ws={ws}, {len(remaining)} remaining")
+        except Exception as exc:
+            logger.info(f"deferred_no_reply: check error: {exc}")
+
+        async def _handle_order_confirm_click(self, *, ws: str, user_id: str, title: str, reply_id: str) -> bool:
         """If a pending order-confirmation flow exists and this click matches a branch, execute it."""
         try:
             state = await self._get_order_confirm_pending(ws=ws, user_id=user_id)
@@ -14935,6 +15136,51 @@ async def get_flow_run_status(flow_id: str, _: dict = Depends(require_admin)):
     except Exception:
         data = {}
     return {"flow_id": flow_id, "nodes": data if isinstance(data, dict) else {}}
+
+
+# ---- Deferred no_reply job checker (self-ping) ----
+@app.get("/automation/check-deferred")
+async def check_deferred_endpoint():
+    """Endpoint to trigger deferred no_reply job execution.
+    Can be called by Cloud Scheduler or any periodic ping."""
+    try:
+        all_ws = list(_all_workspaces_set())
+        executed_total = 0
+        for ws in all_ws:
+            try:
+                await message_processor._check_deferred_no_reply_jobs(ws)
+            except Exception:
+                pass
+        return {"ok": True, "workspaces_checked": len(all_ws)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ---- Deferred no_reply periodic checker ----
+async def _periodic_deferred_checker():
+    """Background task that checks for deferred no_reply jobs every 30 seconds."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            all_ws = list(_all_workspaces_set())
+            for ws in all_ws:
+                try:
+                    await message_processor._check_deferred_no_reply_jobs(ws)
+                except Exception:
+                    pass
+        except Exception:
+            await asyncio.sleep(5)
+
+# Start the periodic checker on startup
+_deferred_checker_started = False
+
+@app.on_event("startup")
+async def _start_deferred_checker():
+    global _deferred_checker_started
+    if not _deferred_checker_started:
+        _deferred_checker_started = True
+        asyncio.create_task(_periodic_deferred_checker())
+        logger.info("deferred_no_reply: periodic checker started (30s interval)")
 
 
 # ---- Inbox environment settings (workspace-scoped, editable from UI) ----

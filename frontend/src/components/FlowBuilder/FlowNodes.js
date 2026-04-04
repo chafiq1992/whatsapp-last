@@ -3,7 +3,7 @@ import { Handle, Position } from '@xyflow/react';
 import {
   ShoppingCart, MessageSquare, ScanLine, Activity, Plus,
   SplitSquareHorizontal, Timer, Ban, Zap, MousePointerClick,
-  AlertTriangle,
+  AlertTriangle, CheckCircle2, XCircle,
 } from 'lucide-react';
 
 /* ── colour map ─────────────────────────────────────────── */
@@ -49,6 +49,36 @@ function MetricsBadge({ metrics }) {
   );
 }
 
+/* ── Last run status badge ──────────────────────────────── */
+function LastRunBadge({ status }) {
+  if (!status) return null;
+  const isSuccess = status.status === 'success';
+  const isError = status.status === 'error';
+  if (!isSuccess && !isError) return null;
+  const timeAgo = status.timestamp ? (() => {
+    try {
+      const diff = Date.now() - new Date(status.timestamp).getTime();
+      const mins = Math.round(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.round(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      return Math.round(hrs / 24) + 'd ago';
+    } catch { return ''; }
+  })() : '';
+  return (
+    <div
+      className={`absolute -bottom-2.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full shadow-lg border-2 border-white cursor-help transition-all ${
+        isSuccess ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white'
+      }`}
+      title={isError ? `Error: ${status.message || 'Unknown error'}\n${timeAgo}` : `Success ${timeAgo}`}
+    >
+      {isSuccess ? <CheckCircle2 className="w-2.5 h-2.5" /> : <XCircle className="w-2.5 h-2.5" />}
+      <span>{isSuccess ? (timeAgo || '✓') : '✗'}</span>
+    </div>
+  );
+}
+
 /* ── Handle with hover glow for discoverability ──────── */
 function ConnectableHandle({ type, position, id, className, style, ...rest }) {
   return (
@@ -74,6 +104,7 @@ export function StartTriggerNode({ data }) {
     >
       <ErrorBadge errors={errors} />
       <MetricsBadge metrics={data?.metrics} />
+      <LastRunBadge status={data?.lastRunStatus} />
       {isConfigured ? (
         <div className={`rounded-2xl shadow-lg border-2 ${TRIGGER_COLOURS[data.source]?.border || 'border-emerald-300'} ${TRIGGER_COLOURS[data.source]?.bg || 'bg-emerald-50'} p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02]`}>
           <div className="flex items-center gap-3 mb-3">
@@ -117,6 +148,7 @@ export function ConditionFlowNode({ data }) {
     >
       <ErrorBadge errors={errors} />
       <MetricsBadge metrics={data?.metrics} />
+      <LastRunBadge status={data?.lastRunStatus} />
       <ConnectableHandle type="target" position={Position.Top} className="!bg-amber-500" />
       <div className="rounded-2xl shadow-lg border-2 border-amber-300 bg-amber-50 p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02]">
         <div className="flex items-center gap-3 mb-3">
@@ -164,6 +196,7 @@ export function ActionFlowNode({ data }) {
     >
       <ErrorBadge errors={errors} />
       <MetricsBadge metrics={data?.metrics} />
+      <LastRunBadge status={data?.lastRunStatus} />
       <ConnectableHandle type="target" position={Position.Top} className="!bg-blue-500" />
       <div className={`rounded-2xl shadow-lg border-2 p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02] ${isExit ? 'border-rose-300 bg-rose-50' : 'border-blue-300 bg-blue-50'}`}>
         <div className="flex items-center gap-3 mb-3">
@@ -242,6 +275,7 @@ export function DelayFlowNode({ data }) {
     >
       <ErrorBadge errors={errors} />
       <MetricsBadge metrics={data?.metrics} />
+      <LastRunBadge status={data?.lastRunStatus} />
       <ConnectableHandle type="target" position={Position.Top} className="!bg-violet-500" />
       <div className="rounded-2xl shadow-lg border-2 border-violet-300 bg-violet-50 p-5 min-w-[280px] transition-all hover:shadow-xl hover:scale-[1.02]">
         <div className="flex items-center gap-3 mb-3">
@@ -275,6 +309,7 @@ export function ButtonReplyNode({ data }) {
     >
       <ErrorBadge errors={errors} />
       <MetricsBadge metrics={data?.metrics} />
+      <LastRunBadge status={data?.lastRunStatus} />
       <ConnectableHandle type="target" position={Position.Top} className="!bg-indigo-400" />
       <div className="rounded-xl shadow-md border-2 border-indigo-300 bg-indigo-50 px-4 py-3 min-w-[200px] transition-all hover:shadow-lg hover:scale-[1.02]">
         <div className="flex items-center gap-2 mb-1.5">

@@ -14,7 +14,8 @@ import {
   SplitSquareHorizontal, Timer, Ban,
   ChevronRight, X, List, Package, Search,
   CheckCircle, FileText, BarChart2, MousePointerClick,
-  Sparkles, Send, Loader2, Tag, Globe, Upload,
+  Sparkles, Send, Loader2, Tag, Globe, Upload, Clock,
+  CheckCircle2, XCircle, AlertCircle,
 } from 'lucide-react';
 import EmojiPicker from 'emoji-picker-react';
 
@@ -135,7 +136,7 @@ const WHATSAPP_EVENTS = [
     { key: 'media_type', label: 'Media Type' }, { key: 'media_url', label: 'Media URL' }, { key: 'caption', label: 'Media Caption' },
     { key: 'conversation_status', label: 'Conversation Status' }, { key: 'minutes_waiting', label: 'Minutes Waiting', type: 'number' },
   ]},
-  { id: 'no_reply', label: 'No Agent Reply', cat: 'Messages', mode: 'no_reply', variables: [
+  { id: 'no_reply', label: 'No Reply (Customer Idle)', cat: 'Messages', mode: 'no_reply', variables: [
     { key: 'phone', label: 'Customer Phone' }, { key: 'contact_name', label: 'Contact Name' },
     { key: 'minutes_waiting', label: 'Minutes Waiting', type: 'number' },
     { key: 'last_message_text', label: 'Last Message' }, { key: 'conversation_status', label: 'Conv. Status' },
@@ -548,6 +549,15 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   // Current flow-level stats (triggers, messages_sent)
   const flowStat = flowStats || {};
 
+  // Last run status per node (fetched from backend)
+  const [lastRunStatus, setLastRunStatus] = useState({});
+  useEffect(() => {
+    if (!flowId) return;
+    api.get(`/automation/rules/run-status/${flowId}`).then(res => {
+      if (res?.data?.nodes) setLastRunStatus(res.data.nodes);
+    }).catch(() => {});
+  }, [flowId]);
+
   const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [nodes, selectedNodeId]);
   const currentTriggerNode = useMemo(() => nodes.find(n => n.type === 'startTrigger' && n.data?.configured), [nodes]);
 
@@ -640,6 +650,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       data: {
         ...n.data,
         errors: validationErrors.get(n.id) || null,
+        lastRunStatus: lastRunStatus[n.id] || null,
         onSelect: () => {
           if (n.type === 'startTrigger' && !n.data.configured) { onTriggerSelect(); }
           else if (n.type === 'addStep' || n.type === 'addStepFlow') { onAddStepClick(n.id); }
@@ -903,6 +914,15 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
   const configureTrigger = useCallback((source, event, label) => {
     const triggerNode = nodes.find(n => n.type === 'startTrigger');
     if (!triggerNode) return;
+    const isNoReply = source === 'whatsapp' && event === 'no_reply';
+    const noReplyDefaults = isNoReply ? {
+      noReplySeconds: triggerNode.data?.noReplySeconds || 14400,
+      noReplyUnit: triggerNode.data?.noReplyUnit || 'hours',
+      noReplyValue: triggerNode.data?.noReplyValue || 4,
+      noOrderInLastHours: triggerNode.data?.noOrderInLastHours || 0,
+      oncePerCustomer: triggerNode.data?.oncePerCustomer !== undefined ? triggerNode.data.oncePerCustomer : true,
+      keepUnresponded: triggerNode.data?.keepUnresponded !== undefined ? triggerNode.data.keepUnresponded : true,
+    } : {};
     setNodes(prev => prev.map(n => {
       if (n.id !== triggerNode.id) return n;
       return {
@@ -913,7 +933,8 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
           source,
           event,
           label,
-          description: `${source}: ${event}`,
+          description: isNoReply ? `Customer hasn't replied in ${noReplyDefaults.noReplyValue} ${noReplyDefaults.noReplyUnit}` : `${source}: ${event}`,
+          ...noReplyDefaults,
         },
       };
     }));
@@ -1025,6 +1046,19 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       trigger.event = event;
     } else if (source === 'delivery') {
       trigger.event = event || 'status_change';
+    }
+
+    // For no_reply triggers, build condition from trigger node data
+    const isNoReply = source === 'whatsapp' && event === 'no_reply';
+    let noReplyCondition = {};
+    if (isNoReply) {
+      const td = triggerNode.data;
+      noReplyCondition = {
+        seconds: Number(td.noReplySeconds) || 14400,
+        no_order_in_last_hours: Number(td.noOrderInLastHours) || 0,
+        once_per_customer: td.oncePerCustomer !== false,
+        keep_unresponded: td.keepUnresponded !== false,
+      };
     }
 
     // Walk the graph from trigger to collect condition & actions
@@ -1242,13 +1276,38 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
       actions.push({ type: 'send_whatsapp_text', to: '{{ phone }}', text: '' });
     }
 
+    // Merge no_reply condition + handle special __no_order_in_*__ fields
+    const mergedCondition = isNoReply ? { ...condition, ...noReplyCondition } : { ...condition };
+    if (mergedCondition.conditions && Array.isArray(mergedCondition.conditions)) {
+      const normalConds = [];
+      for (const cnd of mergedCondition.conditions) {
+        if (cnd.field === '__no_order_in_hours__') {
+          mergedCondition.no_order_in_last_hours = Number(cnd.value) || 0;
+        } else if (cnd.field === '__no_order_in_minutes__') {
+          mergedCondition.no_order_in_last_hours = (Number(cnd.value) || 0) / 60;
+        } else {
+          normalConds.push(cnd);
+        }
+      }
+      mergedCondition.conditions = normalConds;
+    }
+    if (condition.field === '__no_order_in_hours__') {
+      mergedCondition.no_order_in_last_hours = Number(condition.value) || 0;
+      delete mergedCondition.field; delete mergedCondition.operator; delete mergedCondition.value;
+      delete mergedCondition.expression; delete mergedCondition.match;
+    } else if (condition.field === '__no_order_in_minutes__') {
+      mergedCondition.no_order_in_last_hours = (Number(condition.value) || 0) / 60;
+      delete mergedCondition.field; delete mergedCondition.operator; delete mergedCondition.value;
+      delete mergedCondition.expression; delete mergedCondition.match;
+    }
+
     const rule = {
       id: flowId || `flow_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       name: flowName || 'Untitled Flow',
       enabled: flowEnabled,
       workspaces: [ws],
       trigger,
-      condition,
+      condition: mergedCondition,
       actions,
       meta: { created_by: 'flow_builder', flow_graph: { nodes: nodes.map(n => ({ ...n, data: { ...n.data, onSelect: undefined, onAdd: undefined } })), edges } },
     };
@@ -1413,6 +1472,7 @@ function FlowBuilderCanvas({ initialFlow, templates, onBack, onSaveToBackend, al
               triggerNode={currentTriggerNode}
               validationErrors={validationErrors}
               flowStat={flowStat}
+              lastRunStatus={lastRunStatus}
             />
           )}
         </div>
@@ -1906,6 +1966,41 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
             <div className="text-emerald-600">{d.source}: {d.event || d.label}</div>
           </div>
           <button className="w-full px-4 py-2.5 rounded-lg border border-slate-200 text-sm hover:bg-slate-50" onClick={() => onSelectTrigger && onSelectTrigger(d.source, d.event, d.label)}>Change trigger...</button>
+
+          {/* ── No Reply Timing Configuration ── */}
+          {d.source === 'whatsapp' && d.event === 'no_reply' && (
+            <div className="p-4 rounded-xl border border-green-200 bg-green-50 space-y-3">
+              <div className="text-xs font-bold uppercase tracking-widest text-green-700 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" /> Idle Timer</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Wait time</label>
+                  <input type="number" min="1" step="1" className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={d.noReplyValue || 4} onChange={(e) => { const val = Math.max(1, Number(e.target.value) || 1); const unit = d.noReplyUnit || 'hours'; const secs = unit === 'hours' ? val * 3600 : val * 60; onUpdate({ noReplyValue: val, noReplySeconds: secs, description: `Customer hasn't replied in ${val} ${unit}` }); }} />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 mb-1 block">Unit</label>
+                  <select className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={d.noReplyUnit || 'hours'} onChange={(e) => { const unit = e.target.value; const val = d.noReplyValue || 4; const secs = unit === 'hours' ? val * 3600 : val * 60; onUpdate({ noReplyUnit: unit, noReplySeconds: secs, description: `Customer hasn't replied in ${val} ${unit}` }); }}>
+                    <option value="minutes">Minutes</option>
+                    <option value="hours">Hours</option>
+                  </select>
+                </div>
+              </div>
+              <div className="bg-white/60 rounded-lg px-3 py-2 text-xs text-green-700">\u23f1 Will fire after <span className="font-bold">{d.noReplyValue || 4} {d.noReplyUnit || 'hours'}</span> of no customer reply</div>
+              <div>
+                <label className="text-xs font-semibold text-slate-500 mb-1 block">Skip if order in last (hours)</label>
+                <input type="number" min="0" step="1" className="w-full border rounded-lg px-3 py-2 text-sm bg-white" value={d.noOrderInLastHours || 0} onChange={(e) => onUpdate({ noOrderInLastHours: Math.max(0, Number(e.target.value) || 0) })} placeholder="0 = disabled" />
+                <p className="text-[10px] text-slate-400 mt-1">Skip if customer placed a Shopify order in N hrs. 0 = disabled.</p>
+              </div>
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input type="checkbox" className="rounded border-slate-300" checked={d.oncePerCustomer !== false} onChange={(e) => onUpdate({ oncePerCustomer: e.target.checked })} />
+                <span className="text-slate-600 font-medium">Once per customer</span>
+              </label>
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input type="checkbox" className="rounded border-slate-300" checked={d.keepUnresponded !== false} onChange={(e) => onUpdate({ keepUnresponded: e.target.checked })} />
+                <span className="text-slate-600 font-medium">Keep as unresponded</span>
+              </label>
+            </div>
+          )}
+
           <div>
             <div className="text-xs font-semibold text-slate-500 mb-1">Available variables ({trigVars.filter(v => v.key !== '__custom__').length}):</div>
             <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
@@ -1933,6 +2028,14 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                 const conds = [...(d.conditions || []), { field: 'source_name', operator: '!=', value: 'draft_orders' }];
                 onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
               }}>Exclude Drafts</button>
+              <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors font-medium" onClick={() => {
+                const conds = [...(d.conditions || []), { field: '__no_order_in_hours__', operator: '>=', value: '96' }];
+                onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
+              }}>\ud83d\uded2 No Order in X Hours</button>
+              <button type="button" className="px-3 py-1.5 text-xs rounded-lg border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 transition-colors font-medium" onClick={() => {
+                const conds = [...(d.conditions || []), { field: '__no_order_in_minutes__', operator: '>=', value: '30' }];
+                onUpdate({ conditions: conds, expression: `${conds.length} condition(s)` });
+              }}>\ud83d\uded2 No Order in X Minutes</button>
             </div>
           </div>
 
@@ -1953,6 +2056,10 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                   onUpdate({ conditions: conds });
                 }}>
                   <option value=""> - Select variable  -</option>
+                  <optgroup label="── Shopify Lookups ──">
+                    <option value="__no_order_in_hours__">🛒 No Order in Last X Hours</option>
+                    <option value="__no_order_in_minutes__">🛒 No Order in Last X Minutes</option>
+                  </optgroup>
                   {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
                 </select>
                 <div className="grid grid-cols-2 gap-2">
@@ -1990,6 +2097,10 @@ function NodeEditorPanel({ node, templates, onClose, onUpdate, onDelete, onSelec
                 onUpdate({ field: f, fieldLabel: vDef?.label || f, expression: `${vDef?.label || f} ${d.operator || '=='} ${d.value || ''}` });
               }}>
                 <option value=""> - Select a variable  -</option>
+                <optgroup label="── Shopify Lookups ──">
+                  <option value="__no_order_in_hours__">🛒 No Order in Last X Hours</option>
+                  <option value="__no_order_in_minutes__">🛒 No Order in Last X Minutes</option>
+                </optgroup>
                 {trigVars.map(v => (<option key={v.key} value={v.key}>{v.label}{v.type ? ` (${v.type})` : ''}</option>))}
               </select>
               {(d.field === '__custom__' || customField !== '') && (
@@ -2579,8 +2690,21 @@ export default function FlowBuilder() {
     const event = rule?.trigger?.event || 'message';
     const evLabel = SHOPIFY_EVENTS.find(e => e.id === event)?.label || WHATSAPP_EVENTS.find(e => e.id === event)?.label || event;
 
+    // Restore no_reply timing config from condition if available
+    const ruleCond = rule?.condition || {};
+    const noReplyExtra = (source === 'whatsapp' && event === 'no_reply') ? {
+      noReplySeconds: Number(ruleCond.seconds) || 14400,
+      noReplyUnit: (Number(ruleCond.seconds) || 14400) % 3600 === 0 ? 'hours' : 'minutes',
+      noReplyValue: (Number(ruleCond.seconds) || 14400) % 3600 === 0 ? Math.round((Number(ruleCond.seconds) || 14400) / 3600) : Math.round((Number(ruleCond.seconds) || 14400) / 60),
+      noOrderInLastHours: Number(ruleCond.no_order_in_last_hours) || 0,
+      oncePerCustomer: ruleCond.once_per_customer !== false,
+      keepUnresponded: ruleCond.keep_unresponded !== false,
+    } : {};
+    const trigDesc = (source === 'whatsapp' && event === 'no_reply')
+      ? `Customer hasn't replied in ${noReplyExtra.noReplyValue} ${noReplyExtra.noReplyUnit}`
+      : `${source}: ${event}`;
     const nodes = [
-      rfNode(trigId, 'startTrigger', 0, 0, { configured: true, source, event, label: evLabel, description: `${source}: ${event}` }),
+      rfNode(trigId, 'startTrigger', 0, 0, { configured: true, source, event, label: evLabel, description: trigDesc, ...noReplyExtra }),
     ];
     const edges = [];
 

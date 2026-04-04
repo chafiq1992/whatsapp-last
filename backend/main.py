@@ -9878,6 +9878,48 @@ class MessageProcessor:
                                                 pass
                                     except Exception:
                                         pass
+                            # Log per-node run status for UI display
+                            try:
+                                _run_key = f"flow_run_result:{_coerce_workspace(ws)}:{_rid}"
+                                _ts = datetime.utcnow().isoformat() + "Z"
+                                _existing_raw = None
+                                try:
+                                    _existing_raw = await self.db_manager.get_setting(_run_key)
+                                except Exception:
+                                    pass
+                                _existing = {}
+                                if _existing_raw:
+                                    try:
+                                        if isinstance(_existing_raw, (bytes, bytearray)):
+                                            _existing_raw = _existing_raw.decode("utf-8", errors="ignore")
+                                        _existing = json.loads(_existing_raw) if isinstance(_existing_raw, str) else {}
+                                    except Exception:
+                                        _existing = {}
+                                # Mark all action nodes as success (best-effort)
+                                _fg = (_rule.get("meta") or {}).get("flow_graph") or {}
+                                _fnodes = _fg.get("nodes") if isinstance(_fg.get("nodes"), list) else []
+                                for _fn in _fnodes:
+                                    if not isinstance(_fn, dict):
+                                        continue
+                                    _fid = str(_fn.get("id") or "")
+                                    if not _fid:
+                                        continue
+                                    _ftype = str(_fn.get("type") or "")
+                                    if _ftype in ("addStep",):
+                                        continue
+                                    if _ftype == "startTrigger":
+                                        _existing[_fid] = {"status": "success", "message": f"Triggered for {user_id}", "timestamp": _ts}
+                                    elif _ftype == "actionFlow":
+                                        _existing[_fid] = {"status": "success" if sent_any_message else "skipped", "message": "Executed" if sent_any_message else "Skipped (no message sent)", "timestamp": _ts}
+                                    elif _ftype == "conditionFlow":
+                                        _existing[_fid] = {"status": "success", "message": "Evaluated", "timestamp": _ts}
+                                    elif _ftype == "delayFlow":
+                                        _existing[_fid] = {"status": "success", "message": "Waited", "timestamp": _ts}
+                                    else:
+                                        _existing[_fid] = {"status": "success", "message": "Processed", "timestamp": _ts}
+                                await self.db_manager.set_setting(_run_key, json.dumps(_existing, ensure_ascii=False))
+                            except Exception:
+                                pass
                             if _once_per_customer and sent_any_message:
                                 try:
                                     await self.db_manager.mark_automation_rule_once_sent(
@@ -14850,6 +14892,28 @@ async def get_automation_rules_stats_endpoint(_: dict = Depends(require_admin)):
         except Exception:
             continue
     return {"workspace": ws, "stats": out}
+
+
+# ---- Flow run status (per-node last-run result) ----
+@app.get("/automation/rules/run-status/{flow_id}")
+async def get_flow_run_status(flow_id: str, _: dict = Depends(require_admin)):
+    """Return last run result per node for a specific flow."""
+    ws = get_current_workspace()
+    key = f"flow_run_result:{_coerce_workspace(ws)}:{flow_id}"
+    raw = None
+    try:
+        raw = await db_manager.get_setting(key)
+    except Exception:
+        pass
+    if not raw:
+        return {"flow_id": flow_id, "nodes": {}}
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="ignore")
+        data = json.loads(raw) if isinstance(raw, str) else {}
+    except Exception:
+        data = {}
+    return {"flow_id": flow_id, "nodes": data if isinstance(data, dict) else {}}
 
 
 # ---- Inbox environment settings (workspace-scoped, editable from UI) ----

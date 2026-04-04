@@ -1,11 +1,11 @@
 import React from 'react';
-import { Zap, BarChart2, MessageSquare } from 'lucide-react';
+import { Zap, BarChart2, MessageSquare, CheckCircle2, XCircle, Clock } from 'lucide-react';
 
 /**
  * FlowSummaryPanel — Always-visible side panel showing flow overview
  * when no node/picker is selected.
  */
-export default function FlowSummaryPanel({ nodes, edges, flowName, flowEnabled, triggerNode, validationErrors, flowStat }) {
+export default function FlowSummaryPanel({ nodes, edges, flowName, flowEnabled, triggerNode, validationErrors, flowStat, lastRunStatus }) {
   const realNodes = (nodes || []).filter(n => n.type !== 'addStep');
   const actionCount = realNodes.filter(n => n.type === 'actionFlow').length;
   const conditionCount = realNodes.filter(n => n.type === 'conditionFlow').length;
@@ -110,6 +110,42 @@ export default function FlowSummaryPanel({ nodes, edges, flowName, flowEnabled, 
             <div className="text-xs text-emerald-600">All nodes are properly configured and connected.</div>
           )}
         </div>
+
+        {/* Last Run Status */}
+        {lastRunStatus && Object.keys(lastRunStatus).length > 0 && (() => {
+          const entries = Object.entries(lastRunStatus);
+          const successCount = entries.filter(([, v]) => v?.status === 'success').length;
+          const errorCount = entries.filter(([, v]) => v?.status === 'error').length;
+          const lastTs = entries.map(([, v]) => v?.timestamp).filter(Boolean).sort().pop();
+          const allSuccess = errorCount === 0 && successCount > 0;
+          return (
+            <div className={`p-4 rounded-xl border ${allSuccess ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50'}`}>
+              <div className={`text-xs font-bold uppercase tracking-widest mb-2 ${allSuccess ? 'text-emerald-600' : 'text-rose-600'}`}>
+                Last Run
+              </div>
+              <div className="flex items-center gap-2 mb-2">
+                {allSuccess
+                  ? <><CheckCircle2 className="w-4 h-4 text-emerald-500" /><span className="text-sm font-semibold text-emerald-700">All nodes succeeded</span></>
+                  : <><XCircle className="w-4 h-4 text-rose-500" /><span className="text-sm font-semibold text-rose-700">{errorCount} node{errorCount !== 1 ? 's' : ''} failed</span></>
+                }
+              </div>
+              {errorCount > 0 && (
+                <div className="space-y-1 mb-2">
+                  {entries.filter(([, v]) => v?.status === 'error').slice(0, 4).map(([nodeId, v]) => {
+                    const n = (nodes || []).find(nd => nd.id === nodeId);
+                    return (
+                      <div key={nodeId} className="text-[11px] text-rose-700 flex items-start gap-1.5">
+                        <XCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                        <span><span className="font-semibold">{n?.data?.actionLabel || n?.data?.label || 'Node'}:</span> {v?.message || 'Error'}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {lastTs && <div className="text-[10px] text-slate-400 flex items-center gap-1"><Clock className="w-3 h-3" /> {new Date(lastTs).toLocaleString()}</div>}
+            </div>
+          );
+        })()}
 
         {/* Tips */}
         <div className="p-4 rounded-xl border border-slate-200 bg-slate-50">

@@ -8393,15 +8393,21 @@ class MessageProcessor:
                     txt = str(message_obj.get("interactive_title") or message_obj.get("message") or "")
                 ws = get_current_workspace()
                 asyncio.create_task(self._run_simple_automations(sender, incoming_text=txt, message_obj=message_obj, workspace=ws))
-                logger.info(f"inbound_message: user={sender} txt_len={len(txt or '')} wa_msg_id={str(message_obj.get('wa_message_id') or '').strip()[:20]} ws={ws}")
-                if txt and str(message_obj.get("wa_message_id") or "").strip():
-                    logger.info(f"inbound_message: scheduling no_reply_followups for user={sender} ws={ws}")
+                _wa_msg_id = str(message_obj.get("wa_message_id") or "").strip()
+                logger.info(f"inbound_message: user={sender} typ={typ} txt_len={len(txt or '')} wa_msg_id={_wa_msg_id[:20]} ws={ws}")
+                # Schedule no_reply followups for ANY inbound message type (not just text)
+                if _wa_msg_id:
+                    # Use txt if available, otherwise use a placeholder so the trigger still fires
+                    _nr_txt = txt or f"[{typ or 'unknown'}]"
+                    logger.info(f"inbound_message: scheduling no_reply_followups for user={sender} ws={ws} ws_coerced={_coerce_workspace(ws)} txt_preview={_nr_txt[:30]}")
                     asyncio.create_task(self._schedule_no_reply_followups(
                         ws=_coerce_workspace(ws),
                         user_id=sender,
-                        inbound_wa_message_id=str(message_obj.get("wa_message_id") or "").strip(),
-                        incoming_text=txt,
+                        inbound_wa_message_id=_wa_msg_id,
+                        incoming_text=_nr_txt,
                     ))
+                else:
+                    logger.info(f"inbound_message: NO wa_message_id for user={sender} ws={ws} – skipping no_reply scheduling")
             except Exception:
                 pass
 
